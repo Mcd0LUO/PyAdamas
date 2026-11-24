@@ -40,7 +40,7 @@
 
 ### 3.1 模块代理是什么类型
 
-ModuleInfo 增加 cpy_proxy 标志（src/module.h）。builtin_module("python")
+ModuleInfo 增加 cpy_proxy 标志（src/ir/module.h）。builtin_module("python")
 返回根代理；builtin_module("python.<任意名>") 按需生成子代理（开集，
 不预登记 stdlib/第三方包名）。代理没有 globals/classes 签名表。
 
@@ -185,7 +185,7 @@ id 单调递增，C 侧校验应答 id（失配 = 协议脱同步 → 崩溃路�
 
 ### 4.4 参数描述符（编译期静态类型 → 运行时机械遍历）
 
-lower_cpy.cpp cpy_desc 把每个实参的静态类型编码成自定界描述符
+lower/cpy.cpp cpy_desc 把每个实参的静态类型编码成自定界描述符
 （rt_json 同款语法）：n/b/i/f/s/y/?、(l<d>)、(t<d>...)、(d<k><v>)。
 逐个拼接（自定界，无需分隔符），随实参打包列表一起传给运行时。
 
@@ -209,7 +209,7 @@ cj_parse 先把整帧解析成纯 malloc 的 JSON DOM，再解码成 pyadamas �
   kind 2 临时列表（RC 托管），全 str 键判定后建 dict，逐对
   「先 own_inc 键 → set → unpin 值」，最后销毁临时键列表还它那份引用。
 - 结果交回生成代码：RcTempUnknown 按注册表接管初始引用（标量空操作）。
-  用了桥的模块必须保留 unknown 索引维护：ir.cpp 的**两级**分析
+  用了桥的模块必须保留 unknown 索引维护：ir/ir.cpp 的**两级**分析
   （needs_unknown_index 与 can_skip_index_maint→index_readonly）都把
   CpyCall/RcTempUnknown 拉黑。只改一级时实测 float 盒 print 出指针
   整数（index_readonly 让运行时新分配不进索引）——第四个坑。
@@ -217,28 +217,28 @@ cj_parse 先把整帧解析成纯 malloc 的 JSON DOM，再解码成 pyadamas �
 ## 5. 落地路径（文件清单）
 
 前端（语法零改动，语义在模块分支）：
-- src/module.h：ModuleInfo.cpy_proxy。
-- src/driver_build.cpp：模块表加 {"python", Native}；program_module /
+- src/ir/module.h：ModuleInfo.cpy_proxy。
+- src/driver/build.cpp：模块表加 {"python", Native}；program_module /
   check_load 对 python.* 前缀按需返回 builtin_module 代理。
-- src/builtin_sigs.cpp：builtin_module 生成根/子代理。
-- src/typecheck.cpp：hoist 对 from python import 跳过 bind_alias。
-- src/typecheck_stmt_forms.cpp：stmt_import_from 代理分支（含 * 拒绝）；
+- src/typecheck/builtin_sigs.cpp：builtin_module 生成根/子代理。
+- src/typecheck/typecheck.cpp：hoist 对 from python import 跳过 bind_alias。
+- src/typecheck/stmt_forms.cpp：stmt_import_from 代理分支（含 * 拒绝）；
   stmt_import 拒绝 import python。
-- src/typecheck_expr.cpp：代理裸属性读拒绝（只支持调用）。
-- src/typecheck_call_forms.cpp：代理调用放行 unknown + kwargs 拒绝；
+- src/typecheck/expr.cpp：代理裸属性读拒绝（只支持调用）。
+- src/typecheck/call_forms.cpp：代理调用放行 unknown + kwargs 拒绝；
   点子模块链调用分支。
-- src/typecheck_stmt.cpp：代理属性赋值拒绝。
+- src/typecheck/stmt.cpp：代理属性赋值拒绝。
 
 降级：
-- src/lower.cpp：scan_globals 对 from python import 不占全局槽。
-- src/lower_import.cpp：lower_import_from 代理别名登记（不发
+- src/lower/lower.cpp：scan_globals 对 from python import 不占全局槽。
+- src/lower/import.cpp：lower_import_from 代理别名登记（不发
   ImportModule）；lower_import 拒绝 import python。
-- src/lower_method.cpp：代理调用 → lower_cpy_call；点链拼模块名。
-- src/lower_cpy.cpp（新）：cpy_desc + lower_cpy_call（kind 0 实参打包
+- src/lower/method.cpp：代理调用 → lower_cpy_call；点链拼模块名。
+- src/lower/cpy.cpp（新）：cpy_desc + lower_cpy_call（kind 0 实参打包
   + 描述符拼接 + CallRt CpyCall + RcTempUnknown）。
-- src/ir_ops.h：RtFn::CpyCall + rt_name → pa_cpy_call。
-- src/codegen_call_rt.cpp：CpyCall 归 gen_rt_i4（四个整型/指针参数）。
-- src/ir.cpp：两级 unknown 索引分析拉黑 CpyCall/RcTempUnknown。
+- src/ir/ops.h：RtFn::CpyCall + rt_name → pa_cpy_call。
+- src/backend/call_rt.cpp：CpyCall 归 gen_rt_i4（四个整型/指针参数）。
+- src/ir/ir.cpp：两级 unknown 索引分析拉黑 CpyCall/RcTempUnknown。
 
 运行时：
 - runtime/rt_cpy.c（新，~1100 行）：worker 脚本 + 生命周期 + 帧发射 +
@@ -248,7 +248,7 @@ cj_parse 先把整帧解析成纯 malloc 的 JSON DOM，再解码成 pyadamas �
 - runtime/rt_internal.h：PYADAMAS_RC_CPYFLOAT + pa_cpy_call /
   pa_print_cpy_value 声明。
 - runtime/rt_core.c：pa_print_any 改用共享探针 + 桥类型分派。
-- CMakeLists.txt：RT_PARTS 加 cpy；编译器源加 lower_cpy.cpp。
+- CMakeLists.txt：RT_PARTS 加 cpy；编译器源加 lower/cpy.cpp。
 
 与 cimport 的界限：cimport 是**编译期 C ABI 直调**（.cpya 声明 →
 CallExtern，进程内、零 marshalling、类型静态确定）；cpybridge 是
@@ -385,7 +385,7 @@ regalloc 的块编号越界），不阻塞桥集成。
 
 步骤（0.303 正确性轮落地后）：
 1. rebase cpybridge 到 0.303 后的 master；冲突面预估：
-   - ir.cpp 两级索引分析：0.303 若动 exact-RC 判定需重对拉黑清单；
+   - ir/ir.cpp 两级索引分析：0.303 若动 exact-RC 判定需重对拉黑清单；
    - rt_core.c pa_print_any：0.302 的 saw_heap/探针改动已对齐，
      若 0.303 再动探针需重对；
    - typecheck hoist / lower scan_globals：小改，易合。

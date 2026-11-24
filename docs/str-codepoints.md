@@ -51,11 +51,11 @@
 | `runtime/rt_core.c:740-805` | `char_tab[256]` 是 256 个**单字节**驻留串；`True/False/None` 也走静态对象 | 0–127 仍是合法单码点串，可保留；0x80–0xFF 的单字节对象**不再是合法 str**（非法 UTF-8），`pa_char_str` 只服务 ASCII；新增 `pa_cp_str(uint32_t)` 产 1–4 字节的码点串（§2.5） |
 | `runtime/rt_core.c:279-313` | 短串 freelist 按**负载字节数** 8 字节分档（≤128） | 结构体 +8 后档位整体后移一档，逻辑不变；`rc_alloc` 的 `memset` 会把新增字段清零，所以**每个构造点必须显式写 `pub`**（§2.3 不变量） |
 | `runtime/rt_core.c:533-567` | `rc_alloc(size,...)`；STR 是叶子（`rt_core.c:346` 判定），GC 不扫负载 | 负载 +8 只影响 `h->size` 记账与池档位，GC/标记逻辑不动 |
-| `src/codegen.cpp:25-40` | `str_literal_hash`：对字面量字节算 FNV，长串编译期把哈希写进 `hash` | 不变（哈希仍按字节） |
-| `src/codegen.cpp:60-87` | 字面量在 `.data.rel.ro` 里按 `{len, hash, data}` 三字 + 字符区构造，`rc = INT64_MIN` | 改成 `{pub, len, hash, data}` 四字；`pub` 由编译器数码点；RELRO 只读意味着**不能懒算**（§2.6） |
-| `src/ir_types.h:236-242` | `intern_string(s)` 只按内容去重 | 必须按 `(kind, content)` 去重：`"中"` 与 `b"\xe4\xb8\xad"` 字节相同但 `pub` 不同（§2.6） |
-| `src/lexer.h:34-50,55-139,141-152` | `\u`/`\U`/八进制转义走 `append_utf8`；`\xNN` **原样塞一个字节** | str 字面量的 `\xNN` 必须改成「U+00NN 再编成 UTF-8」（否则 str 可能不是合法 UTF-8）；bytes 字面量反过来要保持原始字节（§2.3、§7.4） |
-| `src/lexer.h:666-679` | 普通字符串「先收原文再统一解码」，不区分 str/bytes | `decode_escapes` 要带 `is_bytes`（f-string 的字面量段永远是 str） |
+| `src/backend/codegen.cpp:25-40` | `str_literal_hash`：对字面量字节算 FNV，长串编译期把哈希写进 `hash` | 不变（哈希仍按字节） |
+| `src/backend/codegen.cpp:60-87` | 字面量在 `.data.rel.ro` 里按 `{len, hash, data}` 三字 + 字符区构造，`rc = INT64_MIN` | 改成 `{pub, len, hash, data}` 四字；`pub` 由编译器数码点；RELRO 只读意味着**不能懒算**（§2.6） |
+| `src/ir/types.h:236-242` | `intern_string(s)` 只按内容去重 | 必须按 `(kind, content)` 去重：`"中"` 与 `b"\xe4\xb8\xad"` 字节相同但 `pub` 不同（§2.6） |
+| `src/syntax/lexer.h:34-50,55-139,141-152` | `\u`/`\U`/八进制转义走 `append_utf8`；`\xNN` **原样塞一个字节** | str 字面量的 `\xNN` 必须改成「U+00NN 再编成 UTF-8」（否则 str 可能不是合法 UTF-8）；bytes 字面量反过来要保持原始字节（§2.3、§7.4） |
+| `src/syntax/lexer.h:666-679` | 普通字符串「先收原文再统一解码」，不区分 str/bytes | `decode_escapes` 要带 `is_bytes`（f-string 的字面量段永远是 str） |
 
 注：运行时字符串构造点一共 **168 行匹配**（其中 2 行是函数定义，实际调用点 165；`grep -rn 'str_alloc(\|str_new(' runtime/*.c | wc -l`），
 降级器里的字符串常量 **123 处**（`grep -rn 'const_str(' src/*.cpp | wc -l`）。这两类点
@@ -65,9 +65,9 @@
 
 | 位置 | 现状 | 改成码点后 |
 |---|---|---|
-| `src/codegen_ops.cpp:82-86` | `IrOp::Len` 无条件发 `movq (%rax), %rax`（读偏移 0）；list/tuple/dict/set/str/bytes 都靠它 | **布局按 §2.2 后一行不用改**：偏移 0 对 str 是码点数、对 bytes 仍是字节数 |
-| `src/codegen_ops.cpp:513-520` | `if s:` 也是读偏移 0 判非零 | 不变（空 ⇔ pub==0，与字节数是否为零等价） |
-| `src/lower_builtin_seq.cpp:6-33` | `len()`：`IrOp::Len`；range/deque 走运行时；类走 `__len__` | 语义直接变成码点数，**大量迭代/`range(len(s))` 代码自动跟着变**；`len(unknown)` 也自动正确（§2.2 的收益） |
+| `src/backend/ops.cpp:82-86` | `IrOp::Len` 无条件发 `movq (%rax), %rax`（读偏移 0）；list/tuple/dict/set/str/bytes 都靠它 | **布局按 §2.2 后一行不用改**：偏移 0 对 str 是码点数、对 bytes 仍是字节数 |
+| `src/backend/ops.cpp:513-520` | `if s:` 也是读偏移 0 判非零 | 不变（空 ⇔ pub==0，与字节数是否为零等价） |
+| `src/lower/builtin_seq.cpp:6-33` | `len()`：`IrOp::Len`；range/deque 走运行时；类走 `__len__` | 语义直接变成码点数，**大量迭代/`range(len(s))` 代码自动跟着变**；`len(unknown)` 也自动正确（§2.2 的收益） |
 | `runtime/rt_str.c:245-249`（现 `:393-403`） | `pa_str_eq`：先比指针（`a == b`）、再比字节长度，`len == 1` 时直接比一个字节，其余走 `sm_bytes_eq`（n ≤ 8 内联定长循环，n > 8 回落 `memcmp`） | 不变（字节相等 ⇔ 码点相等） |
 | `runtime/rt_str.c:251-259`（现 `:405-413`） | `pa_str_cmp`：`sm_bytes_cmp` 三路比较（n ≤ 8 内联，n > 8 回落 `memcmp`）；注释已指出 UTF-8 字节序与码点序一致 | 不变（可继续用，是少有的「不用改」点） |
 | `runtime/rt_dict.c:22-48` | 字典字符串 key 哈希 = 字节 FNV-1a + mix64；`s->len > 7` 时把哈希缓存进 `hash` | 不变（`len` 仍是字节数，阈值条件不用改）；hash 值与 CPython 本来就不同（compatibility.md） |
@@ -86,25 +86,25 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | 位置 | 现状 | 改成码点后 |
 |---|---|---|
 | `runtime/rt_str.c:60-64` | `pa_str_char_at(s,i)`：`i += s->len` 后用**字节下标**取 `s->data[i]`，返回 `pa_char_str(byte)` 单字节串 | 负索引改用 nchars；把码点下标映射成字节偏移（扫描），返回该码点的 1–4 字节串（ASCII 仍走驻留表） |
-| `runtime/rt_slice.c:75-94` | `pa_str_slice`：`slice_bounds(len=字节数)`，步长 1 直接 `memcpy`；遇到 `count==1` 走 `pa_char_str` 单字节 | 边界按码点归一化；需先求码点→字节偏移表（最多扫两遍）；`count==1` 返回码点串；**bytes 切片必须分家**：新增 `pa_bytes_slice`（字节语义），降级按静态类型二选一（`src/lower_expr_container.cpp:22-31`） |
+| `runtime/rt_slice.c:75-94` | `pa_str_slice`：`slice_bounds(len=字节数)`，步长 1 直接 `memcpy`；遇到 `count==1` 走 `pa_char_str` 单字节 | 边界按码点归一化；需先求码点→字节偏移表（最多扫两遍）；`count==1` 返回码点串；**bytes 切片必须分家**：新增 `pa_bytes_slice`（字节语义），降级按静态类型二选一（`src/lower/expr_container.cpp:22-31`） |
 | `runtime/rt_slice.c:169-174` | `pa_str_to_list`：按字节拆 list[str]，每个字节一个串 | 按码点拆；内部用字节游标顺序推进（O(n)），不要逐个 `pa_str_char_at`（否则 O(n²)） |
 | `runtime/rt_slice.c:177-181` | `pa_bytes_to_list`：按字节拆 list[int] | 不变（bytes 迭代仍是 int） |
-| `src/lower_expr_container.cpp:106-118` | str 下标 → `IrOp::IndexLoad`，`def_heap`；bytes 下标走 `RtFn::BytesAt`（`:60-64`） | 不变（`pa_str_char_at` 语义变，调用点不变） |
-| `src/codegen_call.cpp:24-34` | str 的 `IndexLoad` 发 `call pa_str_char_at` | 函数名不变、实现变 |
-| `src/codegen_regalloc.cpp:413-418` | 字符串 `IndexLoad` 不借临时寄存器（「会真的调 pa_str_char_at」） | 不变，且更该如此（函数变贵） |
-| `src/lower_stmt.cpp:1015-1026,1063-1108` | `for ch in s`：`Len` 定上界 + 每轮 `IndexLoad`（str 走 `def_heap`） | 语义自动跟着 Len/char_at 变，但**每轮 O(i) 扫描 ⇒ O(n²)**；需在 S2 加顺序游标（§6.3） |
-| `src/lower_stmt.cpp:668-670,733-737` | `for i, v in enumerate(s)`：直接计数 + `IndexLoad` | 同上（游标优化要覆盖 enumerate） |
-| `src/lower_stmt.cpp:796-798,895-910` | `for a, b in zip(s, t)`：双计数 + `IndexLoad` | 同上（zip 每个序列一个游标） |
-| `src/lower_comp.cpp:288-299,378-384,412-421` | 推导式把 str 当索引序列；`IndexLoadUnchecked` 只对 list/tuple 打补丁 | 同上；补丁逻辑不要用到 str 上（str 没有免检查路径，见 `:412-421` 的条件） |
-| `src/lower_aggregate.cpp:169-182,404-433,561-580` | `min/max/sum/any/all` 单实参时按 `Len` + `IndexLoad` 消费 str | 语义跟着变；性能同上，且这些内置在长串上会 O(n²)，S2/S3 用游标或 `pa_str_to_list` 一次物化 |
-| `src/lower_call.cpp:93-102,637-650`、`lower_import_native.cpp:112-115,293-297`、`lower_import_stdlib.cpp:410-416`、`lower_method_misc.cpp:60-66`、`lower_expr_assign.cpp:120-126` | 6 处把 str `StrToList` 后按 list 消费（`*args` 展开、`list/tuple/sorted/reversed/enumerate/zip`、`deque(str)`、`random.choice(str)`、切片赋值的字符串右值） | 这 6 处**自动正确**（`pa_str_to_list` 改码点后即可）；前提是 `pa_str_to_list` 内部 O(n) |
+| `src/lower/expr_container.cpp:106-118` | str 下标 → `IrOp::IndexLoad`，`def_heap`；bytes 下标走 `RtFn::BytesAt`（`:60-64`） | 不变（`pa_str_char_at` 语义变，调用点不变） |
+| `src/backend/call.cpp:24-34` | str 的 `IndexLoad` 发 `call pa_str_char_at` | 函数名不变、实现变 |
+| `src/backend/regalloc.cpp:413-418` | 字符串 `IndexLoad` 不借临时寄存器（「会真的调 pa_str_char_at」） | 不变，且更该如此（函数变贵） |
+| `src/lower/stmt.cpp:1015-1026,1063-1108` | `for ch in s`：`Len` 定上界 + 每轮 `IndexLoad`（str 走 `def_heap`） | 语义自动跟着 Len/char_at 变，但**每轮 O(i) 扫描 ⇒ O(n²)**；需在 S2 加顺序游标（§6.3） |
+| `src/lower/stmt.cpp:668-670,733-737` | `for i, v in enumerate(s)`：直接计数 + `IndexLoad` | 同上（游标优化要覆盖 enumerate） |
+| `src/lower/stmt.cpp:796-798,895-910` | `for a, b in zip(s, t)`：双计数 + `IndexLoad` | 同上（zip 每个序列一个游标） |
+| `src/lower/comp.cpp:288-299,378-384,412-421` | 推导式把 str 当索引序列；`IndexLoadUnchecked` 只对 list/tuple 打补丁 | 同上；补丁逻辑不要用到 str 上（str 没有免检查路径，见 `:412-421` 的条件） |
+| `src/lower/aggregate.cpp:169-182,404-433,561-580` | `min/max/sum/any/all` 单实参时按 `Len` + `IndexLoad` 消费 str | 语义跟着变；性能同上，且这些内置在长串上会 O(n²)，S2/S3 用游标或 `pa_str_to_list` 一次物化 |
+| `src/lower/call.cpp:93-102,637-650`、`lower/import_native.cpp:112-115,293-297`、`lower/import_stdlib.cpp:410-416`、`lower/method_misc.cpp:60-66`、`lower/expr_assign.cpp:120-126` | 6 处把 str `StrToList` 后按 list 消费（`*args` 展开、`list/tuple/sorted/reversed/enumerate/zip`、`deque(str)`、`random.choice(str)`、切片赋值的字符串右值） | 这 6 处**自动正确**（`pa_str_to_list` 改码点后即可）；前提是 `pa_str_to_list` 内部 O(n) |
 | `runtime/rt_slice.c:204-209` | `pa_str_wrap_list`（textwrap 单元素列表） | 不变 |
-| `src/typecheck_stmt.cpp:355-417` | str 的下标/切片赋值在类型检查期直接拒绝（`:370-374,412-415`） | 不变（str 不可变，不需要写路径的码点换算） |
+| `src/typecheck/stmt.cpp:355-417` | str 的下标/切片赋值在类型检查期直接拒绝（`:370-374,412-415`） | 不变（str 不可变，不需要写路径的码点换算） |
 
-### 1.4 字符串方法（`pa_str_method`，操作码见 `src/ir_ops.h:1044-1050`）
+### 1.4 字符串方法（`pa_str_method`，操作码见 `src/ir/ops.h:1044-1050`）
 
 分派入口 `runtime/rt_str.c:352-687`，`bytes` 的方法复用同一份实现
-（`src/lower_method_str.cpp:188-298`）。逐 op 标注：
+（`src/lower/method_str.cpp:188-298`）。逐 op 标注：
 
 | op / 行号 | 现状 | 改成码点后 |
 |---|---|---|
@@ -126,7 +126,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | removeprefix/removesuffix `:652-665` | 字节前缀/后缀比较后切片 | 比较不变；结果 pub = pub − affix.pub（或原样） |
 | splitlines `:666-682` | 只认 `\n`/`\r` 字节 | 不变（0x0A/0x0D 不可能出现在 UTF-8 多字节序列里）；CPython 还认 `\v \f \x1c-\x1e \u2028 \u2029`，差异保持 |
 | capwords `:324-350`（string.capwords 的 C 实现） | 逐字节 ASCII 切词/改大小写 | 逐码点；输出 pub 一边写一边数 |
-| `pa_str_repeat` `runtime/rt_stdlib.c:198-207` | `str_alloc(len*n)` 字节复制 | pub = pub×n，O(1)；**bytes 重复要分家**（降级 `src/lower_expr_ops.cpp:144-165` 的 `seq_ty` 里根本没有 Bytes，而类型层允许 `bytes*int`（`typecheck_expr.cpp:922-925`）——这是现存的降级缺口，S2 顺手补 `pa_bytes_repeat`） |
+| `pa_str_repeat` `runtime/rt_stdlib.c:198-207` | `str_alloc(len*n)` 字节复制 | pub = pub×n，O(1)；**bytes 重复要分家**（降级 `src/lower/expr_ops.cpp:144-165` 的 `seq_ty` 里根本没有 Bytes，而类型层允许 `bytes*int`（`typecheck/expr.cpp:922-925`）——这是现存的降级缺口，S2 顺手补 `pa_bytes_repeat`） |
 
 **实现备注（提交 `fdea7b8`）**：`"".join(parts)` 是 join 最常见的形态，但原来第 2..n 个
 元素每个都做一次 `memcpy(dst, sep->data, 0)`——空拷贝不做事，照样走 PLT、保存被调用者
@@ -148,7 +148,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 |---|---|---|
 | `runtime/rt_slice.c:4-8` | `pa_str_contains`：`pa_find_bytes(...) >= 0` | 不变（返回 bool） |
 | `runtime/rt_str.c:296-310` | `pa_find_bytes`：memchr + memcmp | 不变（内部工具，返回字节下标；调用方负责换算） |
-| `src/lower_expr_ops.cpp:500-540` | `in` 对 str/bytes 都发 `pa_str_contains` | 不变 |
+| `src/lower/expr_ops.cpp:500-540` | `in` 对 str/bytes 都发 `pa_str_contains` | 不变 |
 
 ### 1.6 格式化、对齐宽度、f-string
 
@@ -160,7 +160,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | `runtime/rt_format.c:225-239` | `pa_fmt_str`：`n = v->len`，按**字节**截断精度 | 精度按码点截断：先按 pub 夹取精度，再把「精度个码点」换成字节偏移后 memcpy；宽度按 pub |
 | `runtime/rt_format.c:241-252` | 复数 body 是 ASCII | 同 int/float |
 | `runtime/rt_format.c:290-497` | printf 风格百分号格式化：宽度/精度按字节；`%c` 只接受 0–255 / 单字节串（`:433-449`）；`%s` 走 `fmt_str`（`:451-482`）；`is_bytes` 参数**当前未使用**（`:328-329`） | 宽度/精度按码点；`%c` 接受 0–0x10FFFF 的码点或 1 个码点串；`is_bytes` 参数是现成的分流开关：`str` 语义走码点、`bytes` 语义走字节 |
-| `src/lower_expr_dunder.cpp:223-330` | f-string：字面量段 `const_str`，替换段按类型调 `pa_fmt_*` | 字面量段自动带编译期 pub；替换段要把 spec 宽度传给上面改过的 `pa_fmt_*`。f-string 永远产 str（不会产 bytes） |
+| `src/lower/expr_dunder.cpp:223-330` | f-string：字面量段 `const_str`，替换段按类型调 `pa_fmt_*` | 字面量段自动带编译期 pub；替换段要把 spec 宽度传给上面改过的 `pa_fmt_*`。f-string 永远产 str（不会产 bytes） |
 
 ### 1.7 `re`（整条按字节）
 
@@ -217,10 +217,10 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 
 | 位置 | 现状 | 改成码点后 |
 |---|---|---|
-| `src/codegen_call.cpp:595-609` | 传 `str` 给 C 的 `char*`：从 `PyAdamasStr` **偏移 16** 取 `data` | 偏移改成 **24**（§2.2）；传出去的仍是 UTF-8 字节，C 侧无感 |
-| `src/codegen_call.cpp:610-617` | `BufBytes` 也从偏移 16 取 data | 同上改 24 |
-| `src/codegen_call.cpp:771-783` | C 返回 `char*` → `pa_str_from_cstr(_opt)` | 运行时扫描算 pub（§2.4）；C 返回的必须是 UTF-8，否则同 §7.4 |
-| `src/codegen_call.cpp:824-833` | `extern char*` 变量同样 `pa_str_from_cstr` | 同上 |
+| `src/backend/call.cpp:595-609` | 传 `str` 给 C 的 `char*`：从 `PyAdamasStr` **偏移 16** 取 `data` | 偏移改成 **24**（§2.2）；传出去的仍是 UTF-8 字节，C 侧无感 |
+| `src/backend/call.cpp:610-617` | `BufBytes` 也从偏移 16 取 data | 同上改 24 |
+| `src/backend/call.cpp:771-783` | C 返回 `char*` → `pa_str_from_cstr(_opt)` | 运行时扫描算 pub（§2.4）；C 返回的必须是 UTF-8，否则同 §7.4 |
+| `src/backend/call.cpp:824-833` | `extern char*` 变量同样 `pa_str_from_cstr` | 同上 |
 | 嵌入 NUL | `strlen` 截断（既有行为） | 不变（`str->len` 仍按真实字节数；C 侧拿 NUL 结尾串是接口限制） |
 
 ### 1.11 `bytes` 与 `str` 共用表示的隐性依赖
@@ -228,27 +228,27 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | 位置 | 现状 | 影响 |
 |---|---|---|
 | `runtime/rt_internal.h:217-221` | 一个 `PyAdamasStr` 结构体同时表示 str 和 bytes（compatibility.md:287 明说「bytes 没有独立运行期种类」） | 码点语义下两者「对外长度」不同 ⇒ 所有**共享入口**必须带静态类型参数（§2.9） |
-| `src/lower_method_str.cpp:188-298` | bytes 方法借用 `StrMethod` 同一套 op | 加 `is_bytes` 参数（§2.9） |
-| `src/lower_expr_container.cpp:22-31` | str 和 bytes 切片都发 `RtFn::StrSlice` | 拆成 `StrSlice` / `BytesSlice` |
-| `src/codegen_ops.cpp:252-266` | `gen_bin` 对 Str/Bytes 都发 `pa_str_concat` | 按 `in.ty` 分 `pa_str_concat` / `pa_bytes_concat` |
-| `src/lower_expr_ops.cpp:28-68` | 百分号格式化的 `is_bytes` 已传但运行时丢弃 | 运行时用起来（§1.6） |
-| `src/lower_expr_ops.cpp:19-20`、`lower_call.cpp:221`、`lower_impl_util.cpp:198` | 3 处「先当 str 常量、再 `retype` 成 bytes」 | 改成真正的 bytes 字面量（§2.6 的 intern kind） |
-| `src/lower_method_str.cpp:25-29,189-194` | `encode/decode` 只是改标类型（零成本） | 码点语义下必须真正换算公共长度（§7.2） |
+| `src/lower/method_str.cpp:188-298` | bytes 方法借用 `StrMethod` 同一套 op | 加 `is_bytes` 参数（§2.9） |
+| `src/lower/expr_container.cpp:22-31` | str 和 bytes 切片都发 `RtFn::StrSlice` | 拆成 `StrSlice` / `BytesSlice` |
+| `src/backend/ops.cpp:252-266` | `gen_bin` 对 Str/Bytes 都发 `pa_str_concat` | 按 `in.ty` 分 `pa_str_concat` / `pa_bytes_concat` |
+| `src/lower/expr_ops.cpp:28-68` | 百分号格式化的 `is_bytes` 已传但运行时丢弃 | 运行时用起来（§1.6） |
+| `src/lower/expr_ops.cpp:19-20`、`lower/call.cpp:221`、`lower/impl_util.cpp:198` | 3 处「先当 str 常量、再 `retype` 成 bytes」 | 改成真正的 bytes 字面量（§2.6 的 intern kind） |
+| `src/lower/method_str.cpp:25-29,189-194` | `encode/decode` 只是改标类型（零成本） | 码点语义下必须真正换算公共长度（§7.2） |
 | `runtime/rt_str.c:352` | `pa_str_method` 无类型参数 | 加 `is_bytes`（放在第 6 个整型实参，`RtFn` 调用支持 6 参） |
 
 ### 1.12 后端/降级里对字符串下标的特化（汇总）
 
-- `IrOp::Len` 读偏移 0：`src/codegen_ops.cpp:82-86`（布局方案的关键，§2.2）。
-- 真值读偏移 0：`src/codegen_ops.cpp:513-520`。
-- 下标：`src/codegen_call.cpp:24-34`（str → `pa_str_char_at`）。
-- 比较：`src/codegen_ops.cpp:777-824`（str/bytes 都走 `pa_str_eq/cmp`，不用改）；其中
+- `IrOp::Len` 读偏移 0：`src/backend/ops.cpp:82-86`（布局方案的关键，§2.2）。
+- 真值读偏移 0：`src/backend/ops.cpp:513-520`。
+- 下标：`src/backend/call.cpp:24-34`（str → `pa_str_char_at`）。
+- 比较：`src/backend/ops.cpp:777-824`（str/bytes 都走 `pa_str_eq/cmp`，不用改）；其中
   `==`/`!=` 先 `cmpq` 比指针，相等直接出结果，不等才 `call pa_str_eq`（见 §2.5 的驻留表）。
-- 拼接：`src/codegen_ops.cpp:252-266`（要按 str/bytes 分家）。
-- 字面量：`src/codegen.cpp:60-87`（加 `pub`、按 kind 去重）。
-- 临时寄存器：`src/codegen_regalloc.cpp:403`（`Len` 纯）、`:413-418`（str 下标不许借寄存器）。
-- 常量折叠：`src/opt_fold.cpp` 整份只有「纯指令判定 + DCE」，**没有任何 `len`/字符串常量折叠**；
-  `src/opt_loop.cpp:220` 会把 `ConstStr` 提出循环（对 pub 无影响）。
-- 跨模块 ABI：`src/module.cpp` 只序列化 `TyKind`，不涉及字符串内存布局 ⇒ 不用改。
+- 拼接：`src/backend/ops.cpp:252-266`（要按 str/bytes 分家）。
+- 字面量：`src/backend/codegen.cpp:60-87`（加 `pub`、按 kind 去重）。
+- 临时寄存器：`src/backend/regalloc.cpp:403`（`Len` 纯）、`:413-418`（str 下标不许借寄存器）。
+- 常量折叠：`src/opt/fold.cpp` 整份只有「纯指令判定 + DCE」，**没有任何 `len`/字符串常量折叠**；
+  `src/opt/loop.cpp:220` 会把 `ConstStr` 提出循环（对 pub 无影响）。
+- 跨模块 ABI：`src/ir/module.cpp` 只序列化 `TyKind`，不涉及字符串内存布局 ⇒ 不用改。
 
 ---
 
@@ -260,7 +260,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
   （`rt_internal.h:298-311`，`static_assert(sizeof(PyAdamasRc)==64)`）。
 - SSO：字节长度 `len<=7` 时字符内联在 `hash` 的 8 字节里，`data` 指向它
   （`rt_core.c:699-722`）；`hash` 的另一用途是长串字典哈希缓存
-  （`rt_dict.c:22-48` 与 `codegen.cpp:76-79` 的编译期哈希）。
+  （`rt_dict.c:22-48` 与 `backend/codegen.cpp:76-79` 的编译期哈希）。
 - 字面量在 `.data.rel.ro`（RELRO 后只读），运行期**不能**在对象上做懒缓存
   （`docs/runtime.md:83-85` 已写明这条约束）。
 - `len` 在偏移 0 是刻意设计（`docs/runtime.md:63`）：`len(s)` 编译成一条
@@ -288,9 +288,9 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
   `&s->hash`（+16），8 字节里放 ≤7 字节 + NUL。长串 `data` 指向结构体后面的
   字符区（尾部补 NUL，只为调试方便）。
 - `hash` 缓存规则不变：`len > 7` 且非 0 才有效（`rt_dict.c:28,36`；
-  `codegen.cpp:76-79` 的 `s.size() > 7` 也对应字节长度，都不用改）。
+  `backend/codegen.cpp:76-79` 的 `s.size() > 7` 也对应字节长度，都不用改）。
 
-**为什么是 O2 而不是「在尾部追加」**：`IrOp::Len`（`codegen_ops.cpp:82-86`）和真值
+**为什么是 O2 而不是「在尾部追加」**：`IrOp::Len`（`backend/ops.cpp:82-86`）和真值
 判断（`:513-520`）都是**无语义地读偏移 0**，对 list/tuple/dict/set/str/bytes 通用。把 P 放
 偏移 0 后：
 
@@ -300,7 +300,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 - 现有运行时 C 代码里读 `s->len` 的地方（字节语义）**字段名和含义都不变**，几乎零改动
   （真正需要改的是构造点与语义查询点，见 §1）;
 - 代价：指针从 +16 挪到 +24，所有**编译器侧硬编码偏移**只有两处
-  （`codegen_call.cpp:607` cimport 取 data、`:615` 取 BufBytes data），加上字面量布局。
+  （`backend/call.cpp:607` cimport 取 data、`:615` 取 BufBytes data），加上字面量布局。
 
 对比其它候选：
 
@@ -347,7 +347,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 
 | 类别 | 代表位置 | nchars 来源 |
 |---|---|---|
-| 编译期常量（最大收益） | `src/codegen.cpp:60-87`（全部 `const_str` 字面量、f-string 字面量段、错误消息） | 编译器数（O(字节数)，只在编译期付一次） |
+| 编译期常量（最大收益） | `src/backend/codegen.cpp:60-87`（全部 `const_str` 字面量、f-string 字面量段、错误消息） | 编译器数（O(字节数)，只在编译期付一次） |
 | O(1) 合并 | `rt_str.c:52-58` 拼接、`rt_stdlib.c:198-207` 重复、`rt_str.c:427-452` join、`rt_format.c:60-107,137-252` 数字/填充、`rt_str.c:352-360,596-613` 大小写 | 由操作数 pub 直接算 |
 | 派生自原串（长度可控） | `rt_str.c:362-386` strip、`rt_str.c:652-665` removeprefix/suffix、`rt_slice.c:75-94` 切片（count=hi−lo 已知，但要先求字节偏移） | O(被剥/被取部分) 或 O(1) |
 | 必须扫一遍 | `rt_core.c:724-728` `str_new`、`rt_core.c:730-738` from_cstr、`rt_file.c:380-472` 文件读、`rt_json.c:78-150` JSON 字符串、`rt_re.c:1290-1310,1637-1700` re 结果、`rt_os.c` 路径函数 | `count = #(b & 0xC0) != 0x80`（对合法 UTF-8 精确；对非法字节也安全） |
@@ -376,20 +376,20 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
   分支、`pa_cp_str` 的 ASCII 转交）。除 `char_tab[256]` 外还导出
   `PyAdamasStr* pa_char_tab[256]`（`runtime/rt_core.c:1252`），存每个驻留串的**载荷指针**，
   供生成代码直接索引。单字节 ASCII 的 str 字面量在 `ConstStr` 分支里发射成
-  `movq pa_char_tab+N(%rip), %rax`（`src/codegen_ops.cpp:117-129`，判定见
-  `char_tab_literal`，`src/codegen_impl.h:770-776`），于是字面量 `"0"` 和 `s[i]` 是
+  `movq pa_char_tab+N(%rip), %rax`（`src/backend/ops.cpp:117-129`，判定见
+  `char_tab_literal`，`src/backend/impl.h:770-776`），于是字面量 `"0"` 和 `s[i]` 是
   **同一个指针**：`s[i] == "0"` 在 codegen 层就是一条 `cmpq` 直接出结果
-  （`src/codegen_ops.cpp:782-806`），不必进 `pa_str_eq`；`pa_str_eq` 的 `a == b`
+  （`src/backend/ops.cpp:782-806`），不必进 `pa_str_eq`；`pa_str_eq` 的 `a == b`
   第一行也照样命中。字符串不可变，内容相同的单字节 str 语义上无法区分 ⇒ 共享对象是安全的，
   CPython 对 latin1 也是同样的驻留。bytes 字面量不参与（pub 语义不同）。
 - 这张表由 `pa_static_strs_init()`（`runtime/rt_core.c:1293`）在 `main` 序言里显式初始化
-  （`src/codegen.cpp:536`；非入口模块的 init 函数里也调一次，`src/codegen.cpp:497`）。
+  （`src/backend/codegen.cpp:536`；非入口模块的 init 函数里也调一次，`src/backend/codegen.cpp:497`）。
   它必须排在 `pa_disable_unknown_index` 之后（驻留对象要不要登记进 RC 索引取决于是否
   exact-RC 模式），所以函数体里不必再判 `static_strs_ready`。
 - **驻留表的消费者：`str()` 的个位数快速路径**（提交 `fdea7b8`，修复 `455df2c`）：
   `pa_str_from_i64`（`runtime/rt_str.c:192-224`）对 `0..9` 直接返回
   `pa_char_str('0' + v)` 的驻留串——`str(int)`（静态 int 走 `IrOp::Convert` →
-  `pa_str_from_i64`，`src/codegen_ops.cpp:950-953`；unknown 走 `pa_str_any` 的非字符串
+  `pa_str_from_i64`，`src/backend/ops.cpp:950-953`；unknown 走 `pa_str_any` 的非字符串
   分支落到同一个函数）、元组 `repr` 里的整数也走它。`str_build` 每轮 60 次
   `str(i % 10)`、累计 396 万次分配，换驻留后零分配、零 RC 记账。**注意
   `pa_char_str` 的参数是字符编码不是数值**：这里真出过 bug——写成 `pa_char_str(v)` 时
@@ -399,9 +399,9 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 
 ### 2.6 字面量的编译期常量折叠
 
-- 词法层已经把转义解码成 UTF-8 字节（`lexer.h:141-152`），编译器只要数
+- 词法层已经把转义解码成 UTF-8 字节（`syntax/lexer.h:141-152`），编译器只要数
   `(b & 0xC0) != 0x80` 就是 nchars。
-- 发射格式（`src/codegen.cpp:60-87` 改）：
+- 发射格式（`src/backend/codegen.cpp:60-87` 改）：
 
       .align 8
       .quad 0,0,INT64_MIN,0,0,0,0,0   # 隐藏 RC 头（64B），rc=永生
@@ -412,16 +412,16 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
       .quad .Lstr<i>_c                 # +24 data
       .Lstr<i>_c: .ascii "..." ; .byte 0
 
-- **intern 必须按 `(kind, content)` 去重**（`src/ir_types.h:236-242` 现在只按
+- **intern 必须按 `(kind, content)` 去重**（`src/ir/types.h:236-242` 现在只按
   content）。反例：`"中"`（str，pub=1，3 字节）与 `b"\xe4\xb8\xad"`（bytes，pub=3）
   字节完全相同，共用一个静态对象必然有一方错。实现上给 `IRModule` 加一张
   bytes 字面量表，或把 `intern_string` 的 key 改成 `(is_bytes, s)`；生成两份对象
   多出的体积可以忽略（同内容同时以 str/bytes 出现的概率极低）。
-- 产出 bytes 字面量的 3 处必须改用新入口：`lower_expr_ops.cpp:19-20`、
-  `lower_call.cpp:215-223` 的默认值、`lower_impl_util.cpp:190-200`。
+- 产出 bytes 字面量的 3 处必须改用新入口：`lower/expr_ops.cpp:19-20`、
+  `lower/call.cpp:215-223` 的默认值、`lower/impl_util.cpp:190-200`。
 - **收益**：字面量的 `len` / 下标基址全部零运行时成本；而且这是唯一可行的字面量
   方案（RELRO 只读）。可选附加优化：在降级期把 `len("字面量")` 折叠成常量
-  （`src/lower_builtin_seq.cpp:7-33`，目前 `opt_fold.cpp` 没有这类折叠）——
+  （`src/lower/builtin_seq.cpp:7-33`，目前 `opt/fold.cpp` 没有这类折叠）——
   纯收益，可放 S1 末尾。
 
 ### 2.7 与 RC 头 / GC / freelist / SSO 的共处
@@ -485,8 +485,8 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 | 共享入口 | 位置 | 处理 |
 |---|---|---|
 | `pa_str_method` | `rt_str.c:352` | 第 6 个整型参数 `is_bytes`；bytes 走字节语义分支（strip 字符集、宽度、find 下标、split/replace 的 pub 计数） |
-| `pa_str_slice` | `rt_slice.c:75` | 拆 `pa_str_slice`（码点）/`pa_bytes_slice`（字节），降级按 `ot->kind` 选（`lower_expr_container.cpp:22-31`） |
-| `pa_str_concat` | `rt_str.c:52` | 拆 `pa_str_concat`（pub 相加）/`pa_bytes_concat`（pub=len），`gen_bin`（`codegen_ops.cpp:252-266`）按 `in.ty` 选 |
+| `pa_str_slice` | `rt_slice.c:75` | 拆 `pa_str_slice`（码点）/`pa_bytes_slice`（字节），降级按 `ot->kind` 选（`lower/expr_container.cpp:22-31`） |
+| `pa_str_concat` | `rt_str.c:52` | 拆 `pa_str_concat`（pub 相加）/`pa_bytes_concat`（pub=len），`gen_bin`（`backend/ops.cpp:252-266`）按 `in.ty` 选 |
 | `pa_str_repeat` | `rt_stdlib.c:198` | 同上；顺手补上 bytes 重复的降级缺口（§1.4 末行） |
 | `pa_percent_format` | `rt_format.c:328` | 已传 `is_bytes`，用起来 |
 | `pa_str_from_cstr` | `rt_core.c:730` | 只有 str 用；bytes 的 C 返回值目前没有对应 CKind |
@@ -500,15 +500,15 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 - 返回**码点数**，对齐 CPython；O(1)（读偏移 0）。`len(b"中文") == 6` 不变（bytes 的
   偏移 0 是字节数）。
-- `len()` 的类型检查（`src/typecheck_builtin.cpp:66-78`）只接受单参；保持单参。
-- `len(range)`、`len(deque)`、类 `__len__` 都不受影响（`lower_builtin_seq.cpp:14-28`）。
+- `len()` 的类型检查（`src/typecheck/builtin.cpp:66-78`）只接受单参；保持单参。
+- `len(range)`、`len(deque)`、类 `__len__` 都不受影响（`lower/builtin_seq.cpp:14-28`）。
 
 ### 3.2 字节长度怎么取：三个候选
 
 | 候选 | 优点 | 缺点 | 结论 |
 |---|---|---|---|
-| **A. `s.nbytes` 属性** | 可读性最好，`len_bytes` 这个新名字也不用进 builtin 命名空间 | 现在编译器**不支持**非类接收者的属性读（属性只在 Call 的 attr 位置上被处理，见 `typecheck_call_method.cpp`）；要新增 Attribute 表达式的 String 分支 + `CallRt` + `getattr` 动态路径，工作量比重最大；而且 bytes 对象上 `.nbytes` 语义含混 | 不推荐本轮 |
-| **B. `len_bytes(s)` 内置函数**（推荐） | 改动最小：`typecheck_builtin.cpp:66-78` 加个名字、降级加一个 `RtFn::StrLenBytes`（读偏移 8 后 movq）、`ir_ops.h` 加名字；O(1)；语义无歧义 | 非 CPython 命名，需要文档说明；bytes 也可以用它（等值 len，无害） | **推荐**。名字可考虑 `len_bytes` 或 `byte_len`，`len_bytes` 更好搜 |
+| **A. `s.nbytes` 属性** | 可读性最好，`len_bytes` 这个新名字也不用进 builtin 命名空间 | 现在编译器**不支持**非类接收者的属性读（属性只在 Call 的 attr 位置上被处理，见 `typecheck/call_method.cpp`）；要新增 Attribute 表达式的 String 分支 + `CallRt` + `getattr` 动态路径，工作量比重最大；而且 bytes 对象上 `.nbytes` 语义含混 | 不推荐本轮 |
+| **B. `len_bytes(s)` 内置函数**（推荐） | 改动最小：`typecheck/builtin.cpp:66-78` 加个名字、降级加一个 `RtFn::StrLenBytes`（读偏移 8 后 movq）、`ir/ops.h` 加名字；O(1)；语义无歧义 | 非 CPython 命名，需要文档说明；bytes 也可以用它（等值 len，无害） | **推荐**。名字可考虑 `len_bytes` 或 `byte_len`，`len_bytes` 更好搜 |
 | C. `len(s, unit)` 双参形式 | 单一命名空间，扩展性强 | 与 Python 的 len 契约冲突，所有读代码/工具/文档默认 len(x) 单参；unit 必须是字面量才能静态选路（否则运行期字符串分派）；类型检查要特判；len 的错误消息/工具提示会一直需要对两套口径 | 不推荐 |
 
 补充建议：
@@ -527,7 +527,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 - 负索引：`i += pub` 后判界；「从尾部取」可以在实现里优化成从字符区尾往前找 lead byte
   （O(序列长度) 而不是全扫）。
 - 越界错误消息沿用 `IndexError: string index out of range`（`rt_str.c:62`）。
-- `s[i] = x` / `del s[i]` 在类型检查期就拒绝（`typecheck_stmt.cpp:355-417`），
+- `s[i] = x` / `del s[i]` 在类型检查期就拒绝（`typecheck/stmt.cpp:355-417`），
   不需要运行时写路径。
 
 ### 3.4 切片边界换算的复杂度
@@ -554,7 +554,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
   （pub 与 len 相等，两种语义同值），非 ASCII 需要新对象：拷贝字节 + 设
   `pub=len`（O(n)）。
 - `bytes.decode([encoding])`：返回 str 对象；ASCII 零复制；非 ASCII 扫描算 pub
-  （O(n)）。编码名参数继续忽略（现状如此，`lower_method_str.cpp:25-29`）。
+  （O(n)）。编码名参数继续忽略（现状如此，`lower/method_str.cpp:25-29`）。
 
 ---
 
@@ -567,7 +567,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 | 项 | 内容 |
 |---|---|
-| 改哪些文件 | `runtime/rt_internal.h`（结构体 + 声明）、`runtime/rt_core.c`（`str_alloc/str_new/str_new_ascii/str_new_bytes/str_seal`、静态串、池）、`runtime/rt_str.c:52-58`（拼接 pub）、`runtime/rt_stdlib.c:198-207`（重复 pub）、`src/ir_types.h`（intern kind + bytes 字量表）、`src/lower_impl.h`（`const_bytes_literal`）、`src/codegen.cpp:60-87`（字面量发射）、`src/lower_expr_ops.cpp:19-20`、`src/lower_call.cpp:215-223`、`src/lower_impl_util.cpp:190-200`、`src/codegen_call.cpp:600-617,771-783,824-833`（cimport 偏移 16→24 + from_cstr 扫 pub）、`src/lexer.h`（str/bytes 的 `\x` 及 bytes 八进制转义区分，见 §7.4）、`src/builtin_sigs.cpp`（如加 len_bytes） |
+| 改哪些文件 | `runtime/rt_internal.h`（结构体 + 声明）、`runtime/rt_core.c`（`str_alloc/str_new/str_new_ascii/str_new_bytes/str_seal`、静态串、池）、`runtime/rt_str.c:52-58`（拼接 pub）、`runtime/rt_stdlib.c:198-207`（重复 pub）、`src/ir/types.h`（intern kind + bytes 字量表）、`src/lower/impl.h`（`const_bytes_literal`）、`src/backend/codegen.cpp:60-87`（字面量发射）、`src/lower/expr_ops.cpp:19-20`、`src/lower/call.cpp:215-223`、`src/lower/impl_util.cpp:190-200`、`src/backend/call.cpp:600-617,771-783,824-833`（cimport 偏移 16→24 + from_cstr 扫 pub）、`src/syntax/lexer.h`（str/bytes 的 `\x` 及 bytes 八进制转义区分，见 §7.4）、`src/typecheck/builtin_sigs.cpp`（如加 len_bytes） |
 | 语义变化 | `len(str)` 对非 ASCII 变成码点数；`len(bytes)` 不变；字面量 pub 编译期；str 字面量 `\x80`–`\xff` 变成对应 Unicode 码点（原来是裸字节） |
 | 验收 | `./build/dev/pyadamas run tests/run/05_strings.py`（既有）；新 `tests/run/163_codepoint_len.py`：`len("中文")==2`、`len("abc")==3`、`len(b"\xe4\xb8\xad")==3`、`len_bytes("中文")==6`、空串/长串字面量；`bash tests/run_tests.sh build/dev build/dev/pyadamas` 全绿；`python3 tests/diff/run_diff.py --seeds 3` 零差异 |
 | 回归风险 | 中：改结构体布局 + 所有构造点，任何漏写 pub 都会静默「长度为 0」。靠 `str_new` 默认扫描 + seal 协议 + 全量 run 用例兜住；`PYADAMAS_STR_DEBUG` 校验建议本阶段就加 |
@@ -577,7 +577,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 | 项 | 内容 |
 |---|---|
-| 改哪些文件 | `runtime/rt_str.c:60-64`（char_at 码点 + `pa_cp_str`）、`runtime/rt_core.c:787-790`（`pa_char_str` 只管 ASCII）、`runtime/rt_slice.c:75-94,169-174`（str 切片 / `pa_str_to_list`）、新增 `pa_bytes_slice` / `pa_str_char_at_cursor`、`src/ir_ops.h`（BytesSlice / BytesConcat / BytesRepeat / StrCharAtCursor 等 RtFn）、`src/codegen_call_rt.cpp`（新 RtFn 分派）、`src/codegen_ops.cpp:252-266`（concat 分家）、`src/lower_expr_container.cpp:22-31`（切片选路）、`src/lower_stmt.cpp:1015-1026,1063-1108` 与 `:668-670,733-737` 与 `:796-798,895-910`（for/enumerate/zip 游标）、`src/lower_comp.cpp:378-384`（推导式游标）、`src/lower_expr_ops.cpp:144-165`（bytes 重复）、`src/lower_method_str.cpp:25-29,189-194`（encode/decode 真转换） |
+| 改哪些文件 | `runtime/rt_str.c:60-64`（char_at 码点 + `pa_cp_str`）、`runtime/rt_core.c:787-790`（`pa_char_str` 只管 ASCII）、`runtime/rt_slice.c:75-94,169-174`（str 切片 / `pa_str_to_list`）、新增 `pa_bytes_slice` / `pa_str_char_at_cursor`、`src/ir/ops.h`（BytesSlice / BytesConcat / BytesRepeat / StrCharAtCursor 等 RtFn）、`src/backend/call_rt.cpp`（新 RtFn 分派）、`src/backend/ops.cpp:252-266`（concat 分家）、`src/lower/expr_container.cpp:22-31`（切片选路）、`src/lower/stmt.cpp:1015-1026,1063-1108` 与 `:668-670,733-737` 与 `:796-798,895-910`（for/enumerate/zip 游标）、`src/lower/comp.cpp:378-384`（推导式游标）、`src/lower/expr_ops.cpp:144-165`（bytes 重复）、`src/lower/method_str.cpp:25-29,189-194`（encode/decode 真转换） |
 | 语义变化 | 索引/切片/迭代按码点；bytes 全部保持字节；encode/decode 变成真转换 |
 | 验收 | 新 `tests/run/164_codepoint_index.py`：`"中文"[0]=="中"`、`"中文"[-1]=="文"`、`"中文"[0:1]=="中"`、`"中文"[::-1]=="文中"`、`list("中文")==["中","文"]`、`for ch in "中文"` 次数、enumerate/zip 对 str、bytes 对照 `b"\xe4\xb8\xad"[0]==228` / len==3；既有 tests/run/05_strings.py,15_slice.py,17_slice_assign.py,19_comprehension.py 回归；新增迭代性能用例（§6.4）要求不出现 O(n²)（2N 斜率检查） |
 | 回归风险 | 高：迭代/切片是热路径；游标优化做错会算错值（不是慢，是错），必须靠新老用例双跑。建议 S2 拆两个 commit：S2a 语义翻转（先接受 O(n²)）、S2b 游标优化（纯性能，可回退） |
@@ -587,7 +587,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 | 项 | 内容 |
 |---|---|
-| 改哪些文件 | `runtime/rt_str.c` 方法全套（§1.4）、`runtime/rt_format.c`（宽度/精度/%c/is_bytes）、`src/lower_method_str.cpp`（is_bytes 传参、bytes ops）、`runtime/rt_re.c`（§1.7 三项）、`runtime/rt_file.c`（读/写/seek/tell 单位）、`runtime/rt_datetime.c:572-578`（Path.read_bytes 用 bytes 构造）、`runtime/rt_str.c:183-193`（ord/chr） |
+| 改哪些文件 | `runtime/rt_str.c` 方法全套（§1.4）、`runtime/rt_format.c`（宽度/精度/%c/is_bytes）、`src/lower/method_str.cpp`（is_bytes 传参、bytes ops）、`runtime/rt_re.c`（§1.7 三项）、`runtime/rt_file.c`（读/写/seek/tell 单位）、`runtime/rt_datetime.c:572-578`（Path.read_bytes 用 bytes 构造）、`runtime/rt_str.c:183-193`（ord/chr） |
 | 语义变化 | 方法/格式化/re/文件 API 的可见单位变码点；bytes 方法保持字节 |
 | 验收 | 新 `tests/run/165_codepoint_methods.py`（find/index/startswith/count/split/join/strip/replace/zfill/ljust/center/capitalize/title/is*/removeprefix、百分号宽度、f-string 宽度、repr、ord/chr、dict 中文 key）；新 `tests/run/166_codepoint_re_file.py`（`re.findall(".", "中文")==["中","文"]`、m.start()/end() 码点、sub/split、中文文件读写 read(n)/tell）；既有 56_re.py / 57_re2.py / 53_json.py / 07_fstrings.py / 79_datetime_pathlib.py 全绿 |
 | 回归风险 | 中高：re 是最大一块，点号/类/量词改错会静默改变匹配结果；文件 I/O 的 seek/tell 一致性要专门测。建议 re 单独 commit |
@@ -731,7 +731,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
    - 内置聚合（min/max/sum/any/all）可以直接改成 pa_str_to_list（一次物化 O(n)，
      与今天 list 路径一致），避免在 C 里逐下标回调。
 2. **range(len(s)) 里 s[i]**（用户手写循环）：降级器现在有「list/tuple 免检查」的
-   bounds-hint 机制（`lower_expr_container.cpp:87-105,117`）。S2/S3 可以扩成
+   bounds-hint 机制（`lower/expr_container.cpp:87-105,117`）。S2/S3 可以扩成
    「str 的顺序游标 hint」：识别 for i in range(len(s)) + s[i] 同一对名字，挂游标槽。
    识别不了的手写随机访问就接受 O(i)，文档写明。
 3. **re 多匹配的下标换算**：见 §1.7，一次扫全文建映射，别逐匹配从头扫。
@@ -769,9 +769,9 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 
 **确认无额外影响**，理由：
 
-- 字符串布局是**目标无关**的：结构体、SSO、字面量发射（`src/codegen.cpp`）都是同一份
+- 字符串布局是**目标无关**的：结构体、SSO、字面量发射（`src/backend/codegen.cpp`）都是同一份
   代码；Win64 只改 TargetABI（实参寄存器/影子空间/callee-saved/setjmp 符号），
-  `codegen_call.cpp:600-617` 里取 data 的偏移是硬编码 16→24，与 ABI 无关。
+  `backend/call.cpp:600-617` 里取 data 的偏移是硬编码 16→24，与 ABI 无关。
 - 运行时（`runtime/rt_*.c`）是同一份源码，平台层差异只在 poll/clock/mkdir 等
   （`rt_internal.h:16-195`），不碰字符串。现有 Win64 已验证（roadmap.md:112-116）。
 - 唯一注意点：cimport 边界上 C 的 char* 在 Windows 上仍是字节指针，UTF-8 内容无差异；
@@ -779,7 +779,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 
 ### 7.2 bytes 与 str 的互转（如果现在有）
 
-现状：互转就是改标类型（`lower_method_str.cpp:25-29,189-194`），运行时零成本，因为两者
+现状：互转就是改标类型（`lower/method_str.cpp:25-29,189-194`），运行时零成本，因为两者
 表示完全一样。码点语义下公共长度不同，必须改成：
 
 | 方向 | 实现 | 成本 | 说明 |
@@ -810,13 +810,13 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 本设计把「str 是合法 UTF-8」作为不变量，但现状有两个口子会在 str 里塞任意字节：
 
 1. **二进制模式文件读**：`open(path, 'rb').read()` 静态类型是 str
-   （`lower_method_misc.cpp:282` 固定 t_str()），运行时 `rt_file.c:382-407` 直接把
+   （`lower/method_misc.cpp:282` 固定 t_str()），运行时 `rt_file.c:382-407` 直接把
    原始字节 str_new。
 2. **str 字面量的 \xNN 转义**（现状）：`"\xff"` 是单字节 0xFF。
 
 处理建议：
 
-- 字面量问题在 S1 根治：str 的 \xNN 按「U+00NN 再编 UTF-8」处理（`lexer.h:91-96`
+- 字面量问题在 S1 根治：str 的 \xNN 按「U+00NN 再编 UTF-8」处理（`syntax/lexer.h:91-96`
   改为 append_utf8）；bytes 字面量的 \xNN 保持原始字节，并且 bytes 的八进制转义也改成原始
   字节（现在错误地走 append_utf8，b"\377" 会变成 2 字节——这是顺带修掉的既有 bug）。
   \u/\U/\N 在 bytes 字面量里应报错（CPython 语义）。
@@ -854,7 +854,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
     # 运行时长度的读取（含 list/dict 同名字段，用于定位字符串长度假设）
     grep -rn 's->len\|a->len\|b->len\|src->len\|v->len\|hay->len\|needle->len' runtime/*.c | wc -l
     # 现有关键点
-    grep -n 'IrOp::Len' src/codegen_ops.cpp
+    grep -n 'IrOp::Len' src/backend/ops.cpp
     grep -n 'pa_str_char_at\|pa_str_slice\|pa_str_method\|pa_str_repeat\|pa_str_concat' runtime/*.c
     # 非 ASCII 字面量扫描（结论：现有用例不依赖字节语义）
     grep -rnP 'len\([^)]*[\x{4e00}-\x{9fff}]' tests/ bench/

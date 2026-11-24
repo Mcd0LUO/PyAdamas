@@ -357,7 +357,7 @@ typedef struct {
 } PyAdamasDict;
 
 
-/* unknown 值平行 tag 的编码（与 src/tag_defs.h 的 PaTag 逐字对应）。
+/* unknown 值平行 tag 的编码（与 src/backend/tag_defs.h 的 PaTag 逐字对应）。
    P3（默认）：堆 ⇔ tag>=3。P2（PYADAMAS_TYPE_TAGS）：追加 NONE/BOOL（非堆）
    与 TUPLE/SET/BYTES/CLASS/BIG（堆），堆 ⇔ 3..5 或 >=8。运行时是同一份
    rt.o，两种编号都要认识。 */
@@ -595,7 +595,7 @@ int64_t pa_any_big_binary(int64_t op, int64_t a, int64_t b, int64_t da, int64_t 
 int64_t pa_any_invert(int64_t v, int64_t dv);
 int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
 /* P3 第一阶段（0.327，docs/p3-tagged-union-design.md）：shadow tag 版入口。
-   tag 编码与 src/codegen_impl.h 的 PaTag 逐字对应：0 UNK / 1 INT / 2 FRAW /
+   tag 编码与 src/backend/impl.h 的 PaTag 逐字对应：0 UNK / 1 INT / 2 FRAW /
    3 FBOX / 4 STR / 5 HEAP（堆 ⇔ >=3）。tag 是 RC/分派快路径判据，UNK 回退
    探针；值仍是旧 unknown i64（float 仍装箱），边界丢 tag 只损失性能。
    PaAnyPair 按 SysV {i64,i64} 返回：%rax=payload，%rdx=tag。 */
@@ -614,7 +614,7 @@ double pa_any_to_f64_t(int64_t v, int64_t tag);
 int64_t pa_any_to_i64_t(int64_t v, int64_t tag);
 void pa_print_any_repr(int64_t v);
 /* P2 第二阶段（0.340，PYADAMAS_TYPE_TAGS）：运行期类型码 + isinstance 谓词
-   + 带 tag 的 repr（rt_any.c / rt_str.c）。类型码与 src/tag_defs.h 的
+   + 带 tag 的 repr（rt_any.c / rt_str.c）。类型码与 src/backend/tag_defs.h 的
    PaTypeCode 逐字对应；tag 无精确信息时按头 kind 判型（边界见实现注释）。 */
 int64_t pa_any_type(int64_t v, int64_t tag);
 int64_t pa_any_type_is(int64_t v, int64_t tag, int64_t code);
@@ -1233,7 +1233,7 @@ double pa_round_f64(double x, int64_t ndigits);
 int64_t pa_round_i64(int64_t v, int64_t ndigits);
 int64_t pa_str_eq(PyAdamasStr* a, PyAdamasStr* b);
 int64_t pa_str_cmp(PyAdamasStr* a, PyAdamasStr* b);
-/* 字符串方法派发：op 序号与 src/ir.h 的 StrOp 一致；未用的参数传 0。 */
+/* 字符串方法派发：op 序号与 src/ir/ir.h 的 StrOp 一致；未用的参数传 0。 */
 int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
 int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
 
@@ -1784,7 +1784,7 @@ int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc);
 
    json.parse(text) -> unknown；json.stringify(v) 复用 pa_json_dumps（描述符
    里 'u' 表示「运行期按值判型」）。json.* 辅助全部走 pa_json_op 一个入口
-   （op 编码见 rt_json.c 的 JSONOP_*，与 src/lower_import_misc.cpp 手工对齐）。 */
+   （op 编码见 rt_json.c 的 JSONOP_*，与 src/lower/import_misc.cpp 手工对齐）。 */
 int64_t pa_json_parse(PyAdamasStr* text);
 int64_t pa_json_op(int64_t op, int64_t a, int64_t b, int64_t c);
 

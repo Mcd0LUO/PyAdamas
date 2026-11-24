@@ -4,7 +4,7 @@
 # 比指针）；键是「动态构造的 str」（append 建 list 的元素、函数参数、列表下标
 # 取出的 str）时，等值的新对象查不到 → KeyError。修复见 runtime/rt_dict.c：
 # unknown 键域（kind 3/9）在运行时认出堆字符串后按内容哈希/比较；同时
-# ir.cpp 让 key_kind 3/9 的 dict 强制保留精确堆索引（探针需要）。
+# ir/ir.cpp 让 key_kind 3/9 的 dict 强制保留精确堆索引（探针需要）。
 #
 # 覆盖：append 建 list 传参 + 下标读/写；元素 str/int/float；多层调用；
 # 函数内修改 list；list 作为 dict 键取值来源；typed/untyped 参数对照。

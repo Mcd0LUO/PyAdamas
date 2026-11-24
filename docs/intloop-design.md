@@ -192,7 +192,7 @@ callee-saved（%rbx），%r12-%r15 空闲。候选对策：把「同块但跨调
 - 语料零差异：tests/run + bench/daily **302 文件 flag-on==off**（输出+rc）。
 - CPython 对拍：回归 293-296 expect 段由 CPython 3.14 生成，on/off 双模式
   通过；四基准输出与 CPython 一致（14200 / -104936,22 / 43198080 / 2178309）。
-- check_size：无新增超限（5 个既有超限文件不变；opt_intloop.cpp 993 行 < 1200）。
+- check_size：无新增超限（5 个既有超限文件不变；opt/intloop.cpp 993 行 < 1200）。
 
 ### 3.4 负面结论与剩余
 

@@ -4,21 +4,21 @@
 
 ```
 source.py
-   │  Lexer（lexer.h，header-only）
+   │  Lexer（syntax/lexer.h，header-only）
    ▼
-token 流（token.h）
-   │  Parser（parser.cpp，递归下降 + 优先级爬升）
+token 流（common/token.h）
+   │  Parser（syntax/parser.cpp，递归下降 + 优先级爬升）
    ▼
-AST（ast.h）
-   │  Desugar（desugar.cpp）：lambda → 合成嵌套 def
+AST（common/ast.h）
+   │  Desugar（syntax/desugar.cpp）：lambda → 合成嵌套 def
    ▼
 AST（已展开）─────────────► TypeChecker（typecheck*.cpp）
    │                          │ 只做检查与推断，不改树
    ▼                          ▼
-Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck.h）
+Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck/typecheck.h）
    │
    ▼
-IR（ir.h）：函数 → 基本块 → 三地址指令
+IR（ir/ir.h）：函数 → 基本块 → 三地址指令
    │  Opt（opt*.cpp，-O2 时的折叠/内联/LICM/下标版本化/循环旋转/跨块 CSE）
    │  AsmGen（codegen*.cpp）
    ▼
@@ -46,7 +46,7 @@ GNU as 汇编（AT&T）
 
 ### 类型怎么穿过阶段边界
 
-AST 本身不带类型字段（`ast.h` 里没有 `TypePtr`）。类型单独存在 `TypeChecker` 的几张表里：
+AST 本身不带类型字段（`common/ast.h` 里没有 `TypePtr`）。类型单独存在 `TypeChecker` 的几张表里：
 
 - `expr_types_`：表达式节点 → 类型
 - `func_scopes_` / `func_infos_`：函数定义节点 → 作用域 / 签名
@@ -63,18 +63,18 @@ IR 则是**自带类型**的：每条指令有 `ty`，每个 vreg 和槽位有 `
 严格单向，没有环：
 
 ```
-token.h  ←  lexer.h  ←  parser.h/cpp  ←  ast.h
+common/token.h  ←  syntax/lexer.h  ←  syntax/parser.h/cpp  ←  common/ast.h
                                           ↑
-typecheck.h ──────────────────────────────┘
+typecheck/typecheck.h ──────────────────────────────┘
      ↑
-   ir.h  ←  lower.h/cpp
+   ir/ir.h  ←  lower/lower.h/cpp
      ↑
-codegen.h/cpp
+backend/codegen.h/cpp
      ↑
-  main.cpp + driver_build.cpp（唯一知道所有阶段的文件）
+  main.cpp + driver/build.cpp（唯一知道所有阶段的文件）
 ```
 
-只有 `main.cpp` / `driver_build.cpp` 同时 include 全部阶段：前者做 CLI 分派与前端入口，后者负责多模块编译、增量缓存与链接，并统一报错格式。任何阶段都不 include 它们，也不互相跨层调用（`lower` 是唯一一个同时依赖 AST 和类型检查的阶段，这是它存在的意义）。
+只有 `main.cpp` / `driver/build.cpp` 同时 include 全部阶段：前者做 CLI 分派与前端入口，后者负责多模块编译、增量缓存与链接，并统一报错格式。任何阶段都不 include 它们，也不互相跨层调用（`lower` 是唯一一个同时依赖 AST 和类型检查的阶段，这是它存在的意义）。
 
 ## 关键取舍
 

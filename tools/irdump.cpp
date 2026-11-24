@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "ir_ops.h"
+#include "ir/ops.h"
 
 namespace {
 

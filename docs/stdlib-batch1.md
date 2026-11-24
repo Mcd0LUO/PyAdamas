@@ -48,7 +48,7 @@ prepare/step 技术上可行（本批 zlib 已验证该路径），但游标对�
 | stdlib/zlib.cpya | zlib C 绑定（link z + link "gzip_glue.c"） |
 | stdlib/gzip_glue.c | raw deflate/inflate + zlib inflate 的 C 胶水（z_stream 留在 C 侧，Python 只传缓冲区） |
 
-模块表（src/driver_build.cpp kModuleTable）登记：argparse / configparser /
+模块表（src/driver/build.cpp kModuleTable）登记：argparse / configparser /
 gzip / zlib / _gzipio。
 
 ### argparse API 覆盖
@@ -110,17 +110,17 @@ gzip / zlib / _gzipio。
 
 | 编号 | 改动 | 位置 | 回归 |
 |---|---|---|---|
-| F1 | 跨模块动态属性：模块接口导出 needs_dict（格式 v11→v12）；getattr 字面量名/属性直写尊重 needs_dict | module.h/cpp、driver_build.cpp（flat 拷贝）、typecheck_builtin.cpp、typecheck_stmt.cpp | 257 |
-| F2 | setattr 非字面量名：值 coerce 进 unknown（float 装箱，修复漏装箱） | lower_builtin_reflect.cpp | 257 |
-| F3 | 显式 object/Any 形参保持 unknown 域，不回填单态化（float 实参调用点装箱）；接口序列化 ann_unknown；负数字面量默认值（-1/-2.5） | typecheck_types.h、typecheck.cpp、typecheck_call.cpp、lower_call.cpp、module.cpp | 258 |
-| F4 | 类型名当值：int/float/str 等是 TypeObj（机器表示＝类型名字符串），同一性/相等/print/str/容器/isinstance/issubclass 全打通；类型对象值当被调者明确拒绝 | typecheck_expr.cpp、typecheck.h、lower_expr_assign.cpp、lower_expr_ops.cpp、lower_builtin_reflect.cpp、lower_call.cpp、lower_expr_dunder.cpp | 259 |
-| B1 | 空容器字面量类型洞按目标填：字段赋值/重赋值、dict/list 下标存、append、return、实参（merge_elem + declare + bind_param + stmt_return）——修复 str 键退化成指针哈希、内容相同的键查不回 | typecheck_types.h、typecheck.cpp、typecheck_stmt.cpp、typecheck_stmt_forms.cpp、typecheck_call.cpp | 260 |
-| B2 | is/is not 对 unknown/Optional 操作数补 Mov 到机器字——修复 cmp.eq 按底层 str 走内容比较、None 当 NULL 解引用段错误 | lower_expr_ops.cpp | 261 |
-| B3 | unknown 迭代/物化：for/推导式/list()/tuple() 经 pa_any_iter_list 按运行期种类展开（list 零拷贝 +1、str 拆码点、dict 取键） | rt_class.c、ir_ops.h（RtFn 末尾追加）、lower_stmt.cpp、lower_comp.cpp、lower_call.cpp、lower_builtin_container.cpp、ir.cpp | 257/261 |
-| B4 | vars() 合并动态属性 dict（AttrDict 借用 + DictUpdate） | lower_builtin_reflect.cpp、rt_class.c | 257 |
-| B5 | repr(unknown)（ReprAny → pa_repr_any） | lower_builtin_text.cpp、ir_ops.h | 261 |
+| F1 | 跨模块动态属性：模块接口导出 needs_dict（格式 v11→v12）；getattr 字面量名/属性直写尊重 needs_dict | ir/module.h/cpp、driver/build.cpp（flat 拷贝）、typecheck/builtin.cpp、typecheck/stmt.cpp | 257 |
+| F2 | setattr 非字面量名：值 coerce 进 unknown（float 装箱，修复漏装箱） | lower/builtin_reflect.cpp | 257 |
+| F3 | 显式 object/Any 形参保持 unknown 域，不回填单态化（float 实参调用点装箱）；接口序列化 ann_unknown；负数字面量默认值（-1/-2.5） | typecheck/types.h、typecheck/typecheck.cpp、typecheck/call.cpp、lower/call.cpp、ir/module.cpp | 258 |
+| F4 | 类型名当值：int/float/str 等是 TypeObj（机器表示＝类型名字符串），同一性/相等/print/str/容器/isinstance/issubclass 全打通；类型对象值当被调者明确拒绝 | typecheck/expr.cpp、typecheck/typecheck.h、lower/expr_assign.cpp、lower/expr_ops.cpp、lower/builtin_reflect.cpp、lower/call.cpp、lower/expr_dunder.cpp | 259 |
+| B1 | 空容器字面量类型洞按目标填：字段赋值/重赋值、dict/list 下标存、append、return、实参（merge_elem + declare + bind_param + stmt_return）——修复 str 键退化成指针哈希、内容相同的键查不回 | typecheck/types.h、typecheck/typecheck.cpp、typecheck/stmt.cpp、typecheck/stmt_forms.cpp、typecheck/call.cpp | 260 |
+| B2 | is/is not 对 unknown/Optional 操作数补 Mov 到机器字——修复 cmp.eq 按底层 str 走内容比较、None 当 NULL 解引用段错误 | lower/expr_ops.cpp | 261 |
+| B3 | unknown 迭代/物化：for/推导式/list()/tuple() 经 pa_any_iter_list 按运行期种类展开（list 零拷贝 +1、str 拆码点、dict 取键） | rt_class.c、ir/ops.h（RtFn 末尾追加）、lower/stmt.cpp、lower/comp.cpp、lower/call.cpp、lower/builtin_container.cpp、ir/ir.cpp | 257/261 |
+| B4 | vars() 合并动态属性 dict（AttrDict 借用 + DictUpdate） | lower/builtin_reflect.cpp、rt_class.c | 257 |
+| B5 | repr(unknown)（ReprAny → pa_repr_any） | lower/builtin_text.cpp、ir/ops.h | 261 |
 | B6 | int()/float() 错误消息 CPython 口径（with base %d: %r / could not convert string to float: %r） | rt_str.c | 261 |
-| B7 | cimport 的 link "file.c"：cwd 找不到时回退 .cpya 所在目录（转绝对路径），stdlib 分发不依赖用户 cwd | cimport.cpp | 255/256 |
+| B7 | cimport 的 link "file.c"：cwd 找不到时回退 .cpya 所在目录（转绝对路径），stdlib 分发不依赖用户 cwd | cimport/cimport.cpp | 255/256 |
 
 **RtFn 新增全部追加在枚举末尾**（AttrDict / AnyIterList / ReprAny），
 不改既有编号（0.324 集成约定）。**pa_any_iter_list 放 rt_class.c**（与
@@ -217,8 +217,8 @@ type=float 转换漏盒；gzip 内部 bytes 链在含 unknown 中转的上下文
 - 套件普通 + ASan（PYADAMAS_TEST_JOBS=8）：见 CHANGELOG。
 - ASan detect_leaks=1 抽查新用例：见 CHANGELOG。
 - check_size：无新增超限文件（新增 stdlib/*.py 与 runtime 函数不在
-  src/ 1200 行规则内；src 改动落在有余量文件，driver_build.cpp/
-  ir_ops.h/typecheck_types.h 为既有超限文件的最小增量）。
+  src/ 1200 行规则内；src 改动落在有余量文件，driver/build.cpp/
+  ir/ops.h/typecheck_types.h 为既有超限文件的最小增量）。
 
 ## 六、集成建议
 

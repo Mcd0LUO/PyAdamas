@@ -2,12 +2,12 @@
 //
 // 用法：eh_gen <输出目录>
 //   为每个用例生成一份 <输出目录>/<name>.s：一个合成函数（.cfi_startproc /
-//   .cfi_endproc）+ 由 src/eh_emit.cpp 发射的 .cfi_personality / .cfi_lsda
+//   .cfi_endproc）+ 由 src/backend/eh_emit.cpp 发射的 .cfi_personality / .cfi_lsda
 //   与 .gcc_except_table LSDA + DW.ref 指针槽。
 //   run.sh 负责汇编、用 objcopy 抽出 .gcc_except_table 的原始字节，再和
 //   gcc 14.2 实测基准（tools/lsda_ref/FINDINGS.md §0.1）逐字节比对。
 //
-// 不进 CMake：g++ -std=c++20 -I src tests/eh/main.cpp src/eh_emit.cpp 一条命令编完。
+// 不进 CMake：g++ -std=c++20 -I src tests/eh/main.cpp src/backend/eh_emit.cpp 一条命令编完。
 // 每个 .s 是独立 TU（各自带 DW.ref 槽），所以逐文件汇编、逐文件比对。
 
 #include <cstdio>
@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "eh_emit.h"
+#include "backend/eh_emit.h"
 
 namespace {
 

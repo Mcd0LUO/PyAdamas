@@ -38,8 +38,8 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | 无改动 | 0.00s |
 | 改 `codegen*.cpp` | 约 2.7s |
 | 改 `main.cpp` | 约 2.4s |
-| 改 `parser.cpp` | 约 3.4s |
-| 改 `typecheck.h`（触发多个单元） | 约 3.7s |
+| 改 `syntax/parser.cpp` | 约 3.4s |
+| 改 `typecheck/typecheck.h`（触发多个单元） | 约 3.7s |
 | 全量 `cmake --build --preset dev` | 约 4.7s |
 
 拆 TU 只对「只改一个文件」有效：预处理后一共 10 万行，项目自身只有 1 万行，95% 是标准库模板展开，全量构建只能靠并行。PCH 试过（84MB，只省 0.34s，且 `-O` 级别不匹配会静默失效），不划算。
@@ -431,7 +431,7 @@ build/asan/pyadamas check tests/09_types.py
 ```
 
 注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套
-设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），
+设了硬上限：`syntax/parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），
 超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查
 和降级都是照 AST 递归的，树有多深它们就有多深。
 
@@ -445,7 +445,7 @@ build/asan/pyadamas check tests/09_types.py
 
 ```bash
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual \
-    -Isrc -DPYADAMAS_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/PyAdamas-strict
+    -Isrc -DPYADAMAS_RT_OBJ="\"$PWD/build/dev/rt.o\"" $(find src -name '*.cpp') -o /tmp/PyAdamas-strict
 ```
 
 直接用上面的 g++ 命令；不要用 `cmake -DCMAKE_CXX_FLAGS=...` 覆盖，`PYADAMAS_RT_OBJ` 由 CMake 生成，手改 flags 会丢。
@@ -481,10 +481,10 @@ bash tests/check_size.sh
 
 ### 加一条语法
 
-1. `token.h`：需要新记号就加枚举 + `tok_name`
-2. `lexer.h`：产出它
-3. `ast.h`：加节点，实现 `dump`
-4. `parser.cpp`：解析它（注意 `parse_atom` / `parse_stmt` 的分派和优先级）
+1. `common/token.h`：需要新记号就加枚举 + `tok_name`
+2. `syntax/lexer.h`：产出它
+3. `common/ast.h`：加节点，实现 `dump`
+4. `syntax/parser.cpp`：解析它（注意 `parse_atom` / `parse_stmt` 的分派和优先级）
 5. `typecheck*.cpp`：加类型规则；不确定就返回 `unknown` 放行
 6. `lower*.cpp`：降级；做不到就 `err("... is not supported by the code generator yet")`
 7. `tests/`：正例 + 反例各一个
@@ -500,11 +500,11 @@ bash tests/check_size.sh
 
 ### 加一个类特性
 
-类的真相在 `ClassInfo`（`typecheck.h`）：字段顺序决定 `field.get` 的偏移，`MethodInfo::slot` 决定 vtable 下标。加特性时按这条链走：
+类的真相在 `ClassInfo`（`typecheck/typecheck.h`）：字段顺序决定 `field.get` 的偏移，`MethodInfo::slot` 决定 vtable 下标。加特性时按这条链走：
 
-1. `typecheck.h`：`ClassInfo` / `FieldInfo` / `MethodInfo` 加字段
-2. `typecheck_func.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
-3. `lower.cpp` 的 `collect_classes()`（预扫描建 `IRClass`）与 `lower_classdef()`（填 vtable）
+1. `typecheck/typecheck.h`：`ClassInfo` / `FieldInfo` / `MethodInfo` 加字段
+2. `typecheck/func.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
+3. `lower/lower.cpp` 的 `collect_classes()`（预扫描建 `IRClass`）与 `lower_classdef()`（填 vtable）
 4. `codegen*.cpp`：只有对象布局变了才需要动（`field.get` 的偏移由 IR 携带）
 5. `tests/run/09_class.py`：钉住新行为
 
@@ -512,7 +512,7 @@ bash tests/check_size.sh
 
 放宽的边界也要守住：`ClassInfo::open`（基类在外部、类体里有语句）和骨架（`complete == false`）只影响**成员查找**，不能让它影响布局。`n_fields()` / `obj_size()` 必须只数真实字段——把 open 当成「字段数不定」就会让所有对象分配小一圈，运行时踩内存。
 
-新增的隐式字段（`self.x = ...`）在方法体检查过程中追加到 `fields`，顺序就是首次赋值顺序。这依赖一个前提：**类型检查阶段没有任何地方缓存 `n_fields()`**。目前只有 `lower.cpp` 的 `collect_classes()` 读它，那是类型检查全部结束之后。
+新增的隐式字段（`self.x = ...`）在方法体检查过程中追加到 `fields`，顺序就是首次赋值顺序。这依赖一个前提：**类型检查阶段没有任何地方缓存 `n_fields()`**。目前只有 `lower/lower.cpp` 的 `collect_classes()` 读它，那是类型检查全部结束之后。
 
 ### 加一条 IR 指令
 
@@ -520,9 +520,9 @@ bash tests/check_size.sh
 
 ### 加一个内置函数
 
-1. `typecheck_builtin.cpp` 的 `builtin_call()`：加签名规则
-2. `typecheck_call.cpp` 的 `is_builtin_callable()`：登记名字
-3. `lower_builtin.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
+1. `typecheck/builtin.cpp` 的 `builtin_call()`：加签名规则
+2. `typecheck/call.cpp` 的 `is_builtin_callable()`：登记名字
+3. `lower/builtin.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
 4. `tests/`：正例 + 反例
 
 ### 加一个运行时函数

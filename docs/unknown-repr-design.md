@@ -283,17 +283,17 @@ kind=8；print/repr/str/truth 已有分派（rt_cpy/rt_str/rt_format）。
   插入新键时没有补引用。计数器推断成 int 后 b1/b5 第一次触发该融合，
   动态键（日志字段/邮箱）插入后被调用方释放，留下悬空键 -> "refcount
   increment on a freed object" 崩溃。修：miss 分支 pa_own_inc(key_own,key)。
-- opt_dict_bump.cpp：融合模式原来要求值侧一定有一条 RcIncUnknown；值类型
+- opt/dict_bump.cpp：融合模式原来要求值侧一定有一条 RcIncUnknown；值类型
   变成 int 后没有这条 retain。改成 6/7 指令两种形态都接受。
-- lower_method.cpp / lower_c_lazy.cpp：def_heap(in.ty, std::move(in)) 在同一
+- lower/method.cpp / lower/c_lazy.cpp：def_heap(in.ty, std::move(in)) 在同一
   实参列表里读 in.ty，求值顺序未指定；GCC 先构造 by-value 参数移走 in.ty，
   导致 cimport 返回 float 的 vreg 被记成 unknown（机器值在 xmm、静态类型
   unknown 的长期不一致）。先取 TypePtr 再 move。这是 unknown -> float 解盒
   第一次暴露出来的 ABI 洞。
-- lower_expr_assign.cpp：for k, v in d.items() 的元组解包按目标变量符号表
+- lower/expr_assign.cpp：for k, v in d.items() 的元组解包按目标变量符号表
   类型取元素类型；模块级目标可能因预绑定/join 停在 unknown。改成优先取
   源 tuple 的 sub[i]（更精确），fannkuch 因此整函数摆脱 unknown。
-- ir.cpp：dict.keys/values/items 在运行时按 key_own/val_own 混合种类以
+- ir/ir.cpp：dict.keys/values/items 在运行时按 key_own/val_own 混合种类以
   heap=2 追加元素，值可能是 int/float 标量；unknown 探针需要索引。原分析
   把这类模块判成 exact-RC（索引关闭），exact-RC 的探针回退会把对齐的
   double 位模式当指针解引用（231_float_dict 实测 SIGSEGV）。把

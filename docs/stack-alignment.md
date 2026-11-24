@@ -95,7 +95,7 @@ gdb 的 `bt` 在这一段给出一个无法符号化的 `#2` 帧，说明帧链�
 ### 当时的（错误）推断
 
 加了编译期开关 `PYADAMAS_ALIGN_CHECK` 后（见 §5 第 1 条，实现在
-`codegen_block.cpp` 的函数序言里），跑 24_async 立刻抓到：
+`backend/block.cpp` 的函数序言里），跑 24_async 立刻抓到：
 
     Program received signal SIGILL
     0x000055555556274b in pyadamas_fn_33float_one_32 () at 24_async.py:126
@@ -130,7 +130,7 @@ gdb 的 `bt` 在这一段给出一个无法符号化的 `#2` 帧，说明帧链�
 > 下面这些步骤指向 EH 落地块，方向是错的；真实修复见 §9。
 
 
-1. 在 `codegen_block.cpp` 里查落地块（EH landing pad）的生成路径：它进入时
+1. 在 `backend/block.cpp` 里查落地块（EH landing pad）的生成路径：它进入时
    的 rsp 偏移是否被显式建模（当前 prologue 的 `cfa_off_` 只覆盖线性代码）；
 2. 落地块发出的 `call` 前是否少了 `subq $8`/`addq $8` 平衡；
 3. 落地块应发在所属函数的 `.size` 之内（或显式给符号），否则 `nm`/
@@ -146,7 +146,7 @@ gdb 的 `bt` 在这一段给出一个无法符号化的 `#2` 帧，说明帧链�
 
 ### Bug 1：closure shim 的栈对齐公式错
 
-`emit_closure_shim`（`codegen_block.cpp`）慢路径的序列是
+`emit_closure_shim`（`backend/block.cpp`）慢路径的序列是
 `subq tmp → addq spill → call`，其中 `spill = 8*n`（n=实参个数）。
 
 原来的 `tmp`：
@@ -172,7 +172,7 @@ while (((8 - tmp + spill) & 15) != 0) tmp += 8;
 
 ### Bug 2：C 回调跳板没有补 8 字节
 
-`.LcbtrampN`（`codegen.cpp`）由 C 当普通函数调用（入口 rsp ≡ 8），它自己
+`.LcbtrampN`（`backend/codegen.cpp`）由 C 当普通函数调用（入口 rsp ≡ 8），它自己
 又要发一次 `call *(%r10)`，但**没有任何 rsp 调整**：
 
 ```asm

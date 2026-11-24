@@ -35,16 +35,16 @@
 #include <unistd.h>
 #include <vector>
 
-#include "ast.h"
-#include "cdecl.h"
-#include "codegen.h"
-#include "desugar.h"
-#include "ir.h"
-#include "lexer.h"
-#include "lower.h"
-#include "module.h"
-#include "parser.h"
-#include "typecheck.h"
+#include "common/ast.h"
+#include "cimport/cdecl.h"
+#include "backend/codegen.h"
+#include "syntax/desugar.h"
+#include "ir/ir.h"
+#include "syntax/lexer.h"
+#include "lower/lower.h"
+#include "ir/module.h"
+#include "syntax/parser.h"
+#include "typecheck/typecheck.h"
 
 #ifndef PYADAMAS_RT_OBJ
 #define PYADAMAS_RT_OBJ "build/dev/rt.o"
@@ -53,11 +53,11 @@
 #define PYADAMAS_MODCACHE_DIR "build/dev/modcache"
 #endif
 
-#include "deps_json.h"
-#include "driver_build.h"
-#include "driver_modules.h"
-#include "target_abi.h"
-#include "driver_util.h"
+#include "ir/deps_json.h"
+#include "driver/build.h"
+#include "driver/modules.h"
+#include "backend/target_abi.h"
+#include "driver/util.h"
 
 using pyadamas::read_file;
 using pyadamas::report;
@@ -407,7 +407,7 @@ int main(int argc, char** argv) {
         const char* simd_env = std::getenv("PYADAMAS_SIMD");
         prog.simd = simd_env && std::string_view(simd_env) != "0";
         // 通用循环自动向量化（**默认开**，0.384）：认任意可数循环的
-        // map/reduction（codegen_vect.cpp），不依赖具体程序的形状。
+        // map/reduction（backend/vect.cpp），不依赖具体程序的形状。
         // PYADAMAS_VECT=0 显式关。参与缓存失效。
         const char* vect_env = std::getenv("PYADAMAS_VECT");
         prog.vect = !vect_env || std::string_view(vect_env) != "0";

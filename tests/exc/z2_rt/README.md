@@ -30,7 +30,7 @@
 | `../../../runtime/rt_eh.c` | **新增**：展开包装（`_Unwind_Exception` + 异常载荷）、`pa_eh_throw` / `pa_eh_landing` / `pa_eh_done`、`pa_frame_unwind_to_cfa`（方案 G 的批量释放 + 重入 guard）、personality 帧清理钩子的装配 |
 | `../../../runtime/rt_personality.c` | phase 2 的 `_UA_HANDLER_FRAME` 分支里、`_Unwind_SetIP` **之前**调用帧清理钩子（钩子变量默认 NULL，单独链接 personality 的 Z1 夹具不受影响） |
 | `../../../runtime/rt_internal.h` | `PyAdamasFrame.cfa` 字段、`PA_EH_EXC_CLASS`、胶水声明、`pending_exc_args` 的 extern |
-| `../../../src/codegen_impl.h`、`../../../src/codegen_block.cpp` | 帧记录头 5 → 6 字（`rec_off` / `rec_words` / 槽地址从 `ri = 6` 起）；序言里在进链之前 `movq %rsp, rec_mem(5)` 写 CFA |
+| `../../../src/backend/impl.h`、`../../../src/backend/block.cpp` | 帧记录头 5 → 6 字（`rec_off` / `rec_words` / 槽地址从 `ri = 6` 起）；序言里在进链之前 `movq %rsp, rec_mem(5)` 写 CFA |
 | `z2_threelayer.S` | 三层帧夹具：inner 抛 → mid（owned / owned|bit0 / 只扫描 bit1 三个槽）→ outer catch-all（有记录）+ norec 变体（handler 帧没有记录）+ 未捕获路径 |
 | `driver.c` | 构造异常 / RC 对象 / 释放计数，断言帧链、释放次数、全局状态、RSS；反证开关 |
 | `run.sh` | 一键编译 + 断言 + 反证，PASS/FAIL 打印，退出码 0/1 |

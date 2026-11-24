@@ -53,13 +53,13 @@ HEAD（52f8b96，同口径同语料）：
 | commit | 改动 | 基线热点 → 之后 |
 |---|---|---|
 | 7872bab | compute_dom 的 dom[b]：每块 nb 字节 char 向量 → 64 位字位集（同一不动点、同一交集顺序、同一全 1 初始化） | 20.2% → 1.6% |
-| 57a9080 / 0ffb6b6 | assign_vreg_slots 的 blk_use/blk_def/live_in/live_out → 位集（新增 src/block_bitset.h）；assign_block_temp_regs 的三张 per-block unordered_map<VReg,…> → 定长数组 + 脏项复位 | 14.2% → 1.1%；哈希插入 15% → 0 |
+| 57a9080 / 0ffb6b6 | assign_vreg_slots 的 blk_use/blk_def/live_in/live_out → 位集（新增 src/common/block_bitset.h）；assign_block_temp_regs 的三张 per-block unordered_map<VReg,…> → 定长数组 + 脏项复位 | 14.2% → 1.1%；哈希插入 15% → 0 |
 | a30675d | hoist_loop / version_bounds_loop 的 def_block/multi_def/used_outside：每个循环头重建 unordered_map/set → 定长数组 | — |
 | 118c333 | slots_needing_zero 的 must 数据流 → 位集；指令注释 Inst::text_into 直写复用缓冲（原来每指令 3 次分配）、vreg_str 编号缓存、PYADAMAS_IR_CHECK 的 getenv 只读一次 | — |
 | 52f8b96 | vreg_is_rc_mark：每个 vreg 扫全函数（O(n²)）→ 入口一次扫描打标 | 3.2%（srcline）→ 0 |
-| 8675670 | 块内索引/注释发射收敛到 block_bitset.h + 新文件 codegen_comment.cpp（codegen_impl.h 守回 1200 行 check_size 上限，超限文件集合与基线一致） | — |
+| 8675670 | 块内索引/注释发射收敛到 common/block_bitset.h + 新文件 backend/comment.cpp（backend/impl.h 守回 1200 行 check_size 上限，超限文件集合与基线一致） | — |
 
-去掉无读者的 IR 索引（ir.cpp rebuild_use_def 不再重建 inst_by_id /
+去掉无读者的 IR 索引（ir/ir.cpp rebuild_use_def 不再重建 inst_by_id /
 def_of / uses_of）：包在 57a9080 里。这三张表自 0.3xx 的 DCE 改线性计数后
 已无读者（全仓库 grep 只有写入），但重建是逐指令哈希插入 + 每结点 malloc。
 **集成注意**：若别的分支新增了对 def_of/uses_of/inst_by_id 的读取，需要
@@ -107,7 +107,7 @@ exp 中位 6.87s（-45.3%），与上表一致。
    实测 vformat 热点 1.0% → 0.9%，收益有限。
 2. **malloc/free 仍占 ~7%**：主要是每条指令一个注释 MItem（std::string）
    与 MItem/MInstr 池增长。彻底解决要给 MItem::text 换 arena/偏移表示，
-   会动 mach_instr.h + mach_emit.cpp 的公共结构，收益 ~2-3%，本轮不做。
+   会动 backend/mach_instr.h + backend/mach_emit.cpp 的公共结构，收益 ~2-3%，本轮不做。
 3. **emit_function 自身 5.7%**：热点分散在几十条标量存储（per-slot 循环、
    tag 字分配、缓存构建），没有单一 O(n²)；进一步要重排分配阶段，收益/
    风险比不划算。
@@ -120,11 +120,11 @@ exp 中位 6.87s（-45.3%），与上表一致。
 
 ## 6. 集成建议（给 lead）
 
-- 改动集中在 opt_loop.cpp / ir.cpp / ir_types.h / codegen_regalloc.cpp /
-  codegen_block.cpp / codegen_impl.h / codegen_ops.cpp + 新增
-  src/block_bitset.h。域隔离上不碰 codegen_simd*（vect1）、rt_big/Big
+- 改动集中在 opt/loop.cpp / ir/ir.cpp / ir/types.h / backend/regalloc.cpp /
+  backend/block.cpp / backend/impl.h / backend/ops.cpp + 新增
+  src/common/block_bitset.h。域隔离上不碰 codegen_simd*（vect1）、rt_big/Big
   （big1）、rt_file/rt_eh/rt_class（lang1）。
-- ir_types.h 删了三个死索引成员：与别的分支冲突时，保留删除（或在对方
+- ir/types.h 删了三个死索引成员：与别的分支冲突时，保留删除（或在对方
   读取处补访问器）。
 - 所有改动都不改生成码，理论上不需要重跑生成码基准；但 regalloc/位集
   改动触及分配路径，**建议集成后再跑一次 difftest + 40 文件 cmp**。

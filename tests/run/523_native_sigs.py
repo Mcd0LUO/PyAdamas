@@ -1,9 +1,9 @@
 # 523_native_sigs.py —— 声明式原生签名（stdlib/sigs/<module>.pysig）端到端
 #
 # 覆盖 P0「签名从 C++ 硬编码挪进数据」的端到端行为：模块 time 的签名现在由
-# stdlib/sigs/time.pysig 提供（builtin_sigs.cpp 里的 time 分支已删除），
+# stdlib/sigs/time.pysig 提供（typecheck/builtin_sigs.cpp 里的 time 分支已删除），
 # 包括普通函数、带默认值的可选参数、tuple[int, ...] 返回类型、可变参，以及
-# from-import 的原生名解析（lower_import.cpp 的 native_fn 走声明表）。
+# from-import 的原生名解析（lower/import.cpp 的 native_fn 走声明表）。
 
 import time
 from time import monotonic, perf_counter, sleep

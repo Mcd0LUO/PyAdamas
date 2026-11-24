@@ -55,7 +55,7 @@
 **开关**：`--zero-cost-exc`（默认关），写进模块缓存清单（`zerocostexc` 行）
 参与缓存失效。关闭时所有输出与原路径逐字节一致。
 
-**形状门禁**（`src/lower_exc.cpp` 的 `find_zero_cost_try`）——只有同时满足
+**形状门禁**（`src/lower/exc.cpp` 的 `find_zero_cost_try`）——只有同时满足
 下面全部条件的函数才走新路径，其余函数保持 setjmp 路径：
 
 1. 非可挂起（函数体里没有 yield/await）；
@@ -67,12 +67,12 @@
 5. try 体里的 `raise` 只用「无参 / 单位置参」形态，且不是富异常实例
    （多参 raise / 富异常实例对应的 `pair` 还没有 `_Unwind` 版本）。
 
-**IR**（`src/ir_ops.h`、`src/ir_types.h`）：新增三条标记指令
+**IR**（`src/ir/ops.h`、`src/ir/types.h`）：新增三条标记指令
 `EhBegin` / `EhEnd` / `EhLandingPad`，以及五个运行时入口
 `EhRaise` / `EhRaiseValueFrom` / `EhReraise` / `EhRethrow` / `EhLand`。
 `IRFunction::eh_regions` 记录保护区/landing pad 的块号（给不可达块裁剪当根用）。
 
-**降级**（`lower_exc.cpp`）：
+**降级**（`lower/exc.cpp`）：
 
 - try 进入：`RcMark` 取临时栈水位（替代 `pa_handler_push` 的那一半；
   handler 记录栈在表驱动里不存在）；
@@ -86,7 +86,7 @@
   同一个函数里不再有 `raise → exc_longjmp` 路径（docs/exc-semantics.md §5.2
   的硬约束：同一函数内不许混用两种展开）。
 
-**codegen**（`codegen_block.cpp` / `codegen.cpp` / `codegen_ops.cpp`）：
+**codegen**（`backend/block.cpp` / `backend/codegen.cpp` / `backend/ops.cpp`）：
 
 - 函数入口预扫描三条标记，分配 `.LehB*` / `.LehE*` / `.LehLP*` 标签；
 - `.cfi_personality 0x9b, DW.ref.pa_personality` + `.cfi_lsda 0x1b, .LLSDA<N>`

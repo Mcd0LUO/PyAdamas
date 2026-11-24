@@ -2,7 +2,7 @@
 
 > 状态：**先验薄原型**（vthread 分支，基于 0.304 / 1e47057）。走通路径 + 标坑，
 > 不追求完备。深坑（精确多栈 GC 的 CFI 化、可增长栈、M>1、抢占）记录绕行不做。
-> 实现：runtime/rt_vthread.c（~900 行）+ src/lower_vthread.cpp + 前端薄切片。
+> 实现：runtime/rt_vthread.c（~900 行）+ src/lower/vthread.cpp + 前端薄切片。
 
 ## 1. 模型
 
@@ -177,7 +177,7 @@ pa_vt_swap(from, to):           # SysV x86-64
   mk_vthread/mk_chan，type_name/join/assignable 同族补齐；go 表达式校验
   被调函数形态；builtin join/sleep/make_chan（make_chan 第 0 参是类型名，
   编译期特殊形式，不按值求类型）；chan 方法表 send/recv。
-- lowering（src/lower_vthread.cpp）：`go f(a,b)` 合成包装闭包
+- lowering（src/lower/vthread.cpp）：`go f(a,b)` 合成包装闭包
   `__pa_go_N`（build_lru_wrapper / build_partial_wrapper 同款形态）：
   env cell = [f, a, b]，体 = 读 cell 调 f、丢弃返回值（heap 结果 dec，
   unknown 结果 dec_unknown）。ClosureNew + cell  retain + VtSpawn（接管

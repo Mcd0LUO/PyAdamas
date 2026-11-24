@@ -34,7 +34,7 @@
 | stdlib/contextlib.py | nullcontext、@contextmanager、_GeneratorContextManager/ContextManager |
 | stdlib/difflib.py | SequenceMatcher（含 junk/autojunk）、Match、get_close_matches、unified_diff |
 
-模块表（src/driver_build.cpp 的 kModuleTable）逐个登记：urllib.parse、
+模块表（src/driver/build.cpp 的 kModuleTable）逐个登记：urllib.parse、
 secrets、calendar、struct、queue、contextlib、difflib。
 
 ## 三、各模块语义边界（轻量标尺）
@@ -186,7 +186,7 @@ runtime），stdlib 侧改不掉；本批测试把 yield 元组的用例放在�
 | 新用例 O0/O1/O2（320/321/322/324/325/326/327） | 三档输出与钉住的 expect **逐字节一致** |
 | 新用例 ASan detect_leaks=1 | 7/7 干净（无 LeakSanitizer 报告；见第六节的已知交互） |
 | difftest（tests/diff/run_diff.py，seeds=3） | **840 个程序，0 个失败** |
-| check_size | 无**新增**超限文件：5 个超限文件是基线就超的（codegen_regalloc 2539、driver_build 1540→1547、ir_ops.h 1350、lower_impl.h 1342、typecheck_types.h 1337）；本批 7 个新模块最大 564 行 |
+| check_size | 无**新增**超限文件：5 个超限文件是基线就超的（codegen_regalloc 2539、driver_build 1540→1547、ir/ops.h 1350、lower/impl.h 1342、typecheck/types.h 1337）；本批 7 个新模块最大 564 行 |
 
 构建：`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release` +
 `cmake --build build -j18`（只在本 worktree 的 build/，不碰主树）。

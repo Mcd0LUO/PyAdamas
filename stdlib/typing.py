@@ -2,7 +2,7 @@
 
 PyAdamas 的注解解析器**按名字**识别常用 typing 名字（List/Dict/Tuple/Set/
 Optional/Union/Sequence/Iterable/Iterator/Mapping/Any 等），见
-src/typecheck.cpp 的 parse_annotation：这些名字出现在函数/变量/字段标注里
+src/typecheck/typecheck.cpp 的 parse_annotation：这些名字出现在函数/变量/字段标注里
 时会被直接映射成内部类型，**不需要真的 import 本模块**。因此本模块的目标
 只是让 `from typing import ...` 能编译通过，并提供少数值级 API。
 

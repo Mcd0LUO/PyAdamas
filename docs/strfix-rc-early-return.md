@@ -43,7 +43,7 @@ gdb 在 `pa_rc_shutdown` 入口遍历 `leaf_page_tab` 位图，退出时仅存 2
   **s11(v,168)** / s12，四个槽全释放。
 - **早返回出口**（bb7，.loc 676）：只 dec s4 / s12，**漏 s8(var) 与 s11(v)**。
 
-机理：`Lowerer::release_slots()`（src/lower_impl_slots.cpp）按槽的**静态
+机理：`Lowerer::release_slots()`（src/lower/impl_slots.cpp）按槽的**静态
 属性**（`slot_owned` / `slot_ty` / `slot_unknown`）决定出口释放哪些槽。
 降级是**单遍源码序**：早返回（676 行）在 `var`/`v` 首次堆/owned 写入
 （688/704 行）**之前**降级，此刻这两个 unknown 槽的 `slot_owned` 尚未置位

@@ -38,14 +38,14 @@
 |---|---|---|
 | 帧记录结构 | `runtime/rt_internal.h:327-334` | `{prev, n, scan_base, scan_words, scan_mask, slots[]}`；槽地址低两位标记"可能非堆 / 只给 GC 扫" |
 | handler 记录 | `runtime/rt_internal.h:336-343` | `{jmp_buf env; prev; mark; frame}`；`frame` = 压 handler 时的 `pa_frame_top` |
-| 压帧 | `src/codegen_block.cpp:356-391` | 非生成器函数序言里内联写记录、链进 `pa_frame_top`；记录在局部区**顶部**（`src/codegen_impl.h` 的 `rec_off()` 与布局注释（写作时 :473-493）） |
-| 弹帧 | `src/codegen_regalloc.cpp:36-39` | 正常返回时只做 `pa_frame_top = rec->prev`，槽由各语句/函数出口的 `rc_cleanup` 释放 |
+| 压帧 | `src/backend/block.cpp:356-391` | 非生成器函数序言里内联写记录、链进 `pa_frame_top`；记录在局部区**顶部**（`src/backend/impl.h` 的 `rec_off()` 与布局注释（写作时 :473-493）） |
+| 弹帧 | `src/backend/regalloc.cpp:36-39` | 正常返回时只做 `pa_frame_top = rec->prev`，槽由各语句/函数出口的 `rc_cleanup` 释放 |
 | 逐帧释放 | `runtime/rt_exc.c:20-38` | `pa_frame_unwind(target)`：从栈顶往下逐帧"槽地址→非空→清零→`pa_rc_dec`/`pa_rc_dec_unknown`"，最后 `pa_frame_top = target` |
 | raise | `runtime/rt_exc.c:204-214` | `exc_longjmp`：先 `pa_frame_unwind(handler_top->frame)`，再 `_longjmp` |
 | 压 handler | `runtime/rt_exc.c:283-297` | `h->mark = pa_rc_mark()`、`h->frame = pa_frame_top` |
 | 弹 handler | `runtime/rt_exc.c:300-306` | `pa_rc_cleanup(h->mark)` 清受保护区临时值栈 |
 | 表驱动 personality | `runtime/rt_personality.c:488-659` | 只做 handler/cleanup 判定与上下文安装；不碰 `pa_frame_top` |
-| Z2-a 发射器 | `src/eh_emit.h:1-95`、`src/eh_emit.cpp:165-270` | LSDA/CFI 文本发射器（未接 codegen；git dd6c8d8） |
+| Z2-a 发射器 | `src/backend/eh_emit.h:1-95`、`src/backend/eh_emit.cpp:165-270` | LSDA/CFI 文本发射器（未接 codegen；git dd6c8d8） |
 
 关键点：**现在的释放发生在 longjmp 之前**，此时所有被跳过帧的栈都还完整；`pa_frame_unwind` 可以在
 真实栈上走链、解引用槽。表驱动把它换成了"逐帧逻辑展开"：unwinder 只调 personality / landing pad，
@@ -58,7 +58,7 @@
 - **C1（内存有效）**：读某个帧的 `PyAdamasFrame`/槽时，该帧的栈内存还没被复用。逻辑展开之后
   这些帧的栈是"退役"的；C 栈指针已经回到外层帧，任何函数调用都会向下占用它们的内存。
 - **C2（不自我覆盖）**：释放过程中 `pa_rc_dec` 会跑析构器（生成代码里的字段 dec / GC release
-  跳板，`src/codegen.cpp:253-353`），析构器继续用栈；如果此时正在遍历"在死栈里的槽地址数组"，
+  跳板，`src/backend/codegen.cpp:253-353`），析构器继续用栈；如果此时正在遍历"在死栈里的槽地址数组"，
   遍历会被自己的析构器踩坏。
 - **C3（GC 根链一致）**：`pa_frame_top` 同时也是 GC 影子根链表（`runtime/rt_core.c:980-1004`）。
   任何**会分配**的代码（用户函数、`pa_rc_dec` 里的 free 不分配，但正常代码会）运行之前，
@@ -107,16 +107,16 @@ actions=0x6 ip=0x402aba ... cfa=0x7fff0c7b9480 ... kind=handler    ← phase 2
 
 **结论：前提 1 成立；phase 1 记下的 CFA 在 LP 里就是目标帧（handler 帧）的 CFA。** 但这不是瓶颈，
 而且还有更省的做法：LP 在 handler 帧内，自己的 CFA 静态可算（`rsp + frame_bytes_ + 8`，
-`src/codegen_regalloc.cpp:24`），根本不必 phase 1 记。
+`src/backend/regalloc.cpp:24`），根本不必 phase 1 记。
 
 ### 3.2 致命问题：LP 执行时被跳过帧的栈已经不可安全访问（实测推翻）
 
 先用代码把布局算清楚（全部是当前 codegen 的确定行为）：
 
-- rsp 在函数体内恒定（`src/codegen_impl.h` 布局注释（写作时 :473-481）；`src/codegen_regalloc.cpp:12-26`），
-  CFA = rsp + frame_bytes_ + 8（`src/codegen_regalloc.cpp:24`）。
+- rsp 在函数体内恒定（`src/backend/impl.h` 布局注释（写作时 :473-481）；`src/backend/regalloc.cpp:12-26`），
+  CFA = rsp + frame_bytes_ + 8（`src/backend/regalloc.cpp:24`）。
 - 帧记录在局部区**顶端**：`rec_off(i) = out_bytes_ + locals_ - 8*(words - i)`
-  （`src/codegen_impl.h` 的 `rec_off()`（写作时 :489-492））。
+  （`src/backend/impl.h` 的 `rec_off()`（写作时 :489-492））。
 - LP 入口 rsp = 抛出点那条 `call` **之前**的 rsp（= handler 体 rsp，记作 A），不是 CFA
   （`tests/exc/z1_rt/README.md:244-255` 的实测；`docs/zero-cost-exceptions.md:158-166` 的硬约束 1）。
 
@@ -189,7 +189,7 @@ phase 2 拿到的 `_Unwind_GetCFA(ctx)` 就是目标 CFA（§3.1 已证一致）
 C 的非抛出成本确实为 0、面积也最小（≈3KB），但它需要一条不变量：**"有 personality/LSDA 的帧
 一定在 `pa_frame_top` 链上有一条记录"**——否则 personality 无法判断"这个被跳过的帧要不要
 `release_self`"。现状里"有 try 但一个 owned 槽都没有"的函数不发记录（`rec_words == 0`，
-`src/codegen_block.cpp:250-254`），要给它补一条空记录（+40B 栈 + 6 条序言指令），这本身又是
+`src/backend/block.cpp:250-254`），要给它补一条空记录（+40B 栈 + 6 条序言指令），这本身又是
 非抛出成本；同时"无 try 但有槽"的函数也要发 personality+空 LSDA，codegen 改动面比 G 大。
 留作 Z4 之后的面积优化（届时 Z4 已有 per-frame pad 的发射基础设施，可顺便切换）。
 
@@ -268,7 +268,7 @@ void pa_frame_unwind_to_cfa(uintptr_t target_cfa) {
   既为 finally 语义，也让这条路径进入 phase 2。
 - **C++/foreign 异常穿过我们的帧**：personality 不认领也不释放（§5.2 第 1 条）→ 我们的槽泄漏，
   但进程不崩。现有 setjmp 路径对这种情况是 UB（longjmp 跨 C++ 帧），所以这是净改善；登记为限制。
-- **重入/析构里 raise**：析构路径是生成 trampoline + runtime free，不跑用户代码（`src/codegen.cpp:253-353`；
+- **重入/析构里 raise**：析构路径是生成 trampoline + runtime free，不跑用户代码（`src/backend/codegen.cpp:253-353`；
   `docs/runtime.md:756` 明确没有 `__del__`），所以不会在释放过程中嵌套 `_Unwind`。为防将来破坏这个前提，
   建议加 `static int in_frame_release` 重入 guard，重入即 `panic_c`。
 
@@ -306,7 +306,7 @@ GC 是「RC 为主 + 循环收集器为辅」（`docs/runtime.md:770-805`），�
   gc_freed=71088，RSS 平台 ~7 MB），但有三个前提：对象在链上、到达 8 MB 级阈值才触发
   （`:1352-1360` 的 `major_threshold`），且回收前峰值 RSS 已经抬高数 MB。
 - **exact-RC 模式完全兜不住**：整程序没有 unknown 时入口会调 `pa_disable_unknown_index`
-  （`src/codegen.cpp:447-448`；触发条件 `src/ir.cpp:199-254`），此后 str/range/struct/
+  （`src/backend/codegen.cpp:447-448`；触发条件 `src/ir/ir.cpp:199-254`），此后 str/range/struct/
   无堆字段实例被 `rc_leaf_untracked` 判定为叶子（`runtime/rt_core.c:341-353`），
   `rc_link` 直接**不挂进 `heap_head`**（`:499-505`），且不计入 `alloc_since_gc/major`
   （`:559-563`）——GC 既看不见它们，也不会被它们触发。字符串是最常见的泄漏对象，这条路径上
@@ -324,14 +324,14 @@ GC 是「RC 为主 + 循环收集器为辅」（`docs/runtime.md:770-805`），�
 
 ## 7. 对 codegen 的发射要求（方案 G，Z2-b）
 
-1. **帧记录布局**（`runtime/rt_internal.h:327-334` + `src/codegen_impl.h` 的 `rec_off()` 与布局注释（写作时 :473-493） 同步改）：
+1. **帧记录布局**（`runtime/rt_internal.h:327-334` + `src/backend/impl.h` 的 `rec_off()` 与布局注释（写作时 :473-493） 同步改）：
    `PyAdamasFrame` 在 `scan_mask` 之后、`slots[]` 之前加 `uintptr_t cfa;`。
-   生成代码侧：头字 5 → 6（`words = 6 + entries`，`src/codegen_block.cpp:250-254` 的 `rec_words`、
-   `src/codegen_impl.h` 的 `rec_off()`（写作时 :489-492） 的 `rec_off` 公式同步），槽地址项从 `ri = 6` 开始。
-2. **序言写 CFA**：在压链（`movq %rax, pa_frame_top`，`src/codegen_block.cpp:389-390`）之前：
+   生成代码侧：头字 5 → 6（`words = 6 + entries`，`src/backend/block.cpp:250-254` 的 `rec_words`、
+   `src/backend/impl.h` 的 `rec_off()`（写作时 :489-492） 的 `rec_off` 公式同步），槽地址项从 `ri = 6` 开始。
+2. **序言写 CFA**：在压链（`movq %rax, pa_frame_top`，`src/backend/block.cpp:389-390`）之前：
 
    ```asm
-   leaq  (frame_bytes_+8)(%rsp), %rax   # 与 .cfi_def_cfa_offset 同一口径（codegen_regalloc.cpp:24）
+   leaq  (frame_bytes_+8)(%rsp), %rax   # 与 .cfi_def_cfa_offset 同一口径（backend/regalloc.cpp:24）
    movq  %rax, rec_cfa(%rsp)            # rec_mem(5)
    ```
 
@@ -340,17 +340,17 @@ GC 是「RC 为主 + 循环收集器为辅」（`docs/runtime.md:770-805`），�
    （`movq $K, rec_cfa(%rsp)`），personality 比较 `(uintptr_t)rec + K == CFA`；语义等价，
    但可读性差，建议 Z2-b 先用 `cfa`，性能敏感时再换。
 4. **LSDA/CFI 形态不变**：方案 G **不新增** cleanup range；Z2-b 仍按 `docs/exc-semantics.md` §6.3
-   只给 try 函数发 `.cfi_personality`/`.cfi_lsda`（`src/eh_emit.cpp:165-175`）与 catch-all 形态 A
+   只给 try 函数发 `.cfi_personality`/`.cfi_lsda`（`src/backend/eh_emit.cpp:165-175`）与 catch-all 形态 A
    的 LSDA（`:177-262`）、以及 landing pad（LP 内分发块照旧）。
 5. **landing pad 不承担任何帧释放**：LP 入口 `%rsp` 的约束见 `tests/exc/z1_rt/README.md:244-255`；
    LP 里"多打一次 `pa_frame_top` 的快照/恢复"是**错误**的（§3.2）。
 6. **入口 catch-all**：`__pa_main` 外再包一层 catch-all 保护区，LP 复刻 `exc_print_uncaught + exit(1)`
    （`runtime/rt_exc.c:194-214`；`docs/exc-semantics.md:599-602`）。
 7. **不要给手写汇编帧加 personality**：`main`、模块 init 桩、C 回调跳板、析构器、生成器帧释放跳板
-   （`src/codegen.cpp:243-353、403-425、427-465`）不在 `pa_frame_top` 链上，也不需要释放；
+   （`src/backend/codegen.cpp:243-353、403-425、427-465`）不在 `pa_frame_top` 链上，也不需要释放；
    给它们加 personality 会破坏尾跳/跳板 CFI 约定（`docs/exc-semantics.md:359-360`）。
 8. **门禁**：`zero_cost_exc && !is_generator && target_abi().gnu_cfi`；可挂起函数继续旧路径
-   （`docs/exc-semantics.md` §5.2）。Win64 不发（`src/target_abi.h:57-58`）。
+   （`docs/exc-semantics.md` §5.2）。Win64 不发（`src/backend/target_abi.h:57-58`）。
 9. **优化遍**：新标签/LP 不能跨块搬运、不能被 DCE 删（对齐 `docs/exc-semantics.md` §6.5）。
 
 ## 8. 对 personality 的改动清单
@@ -406,8 +406,8 @@ GC 是「RC 为主 + 循环收集器为辅」（`docs/runtime.md:770-805`），�
 
 ## 11. 证据复现
 
-> 说明：本文的 `file:line` 以写作时（2026-11-16 凌晨）当前工作区为准。写作期间 `src/codegen_impl.h`、
-> `src/codegen.cpp` 正被并发修改，行号可能漂移；引用 codegen 内部结构时以符号名（`rec_off`/`rec_mem`）为准。
+> 说明：本文的 `file:line` 以写作时（2026-11-16 凌晨）当前工作区为准。写作期间 `src/backend/impl.h`、
+> `src/backend/codegen.cpp` 正被并发修改，行号可能漂移；引用 codegen 内部结构时以符号名（`rec_off`/`rec_mem`）为准。
 
 - **E1（CFA）**：按 `tests/exc/z1_rt/run.sh` 的方式用 `-DPA_PERSONALITY_TRACE` 编 `rt_personality.c` +
   夹具，`Z1_TRACE=1 ./z1_rt`；stderr 的 `[pa_personality] ... cfa=...` 逐帧对比 phase 1/2。

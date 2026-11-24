@@ -1,6 +1,6 @@
 # collections.deque 原生类方法表对拍（CPython 3.14 同形脚本）
 # 已知差异：PA 的 maxlen 无界时为 -1（CPython 是 None），用兼容判定对齐。
-# 构造器保留在 builtin_sigs.cpp（pysig 默认值/静态类型无法等价表达，见 cookbook）。
+# 构造器保留在 typecheck/builtin_sigs.cpp（pysig 默认值/静态类型无法等价表达，见 cookbook）。
 from collections import deque
 
 d = deque([1, 2, 3])

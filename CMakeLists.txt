@@ -26,140 +26,140 @@ endif()
 
 set(PYADAMAS_SOURCES
   src/main.cpp
-  src/codegen_tag.cpp
-  src/codegen_impl.cpp
-  src/target_abi.cpp
-  src/driver_util.cpp
-  src/driver_link.cpp
-  src/driver_build.cpp
-  src/driver_modules.cpp
-  src/driver_check.cpp
-  src/builtin_sigs.cpp
-  src/parser.cpp
-  src/parser_stmt.cpp
-  src/parser_func.cpp
-  src/parser_expr.cpp
-  src/parser_match.cpp
-  src/typecheck.cpp
-  src/typecheck_stmt.cpp
-  src/typecheck_stmt_forms.cpp
-  src/typecheck_expr.cpp
-  src/typecheck_expr_attr.cpp
-  src/typecheck_call.cpp
-  src/typecheck_infer.cpp
-  src/typecheck_call_forms.cpp
-  src/typecheck_call_modules.cpp
-  src/typecheck_call_method.cpp
-  src/typecheck_builtin.cpp
-  src/typecheck_func.cpp
-  src/typecheck_dataclass.cpp
-  src/typecheck_enum.cpp
-  src/lower.cpp
-  src/lower_class.cpp
-  src/lower_impl_util.cpp
-  src/lower_impl_slots.cpp
-  src/lower_borrow.cpp
-  src/lower_stmt.cpp
-  src/lower_stmt_for.cpp
-  src/lower_idiom.cpp
-  src/lower_stmt_with.cpp
-  src/lower_stmt_async.cpp
-  src/lower_stmt_assign.cpp
-  src/lower_exc.cpp
-  src/lower_import.cpp
-  src/lower_import_native.cpp
-  src/lower_import_stdlib.cpp
-  src/lower_import_misc.cpp
-  src/lower_vthread.cpp
-  src/lower_cpy.cpp
-  src/lower_match.cpp
-  src/lower_expr.cpp
-  src/lower_expr_assign.cpp
-  src/lower_expr_ops.cpp
-  src/lower_expr_container.cpp
-  src/lower_expr_dunder.cpp
-  src/lower_comp.cpp
-  src/lower_call.cpp
-  src/lower_c_lazy.cpp
-  src/lower_builtin.cpp
-  src/lower_builtin_reflect.cpp
-  src/lower_builtin_seq.cpp
-  src/lower_builtin_container.cpp
-  src/lower_builtin_text.cpp
-  src/lower_builtin_misc.cpp
-  src/lower_aggregate.cpp
-  src/lower_method.cpp
-  src/lower_method_native.cpp
-  src/lower_method_containers.cpp
-  src/lower_method_str.cpp
-  src/lower_method_misc.cpp
-  src/lower_print.cpp
-  src/lower_gen.cpp
-  src/lower_gen_async.cpp
-  src/lower_gen_spill.cpp
-  src/opt.cpp
-  src/opt_forward.cpp
-  src/opt_cse.cpp
-  src/ir_verify.cpp
-  src/opt_rc.cpp
-    src/opt_dict_bump.cpp
-    src/opt_dict_fuse.cpp
-    src/opt_global_promote.cpp
-    src/spill_placement.cpp
-    src/live_interval.cpp
-    src/live_interval_build.cpp
-  src/opt_fold.cpp
-  src/opt_ifconv.cpp
-  src/opt_inline.cpp
-  src/opt_loop.cpp
-src/opt_intloop.cpp
-    src/opt_intloop_bce.cpp
-  src/opt_devirt.cpp
-  src/opt_stats.cpp
-  src/codegen.cpp
-  src/codegen_regalloc.cpp
-  src/codegen_regalloc_scan.cpp
-  src/codegen_regalloc_temp.cpp
-  src/ra_opt.cpp
-  src/codegen_block.cpp
-  src/codegen_fuse.cpp
-  src/codegen_comment.cpp
-  src/codegen_ops.cpp
-  src/codegen_store.cpp
-  src/codegen_div_const.cpp
-  src/codegen_int_fixed.cpp
-  src/codegen_big.cpp
-  src/codegen_call.cpp
-  src/codegen_call_abi.cpp
-  src/codegen_cffi.cpp
-  src/codegen_index.cpp
-  src/codegen_vcall_inline.cpp
-  src/codegen_simd.cpp
-  src/codegen_simd_int.cpp
-  src/codegen_simd_nbody.cpp
-  src/codegen_simd_nbody_pair.cpp
-  src/codegen_vect.cpp
-  src/codegen_vect_affine.cpp
-  src/codegen_vect_avx2.cpp
-  src/codegen_vect_jvec.cpp
-  src/vect_planner.cpp
-  src/vect_planner_loop.cpp
-  src/codegen_masked.cpp
-  src/vect_planner_stride.cpp
-  src/vect_planner_intfast.cpp
-  src/vect_rules_test.cpp
-  src/codegen_call_rt.cpp
-  src/codegen_inline_containers.cpp
-  src/mach_emit.cpp
-  src/ir.cpp
-  src/desugar.cpp
-  src/module.cpp
-  src/module_map.cpp
-  src/deps_json.cpp
-  src/cimport.cpp
-  src/cdecl.cpp
-  src/cdecl_parse.cpp
-  src/eh_emit.cpp
+  src/backend/tag.cpp
+  src/backend/impl.cpp
+  src/backend/target_abi.cpp
+  src/driver/util.cpp
+  src/driver/link.cpp
+  src/driver/build.cpp
+  src/driver/modules.cpp
+  src/driver/check.cpp
+  src/typecheck/builtin_sigs.cpp
+  src/syntax/parser.cpp
+  src/syntax/stmt.cpp
+  src/syntax/func.cpp
+  src/syntax/expr.cpp
+  src/syntax/match.cpp
+  src/typecheck/typecheck.cpp
+  src/typecheck/stmt.cpp
+  src/typecheck/stmt_forms.cpp
+  src/typecheck/expr.cpp
+  src/typecheck/expr_attr.cpp
+  src/typecheck/call.cpp
+  src/typecheck/infer.cpp
+  src/typecheck/call_forms.cpp
+  src/typecheck/call_modules.cpp
+  src/typecheck/call_method.cpp
+  src/typecheck/builtin.cpp
+  src/typecheck/func.cpp
+  src/typecheck/dataclass.cpp
+  src/typecheck/enum.cpp
+  src/lower/lower.cpp
+  src/lower/class.cpp
+  src/lower/impl_util.cpp
+  src/lower/impl_slots.cpp
+  src/lower/borrow.cpp
+  src/lower/stmt.cpp
+  src/lower/stmt_for.cpp
+  src/lower/idiom.cpp
+  src/lower/stmt_with.cpp
+  src/lower/stmt_async.cpp
+  src/lower/stmt_assign.cpp
+  src/lower/exc.cpp
+  src/lower/import.cpp
+  src/lower/import_native.cpp
+  src/lower/import_stdlib.cpp
+  src/lower/import_misc.cpp
+  src/lower/vthread.cpp
+  src/lower/cpy.cpp
+  src/lower/match.cpp
+  src/lower/expr.cpp
+  src/lower/expr_assign.cpp
+  src/lower/expr_ops.cpp
+  src/lower/expr_container.cpp
+  src/lower/expr_dunder.cpp
+  src/lower/comp.cpp
+  src/lower/call.cpp
+  src/lower/c_lazy.cpp
+  src/lower/builtin.cpp
+  src/lower/builtin_reflect.cpp
+  src/lower/builtin_seq.cpp
+  src/lower/builtin_container.cpp
+  src/lower/builtin_text.cpp
+  src/lower/builtin_misc.cpp
+  src/lower/aggregate.cpp
+  src/lower/method.cpp
+  src/lower/method_native.cpp
+  src/lower/method_containers.cpp
+  src/lower/method_str.cpp
+  src/lower/method_misc.cpp
+  src/lower/print.cpp
+  src/lower/gen.cpp
+  src/lower/gen_async.cpp
+  src/lower/gen_spill.cpp
+  src/opt/opt.cpp
+  src/opt/forward.cpp
+  src/opt/cse.cpp
+  src/ir/verify.cpp
+  src/opt/rc.cpp
+    src/opt/dict_bump.cpp
+    src/opt/dict_fuse.cpp
+    src/opt/global_promote.cpp
+    src/backend/spill_placement.cpp
+    src/backend/live_interval.cpp
+    src/backend/live_interval_build.cpp
+  src/opt/fold.cpp
+  src/opt/ifconv.cpp
+  src/opt/inline.cpp
+  src/opt/loop.cpp
+src/opt/intloop.cpp
+    src/opt/intloop_bce.cpp
+  src/opt/devirt.cpp
+  src/opt/stats.cpp
+  src/backend/codegen.cpp
+  src/backend/regalloc.cpp
+  src/backend/regalloc_scan.cpp
+  src/backend/regalloc_temp.cpp
+  src/backend/ra_opt.cpp
+  src/backend/block.cpp
+  src/backend/fuse.cpp
+  src/backend/comment.cpp
+  src/backend/ops.cpp
+  src/backend/store.cpp
+  src/backend/div_const.cpp
+  src/backend/int_fixed.cpp
+  src/backend/big.cpp
+  src/backend/call.cpp
+  src/backend/call_abi.cpp
+  src/backend/cffi.cpp
+  src/backend/index.cpp
+  src/backend/vcall_inline.cpp
+  src/backend/simd.cpp
+  src/backend/simd_int.cpp
+  src/backend/simd_nbody.cpp
+  src/backend/simd_nbody_pair.cpp
+  src/backend/vect.cpp
+  src/backend/vect_affine.cpp
+  src/backend/vect_avx2.cpp
+  src/backend/vect_jvec.cpp
+  src/opt/vect_planner.cpp
+  src/opt/vect_planner_loop.cpp
+  src/backend/masked.cpp
+  src/opt/vect_planner_stride.cpp
+  src/opt/vect_planner_intfast.cpp
+  src/opt/vect_rules_test.cpp
+  src/backend/call_rt.cpp
+  src/backend/inline_containers.cpp
+  src/backend/mach_emit.cpp
+  src/ir/ir.cpp
+  src/syntax/desugar.cpp
+  src/ir/module.cpp
+  src/ir/module_map.cpp
+  src/ir/deps_json.cpp
+  src/cimport/cimport.cpp
+  src/cimport/cdecl.cpp
+  src/cimport/cdecl_parse.cpp
+  src/backend/eh_emit.cpp
 )
 
 # 编译器在运行时需要 rt.o 的绝对路径；运行时按职责拆成多个 .c，
@@ -264,7 +264,7 @@ add_custom_target(pyadamas_rt_asan ALL DEPENDS "${PYADAMAS_RT_ASAN_OBJ}")
 #     guard page」的分配器；
 #   * 默认 rt.o 完全不含这些代码（钩子宏展开成裸 malloc/free），
 #     所以两个开关关掉时生成程序的指令数与改动前逐项相同。
-# 编译器只在环境变量非空时链接它而不是 rt.o（见 driver_build.cpp）；
+# 编译器只在环境变量非空时链接它而不是 rt.o（见 driver/build.cpp）；
 # 典型用法：PYADAMAS_CANARY=1 bash tests/run_tests.sh ...
 set(PYADAMAS_RT_DEBUG_OBJ "${CMAKE_BINARY_DIR}/rt_allocdbg.o")
 set(PYADAMAS_RT_DEBUG_OBJS "")
@@ -300,10 +300,10 @@ option(PYADAMAS_MODULE_SCAN "C++23 模块扫描（项目未用 C++ modules；默
 
 add_executable(pyadamas ${PYADAMAS_SOURCES})
 if(PYADAMAS_PCH)
-  # 只预编译标准库头（src/pch_std.h）。CMake 按 target 的编译 flags 为每个
+  # 只预编译标准库头（src/common/pch_std.h）。CMake 按 target 的编译 flags 为每个
   # 配置生成独立 PCH（dev/release 的 -O 各自匹配），不会重蹈跨 -O 复用
   # 被 GCC 静默拒绝的覆辙。全量收益≈0、增量 -14~-18%，见 docs/compile-speed.md。
-  target_precompile_headers(pyadamas PRIVATE src/pch_std.h)
+  target_precompile_headers(pyadamas PRIVATE src/common/pch_std.h)
 endif()
 if(NOT PYADAMAS_MODULE_SCAN)
   # 源码里没有任何 C++ module 声明/import。CMake 4 对 C++23 默认开模块扫描：
@@ -396,7 +396,7 @@ if(PYADAMAS_DIRECT_LD)
     endif()
   endif()
 endif()
-# 探测结果编进编译器（driver_link.cpp 用；探测失败时为空串 → 回退 cc）。
+# 探测结果编进编译器（driver/link.cpp 用；探测失败时为空串 → 回退 cc）。
 target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_AS_EXECUTABLE="${PYADAMAS_AS_EXECUTABLE}"
   PYADAMAS_LD_EXECUTABLE="${PYADAMAS_LD_EXECUTABLE}"

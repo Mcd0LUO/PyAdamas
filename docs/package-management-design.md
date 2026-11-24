@@ -27,7 +27,7 @@
 | 不回答 | 具体代码结构、CLI 参数最终拼写、注册表服务端实现、UI/文档站；也不写任何实现代码 |
 | 约定 | 文中出现的命令名 / 配置字段名 / 文件名为**示意**，最终拼写由实现决定；格式块是规格草案，不是实现代码 |
 | 读者 | 需要拍板方向的人（用户/lead），以及后续实现者 |
-| 依赖的既有文档 | [architecture.md](architecture.md)（不做运行期模块对象）、[language.md](language.md#L833-L846)（import 语义）、[module.h](../src/module.h)（跨模块接口）、[driver_build.cpp](../src/driver_build.cpp)（模块图与缓存）、[roadmap.md](roadmap.md)（已知缺口：无增量重编、缺包管理） |
+| 依赖的既有文档 | [architecture.md](architecture.md)（不做运行期模块对象）、[language.md](language.md#L833-L846)（import 语义）、[ir/module.h](../src/ir/module.h)（跨模块接口）、[driver/build.cpp](../src/driver/build.cpp)（模块图与缓存）、[roadmap.md](roadmap.md)（已知缺口：无增量重编、缺包管理） |
 
 术语约定见附录 C。本文用「包（package）」指**分发的单位**，「模块（module）」指**`import` 的单位**，两者不必然一一对应（一个包可以提供多个模块）。
 
@@ -38,8 +38,8 @@
 | # | 前提 | 证据 | 对包管理的含义 |
 |---|---|---|---|
 | P-1 | **没有运行期模块对象**：`import m` 只是编译期别名，`from m import x` 是快照绑定；没有 `sys.modules`、没有 `getattr(module, ...)`、没有运行期名字表 | [language.md](language.md#L833-L846)；[architecture.md](architecture.md)「只借语法，不背兼容包袱」 | 运行期不存在「加载哪个版本」的问题——**所有版本决策必须在编译前完成** |
-| P-2 | **每个程序独立编译、静态链接成一个二进制**：链接 = 全部 `mod.o` + `rt.o` + `-lm -ldl`；没有 `.so`/`.a` 发布物，没有跨包 ABI 承诺 | `driver_build.cpp:981-1019`（`link_program`） | 「安装」没有意义；**「获取 + 编译」就是构建的一部分**。反过来，没有 ABI 面意味着包可以只发源码（与 Conan/vcpkg 根本不同） |
-| P-3 | **模块边界 = 二进制接口文件 `.pya`**：导入方只读接口、不读对方 AST；跨模块符号是 `pyadamas$<module>$g$<name>` 这类 mangled 名 | `module.h:1-5`、`module.h:41-55`（`interface_hash`、`kModuleFormatVersion=12`、`kModuleAbiVersion=1`）、`module.cpp:458-489` | 包管理的产物是**源码 + 接口 + `.o`**；**模块名就是符号前缀**，所以「同一个包的两个版本」在符号层面必然冲突——这是编译型语言特有的、pip/npm 永远不会遇到的问题 |
+| P-2 | **每个程序独立编译、静态链接成一个二进制**：链接 = 全部 `mod.o` + `rt.o` + `-lm -ldl`；没有 `.so`/`.a` 发布物，没有跨包 ABI 承诺 | `driver/build.cpp:981-1019`（`link_program`） | 「安装」没有意义；**「获取 + 编译」就是构建的一部分**。反过来，没有 ABI 面意味着包可以只发源码（与 Conan/vcpkg 根本不同） |
+| P-3 | **模块边界 = 二进制接口文件 `.pya`**：导入方只读接口、不读对方 AST；跨模块符号是 `pyadamas$<module>$g$<name>` 这类 mangled 名 | `ir/module.h:1-5`、`ir/module.h:41-55`（`interface_hash`、`kModuleFormatVersion=12`、`kModuleAbiVersion=1`）、`ir/module.cpp:458-489` | 包管理的产物是**源码 + 接口 + `.o`**；**模块名就是符号前缀**，所以「同一个包的两个版本」在符号层面必然冲突——这是编译型语言特有的、pip/npm 永远不会遇到的问题 |
 
 由此得到本文的核心判断：**PyAdamas 的「环境」不是一块共享可变的磁盘区域，而是「一次构建的模块图 + 它的输入」**。包管理器要做的是：把这张图**确定地**算出来（解析）、把输入**完整地**取到本地（获取/缓存）、让编译器**只**按这张图编译（集成）、把输入**可验证地**钉死（锁定/信任）。
 
@@ -52,7 +52,7 @@
 | 获取 | 下载 wheel/tarball/source | 下载**源码树**（可选预编译产物缓存） | 必需 | 不需要「构建好的 wheel」，因为构建器就是编译器本身 |
 | 缓存 | `~/.cache/pip`、pnpm store、ccache | **内容寻址 store**：源码树 + 编译产物（`.o`/`.pya`/清单）两级 | 必需且更重要 | 每次构建都要编译，缓存收益远大于「装好就不用编」的生态 |
 | 构建集成 | wheel 已构建 / Node 无需构建 | **模块图合并、符号命名、接口文件生成、链接、缓存失效** | 必需且是主要工作量 | 包管理器与编译器必须共同设计，不能只做外围工具 |
-| 可复现 | lockfile + hash | lock + **工具链固定** + **产物里不能有绝对路径** | 必需且更难 | 现状 `.pya` 里嵌了绝对 `source_path`（`module.cpp:498`），这一条现在**不成立** |
+| 可复现 | lockfile + hash | lock + **工具链固定** + **产物里不能有绝对路径** | 必需且更难 | 现状 `.pya` 里嵌了绝对 `source_path`（`ir/module.cpp:498`），这一条现在**不成立** |
 | 供应链信任 | 哈希、签名、SBOM、审计 | 同样的机制，但**哈希是主证据**（编译发生在自己机器上，发布者只发源码） | 必需（分阶段） | 没有运行期，所以没有「运行期校验」这一层；签名只解决「谁发布」 |
 
 ### 1.3 在「编译期解决一切」下**根本不需要**的东西
@@ -67,17 +67,17 @@
 | **运行期版本探测 / 特性探测**（`hasattr`、`if pkg.__version__`） | 动态语言靠运行时判断能力 | 静态类型 + 无内省，能力在编译期就确定 | 需要在运行期保留元数据，与「没有名字表」冲突 |
 | **跨包 ABI 兼容矩阵**（so 版本、dll、binding redirect） | 预编译二进制要能互相链接 | 每次从源码重建整张图，没有跨包 ABI 面 | 会逼我们维护「二进制兼容」承诺，而当前模型恰好可以不做 |
 | **入口点 / console_scripts** | 解释器要 dispatch 到 Python 函数 | 要发命令就直接发二进制（可选，非 P0） | 引入运行期解释器依赖 |
-| **命名空间包**（`pkgutil.extend_path`） | 运行期拼 `__path__` | 源码级目录 + `__init__.py` 已足够（`driver_modules.cpp:37-79`） | 无必要复杂度 |
+| **命名空间包**（`pkgutil.extend_path`） | 运行期拼 `__path__` | 源码级目录 + `__init__.py` 已足够（`driver/modules.cpp:37-79`） | 无必要复杂度 |
 
 ### 1.4 反而**更需要**的五件事
 
 | 需求 | 为什么在 PyAdamas 里更重 | 现状证据 |
 |---|---|---|
-| **编译产物缓存** | 没有「装好就固定」的二进制，每次构建都要重新生成 `.o`；依赖一多，构建时间线性上涨 | 已有 per-module 缓存（`driver_build.cpp:581-625`），但键是「模块名 + 源路径」、目录在**编译期常量** `build/<build>/modcache` 下、工具链用 mtime 识别（`driver_build.cpp:132-153`）→ **不能跨项目/跨机器共享** |
-| **符号命名冲突** | 模块名就是符号前缀（P-3）：两个版本 = 两套同名符号 = 链接期重复定义 | `module.cpp:466`：`pyadamas$<module>$g$<name>`；`sanitize_symbol` 是**有损**的（非字母数字→`_`，`driver_modules.cpp:15-21`） |
-| **全程序模块图合并** | 包不是独立编译单元：导入方要读全部依赖接口；图必须是 DAG | 已有循环导入检测（`driver_build.cpp:373-381`）与拓扑序（`p.order`） |
-| **类型身份** | 跨版本同名类 = 两个不同类型，必须在编译期诊断而不是运行期怪错 | `ImportedClass` 带 `origin_module`/`qualname`（`module.h:19-25`、`driver_build.cpp:795-808`） |
-| **锁文件是「输入」而不是「安装记录」** | 编译不确定源（绝对路径进接口、工具链 mtime 进缓存键）让可复现比 Python 更难 | `.pya` 编码含绝对 `source_path`（`module.cpp:498`）→ 换目录即接口哈希变 |
+| **编译产物缓存** | 没有「装好就固定」的二进制，每次构建都要重新生成 `.o`；依赖一多，构建时间线性上涨 | 已有 per-module 缓存（`driver/build.cpp:581-625`），但键是「模块名 + 源路径」、目录在**编译期常量** `build/<build>/modcache` 下、工具链用 mtime 识别（`driver/build.cpp:132-153`）→ **不能跨项目/跨机器共享** |
+| **符号命名冲突** | 模块名就是符号前缀（P-3）：两个版本 = 两套同名符号 = 链接期重复定义 | `ir/module.cpp:466`：`pyadamas$<module>$g$<name>`；`sanitize_symbol` 是**有损**的（非字母数字→`_`，`driver/modules.cpp:15-21`） |
+| **全程序模块图合并** | 包不是独立编译单元：导入方要读全部依赖接口；图必须是 DAG | 已有循环导入检测（`driver/build.cpp:373-381`）与拓扑序（`p.order`） |
+| **类型身份** | 跨版本同名类 = 两个不同类型，必须在编译期诊断而不是运行期怪错 | `ImportedClass` 带 `origin_module`/`qualname`（`ir/module.h:19-25`、`driver/build.cpp:795-808`） |
+| **锁文件是「输入」而不是「安装记录」** | 编译不确定源（绝对路径进接口、工具链 mtime 进缓存键）让可复现比 Python 更难 | `.pya` 编码含绝对 `source_path`（`ir/module.cpp:498`）→ 换目录即接口哈希变 |
 
 ### 1.5 与 pip/npm 模型的结构差异（一张表）
 
@@ -98,10 +98,10 @@
 |---|---|---|---|---|
 | 2.1 | 钻石依赖 / 版本冲突 | 名字→实体的映射**单值且全局**；两个需求者要同一名字的不同版本时，解析器必须二选一：要么回溯求解（贵、结果依赖注册表状态），要么报错（可用性差） | **会**，而且更硬：符号名就是模块名，连「悄悄两份」都做不到 | §5.2 MVS + §5.3 别名 |
 | 2.2 | 传递依赖爆炸 | 没有「闭包」这个一等概念，每个包自带一棵树；去重靠启发式（hoisting / semver 兼容判断） | **会**，但形式不同：这里是**模块数**爆炸 → 编译时间爆炸 | §5.2 闭包 + §5.4 产物缓存 |
-| 2.3 | 幽灵依赖（phantom dependency） | 解析规则与声明规则不一致：Node 的解析沿目录向上找，hoisting 把传递依赖放到根 → 没声明的 import 也能解析成功 | **会**（现状就是路径搜索：`driver_modules.cpp:37-79` 会从 importer 目录一路向上找到根） | §5.6 用解析表替代路径搜索；§4.9 严格 deps |
+| 2.3 | 幽灵依赖（phantom dependency） | 解析规则与声明规则不一致：Node 的解析沿目录向上找，hoisting 把传递依赖放到根 → 没声明的 import 也能解析成功 | **会**（现状就是路径搜索：`driver/modules.cpp:37-79` 会从 importer 目录一路向上找到根） | §5.6 用解析表替代路径搜索；§4.9 严格 deps |
 | 2.4 | 重复安装 / 磁盘膨胀 | per-project 物化副本 + 无内容寻址：同样的字节在 N 个项目/N 个 build 目录各存一份 | **会**：`build/<build>/modcache` 是每构建目录一份 | §5.4 内容寻址共享 store |
 | 2.5 | 锁文件与清单漂移 | 两套真相；`install` 默认会重写锁；不同工具/不同版本写不同格式；没有「只读锁」的默认行为 | **会**（一旦引入清单+锁，天然有漂移风险） | §5.5 `--locked` 默认；§4.6 |
-| 2.6 | 非确定性构建 | 解析依赖「注册表此刻的状态」；网络顺序/重试；安装脚本改文件；时间戳/绝对路径进产物 | **会且现在就有**：绝对路径进 `.pya`（`module.cpp:498`），工具链用 mtime（`driver_build.cpp:132-144`） | §5.5、§5.6、§5.7 |
+| 2.6 | 非确定性构建 | 解析依赖「注册表此刻的状态」；网络顺序/重试；安装脚本改文件；时间戳/绝对路径进产物 | **会且现在就有**：绝对路径进 `.pya`（`ir/module.cpp:498`），工具链用 mtime（`driver/build.cpp:132-144`） | §5.5、§5.6、§5.7 |
 | 2.7 | 全局状态污染 | 全局安装、`PATH`、共享 site-packages、`PYTHONPATH`；卸载不干净；「我这跑不了」 | **会**（如果抄 `-g` / 全局 `-I`） | §4.2 不做全局安装；§4.8 不做环境状态 |
 | 2.8 | install script 供应链风险 | 安装时以用户权限执行任意代码，且**传递依赖也会执行**；没有能力模型/沙箱；发布者账号被盗即全链路 | **可以完全避免**（没有安装步骤）——这是本设计最大的结构性优势 | §4.5 不做脚本 |
 | 2.9 | 多版本共存 vs 单一版本两难 | 多版本 → 实例/类型身份分裂（`instanceof` 失败、两套 C 扩展）；单版本 → 无法渐进升级，钻石锁死 | **会**，但代价结构不同：符号可版本化，类型不可自动转换 | §5.3（核心决策） |
@@ -125,11 +125,11 @@
 
 Node 的解析算法是「从当前文件目录逐级向上找 `node_modules/<name>`」，配合 hoisting 把传递依赖提到根，于是**没写进 package.json 的包也能 import 成功**——解析规则比声明规则宽松，这就是幽灵依赖。
 
-PyAdamas 现状更直接：`resolve_module_path`（`driver_modules.cpp:37-79`）的搜索根依次是「导入方目录 → 用户 `-I` → 从导入方父目录一路向上到 `/` → stdlib」。这意味着：
+PyAdamas 现状更直接：`resolve_module_path`（`driver/modules.cpp:37-79`）的搜索根依次是「导入方目录 → 用户 `-I` → 从导入方父目录一路向上到 `/` → stdlib」。这意味着：
 
 - 任何上层目录里一个 `json.py` 都会改变解析结果（**环境相关**）；
-- 同一个名字解析到两个不同文件时会直接报错（`driver_build.cpp:487-494`），但**「该不该被解析到」没有声明可查**；
-- 内置 native 模块不可被劫持（`driver_modules.cpp:191-207`），但纯 Python 源 stdlib 模块**可以**被用户文件覆盖——这是有意的兼容行为，也是「解析规则 ≠ 声明规则」的现成例子。
+- 同一个名字解析到两个不同文件时会直接报错（`driver/build.cpp:487-494`），但**「该不该被解析到」没有声明可查**；
+- 内置 native 模块不可被劫持（`driver/modules.cpp:191-207`），但纯 Python 源 stdlib 模块**可以**被用户文件覆盖——这是有意的兼容行为，也是「解析规则 ≠ 声明规则」的现成例子。
 
 结论：包管理必须把「包模块的解析」从**路径搜索**改成**查表**（§5.6 的 ModuleMap）。一旦查表，「未声明 = 不存在」就是免费的严格性。
 
@@ -288,7 +288,7 @@ Nix 是可复现性的**上界**：它把「构建 = 输入内容的纯函数」
 | 机制 | 它怎么做 | 可借鉴 | 要避免 |
 |---|---|---|---|
 | derivation | 一个 derivation 描述「输入（store path + 哈希）→ 构建命令 → 输出 store path」 | **构建键 = 全部输入**——我们的编译键设计直接照这个思路（§5.4） | 需要一个「纯函数式」的构建语言/求值模型 |
-| 内容寻址 store | 所有输入输出都在 store 里，路径由内容/输入决定；二进制缓存按 store path 复用 | 共享缓存 = 派生对象复用，不是「装过的包列表」 | store path 泄漏进产物（调试信息里的绝对路径）会破坏复现——我们的 `.pya` 已经有这个病（`module.cpp:498`） |
+| 内容寻址 store | 所有输入输出都在 store 里，路径由内容/输入决定；二进制缓存按 store path 复用 | 共享缓存 = 派生对象复用，不是「装过的包列表」 | store path 泄漏进产物（调试信息里的绝对路径）会破坏复现——我们的 `.pya` 已经有这个病（`ir/module.cpp:498`） |
 | 封闭构建 | 沙箱、无网络、固定输入 | **默认离线构建**（§5.7） | — |
 | flake.lock | 按内容哈希钉住输入（nixpkgs 到 commit、依赖到 nar hash） | **锁钉内容哈希而不是版本号**（§5.5） | 需要 flake 概念与额外工具链 |
 | 为什么难用 | 要学 Nix 语言/lazy 求值/模块系统；报错晦涩；`nixpkgs` 单体「一个世界一个版本」；glibc/工具链一变就大规模重建（没有 ABI 缓冲）；非确定性构建要打补丁 | 反面教材：**中心化单版本 + 无 ABI 缓冲 = 全量重建**，这正是我们要避免的「上帝包管理」的 Nix 变体 | 重学一门语言；重写整个构建系统；`nixpkgs` 式的「全世界一套版本」 |
@@ -392,8 +392,8 @@ Nix 是可复现性的**上界**：它把「构建 = 输入内容的纯函数」
 | 4.6 | **不做「清单说一套、锁说另一套」** | 锁漂移（§2.5）；两套真相必有一方过期 | 清单=意图（范围），锁=结果（精确）；不一致 = 错误 + 给出 diff | `--locked` 校验；锁只能由 `resolve/update` 写 |
 | 4.7 | **不做可变注册表**（版本内容不可重写） | 供应链与复现的根基：同一坐标必须永远同一内容 | 内容寻址 + 不可变发布；撤回用 `retract` 语义（不删历史） | 下载后校验哈希；哈希不符不写入 store |
 | 4.8 | **不做「环境作为状态」**（无 venv 等价物、无 `PYTHONPATH`） | 环境是共享可变状态（§2.7）；我们没有运行环境 | 构建自包含；`-I` 只作为 legacy 逃生口 | 清单项目里包解析只走 ModuleMap；`-I` 只对 legacy/本地模块生效 |
-| 4.9 | **不做隐式传递依赖**（幽灵依赖） | 解析规则比声明宽松 = 幽灵依赖（§2.2） | 严格 deps：用到的模块必须由清单可达 | 编译器已经扫 import（`driver_modules.cpp:256-352`）→ 不在 ModuleMap 的包模块直接报错 |
-| 4.10 | **不做绝对路径进产物/缓存键** | 换目录/换机器即失效（§2.6）；现状 `.pya` 就带绝对路径（`module.cpp:498`） | store 内用相对/内容路径；接口里只记坐标与逻辑名 | 可复现检查（`--reproducible`）+ 接口格式升级 |
+| 4.9 | **不做隐式传递依赖**（幽灵依赖） | 解析规则比声明宽松 = 幽灵依赖（§2.2） | 严格 deps：用到的模块必须由清单可达 | 编译器已经扫 import（`driver/modules.cpp:256-352`）→ 不在 ModuleMap 的包模块直接报错 |
+| 4.10 | **不做绝对路径进产物/缓存键** | 换目录/换机器即失效（§2.6）；现状 `.pya` 就带绝对路径（`ir/module.cpp:498`） | store 内用相对/内容路径；接口里只记坐标与逻辑名 | 可复现检查（`--reproducible`）+ 接口格式升级 |
 | 4.11 | **不做「多版本静默共存」** | 同名类型跨版本分裂，会把解析问题变成类型问题（§5.3） | 默认单版本；要并存必须**显式别名** | 无别名时遇到 major 分叉 = 明确报错并给三种出路 |
 | 4.12 | **不做共享缓存的非原子写 / 无校验读** | 已实测过并发写缓存的风险（`tests/cache_race.sh`）；共享后风险放大 | 临时文件 + 原子 rename；读时校验哈希；用 lease 防 GC 竞态 | store 写入只走原子路径；读校验失败 = 报错而非静默使用 |
 | 4.13 | **不做构建期联网** | 不确定性 + 不可审计 + 离线不可用（§2.10） | `fetch`（联网）与 `build`（离线）分离 | 默认离线构建；需要网络时必须显式 `fetch`/`update` |
@@ -434,7 +434,7 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 |---|---|---|
 | 注册表维度 | 是（默认 + 可覆盖） | 内网镜像/私有库是刚需（§5.7）；但默认值让 99% 的写法保持简短 |
 | 大小写 | 全小写；禁止仅靠 `-`/`_` 区分两个包 | 避免 Windows/macOS 大小写不敏感文件系统的坑 |
-| 包名 vs 模块名 | **包名可以带 `-`，模块名必须是合法标识符**（现状 `valid_module_name`，`driver_modules.cpp:23-28`） | 语言层 `import pkg-name` 不合法；必须在清单里显式映射（§5.1.2） |
+| 包名 vs 模块名 | **包名可以带 `-`，模块名必须是合法标识符**（现状 `valid_module_name`，`driver/modules.cpp:23-28`） | 语言层 `import pkg-name` 不合法；必须在清单里显式映射（§5.1.2） |
 | 一个包提供几个模块 | 1..N | 标准库既有 `urllib/__init__.py` 这种包，也有单文件模块；不强行一对一 |
 | 版本与内容 | 版本是**语义承诺**，内容哈希是**完整性证据**；锁里两者都记 | 版本给人看/给范围用，哈希给机器验（§5.5） |
 
@@ -448,7 +448,7 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 | 包名不合法（含 `-`/`.`） | 必须在清单里用 `modules` 表显式映射 | `pkg-json` → `modules = { json = "src/json.py" }`，源码写 `import json` |
 | 一个包多个模块 | `modules` 全部列出；子模块用包内相对路径 | `modules = { "http" = "src/http/__init__.py", "http.client" = "src/http/client.py" }` |
 | 两个包提供同一模块名 | **错误**（除非其中一个被别名覆盖）；不能靠解析顺序 | 见 §5.9 冲突规则 |
-| 保留名 | `_` 开头的顶层模块名、`__entry__`（已保留，`driver_build.cpp:464-468`）、stdlib 内置名 | `import math` 永远指向内置接口，包不能占用 |
+| 保留名 | `_` 开头的顶层模块名、`__entry__`（已保留，`driver/build.cpp:464-468`）、stdlib 内置名 | `import math` 永远指向内置接口，包不能占用 |
 
 为什么不在语言层加语法（比如 `import pkg-json`）：**语法改动会污染语言**，而清单里的映射表是纯数据、可迁移、可丢弃。Python 生态的「包名 ≠ 模块名」已经是既成事实（`beautifulsoup4` → `bs4`），我们把它**显式化**而不是藏起来。
 
@@ -491,7 +491,7 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 | A 要 `C>=1.0`，B 要 `C>=1.2`，C 最新是 1.9 | `C 1.2`（**不是 1.9**） | 反直觉但关键：MVS 只满足「下界」，不追新。**新增依赖时把当时最新版写成下界**（Go 的 `go get` 语义），`update` 才提升 |
 | A 要 `C=1.2`，B 要 `C>=1.5` | **错误** | 精确 pin 与下界矛盾；报错指出两条要求（§5.10） |
 | A 要 `C>=1.0`，B 要 `C>=2.0` | **不是 MVS 失败**，是**身份问题**：1.x 与 2.x 不兼容 → 见 §5.3（默认报错 + 给三种出路） | major 分叉不走求解器 |
-| 多个包互相依赖成环 | **错误** | 编译期已有循环导入检测（`driver_build.cpp:373-381`），解析期也要先报 |
+| 多个包互相依赖成环 | **错误** | 编译期已有循环导入检测（`driver/build.cpp:373-381`），解析期也要先报 |
 
 #### 5.2.2 为什么不是 SAT / 回溯（PubGrub、pip、Cargo 那一类）
 
@@ -544,7 +544,7 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 
 #### 5.3.3 为什么（三条理由，各自对应一种失败模式）
 
-1. **静默共存会把解析问题变成类型系统问题。** Cargo 允许 `rand 0.7` 与 `rand 0.8` 并存，代价是 `rand::Rng` 是两个类型、不能互传；用户看到的不是「版本冲突」，而是「trait 不匹配」——错误离根因更远。我们的类型系统是 nominal 的（`ImportedClass` 带 `origin_module`，`module.h:19-25`），一旦并存，`pkg_json@1` 的 `Decoder` 与 `pkg_json@2` 的 `Decoder` 是两个类型，报错会出现在**每一个跨版本边界**，而不是在解析阶段一次说清。
+1. **静默共存会把解析问题变成类型系统问题。** Cargo 允许 `rand 0.7` 与 `rand 0.8` 并存，代价是 `rand::Rng` 是两个类型、不能互传；用户看到的不是「版本冲突」，而是「trait 不匹配」——错误离根因更远。我们的类型系统是 nominal 的（`ImportedClass` 带 `origin_module`，`ir/module.h:19-25`），一旦并存，`pkg_json@1` 的 `Decoder` 与 `pkg_json@2` 的 `Decoder` 是两个类型，报错会出现在**每一个跨版本边界**，而不是在解析阶段一次说清。
 2. **硬单版本会逼出更糟的隐式多版本。** 如果 major 分叉只能靠「升级所有依赖」解决，团队会去 fork、去 vendor、去复制粘贴——那是**没有名字、没有锁、没有审计**的多版本，比显式别名糟得多。给一个受控逃生阀，比堵死更安全。
 3. **编译型 + 静态符号让并存技术上很便宜**（见 5.3.4）。既然成本低、而禁止它会把成本转嫁给用户，就用「显式开关」而不是「一刀切」。
 
@@ -552,10 +552,10 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 
 | 层面 | 现状 | 并存需要什么 | 难度 |
 |---|---|---|---|
-| 符号 | `pyadamas$<module>$g$<name>`（`module.cpp:466`）；模块名 = 符号前缀 | **版本进 mangling** → 两个版本符号天然不同 | 低（改字符串生成 + 接口格式） |
+| 符号 | `pyadamas$<module>$g$<name>`（`ir/module.cpp:466`）；模块名 = 符号前缀 | **版本进 mangling** → 两个版本符号天然不同 | 低（改字符串生成 + 接口格式） |
 | 接口 | 每个模块一份 `.pya`，含 `origin_module`/`qualname` | 接口里记**包坐标**，`origin` 升级成 `(registry, ns, name, version, module)` | 低 |
 | 类型身份 | `ImportedClass.cls` 是独立 `ClassInfo`，带 `origin_module` | 身份定义加版本维度；跨版本 = 不同类型（自动成立） | 低（诊断要补） |
-| 链接 | 全部 `mod.o` 静态链接（`driver_build.cpp:981-1019`） | 两套符号 = 两份代码，链接器不冲突 | 零（只要符号不同） |
+| 链接 | 全部 `mod.o` 静态链接（`driver/build.cpp:981-1019`） | 两套符号 = 两份代码，链接器不冲突 | 零（只要符号不同） |
 | 运行期 | 类对象/vtable 都是静态的，`ctor_symbol` 在接口里 | 两个版本各有自己的 `pyadamas$<mangled>$n$Cls` | 零 |
 | 缓存 | 键含模块名+路径 | 键含**包坐标+版本**（本来就该含） | 低 |
 | 诊断 | 现有「传入类型不匹配」 | 要额外指出「这是 `pkg@1` 的 T，需要的是 `pkg@2` 的 T」 | 中（消息质量工作） |
@@ -581,8 +581,8 @@ version  = MAJOR "." MINOR "." PATCH [ "-" pre ] [ "+" build ]   （semver 2.0.0
 
 | 代价 | 量级 | 何时付 |
 |---|---|---|
-| 接口格式与 ABI 版本升级（`kModuleFormatVersion`/`kModuleAbiVersion`，`module.h:54-55`） | 一次性：所有缓存失效一次 | P0 定命名时一起定 |
-| 符号变长（`pyadamas$pkg_json_1_4_0$g$dumps`） | 汇编体积与可读性；本来就有 `pyadamas$` 前缀与 `$` 分隔符（`codegen_emit.h:239` 注释提到 mangled 名含 `$`） | 一次性 |
+| 接口格式与 ABI 版本升级（`kModuleFormatVersion`/`kModuleAbiVersion`，`ir/module.h:54-55`） | 一次性：所有缓存失效一次 | P0 定命名时一起定 |
+| 符号变长（`pyadamas$pkg_json_1_4_0$g$dumps`） | 汇编体积与可读性；本来就有 `pyadamas$` 前缀与 `$` 分隔符（`backend/emit.h:239` 注释提到 mangled 名含 `$`） | 一次性 |
 | 缓存键必须带版本 → 不同图的产物不通用 | 无害（本来就该不同） | 一次性 |
 | 用户偶尔会问「为什么有两个版本」 | 靠 R-2 的错误消息与 `deps tree` 解释 | 每次并存时 |
 
@@ -624,7 +624,7 @@ $PYADAMAS_HOME/                          # 默认 ~/.local/share/pyadamas（可�
 
 #### 5.4.3 编译键（本设计最容易出错的地方）
 
-现状已经有 15+ 个开关进清单，并且代码里留了一条血泪注释（`driver_build.cpp:175-180`）：
+现状已经有 15+ 个开关进清单，并且代码里留了一条血泪注释（`driver/build.cpp:175-180`）：
 
 > 「环境变量会改变代码生成结果，但缓存键只有『模块名 + 源文件路径』，不含任何编译选项。不把它写进清单就会出现『切了开关仍命中旧产物』——实测导致连续几轮 A/B 测试拿到完全相同的二进制，性能结论全错。」
 
@@ -632,17 +632,17 @@ $PYADAMAS_HOME/                          # 默认 ~/.local/share/pyadamas（可�
 
 | 键成分 | 现状 | 是否充分 | 目标 |
 |---|---|---|---|
-| 模块源码内容 | `fnv1a64(source)` 进清单（`driver_build.cpp:345`） | 用于失效可以；**不能当信任锚** | SHA-256（与锁一致）；FNV 可留作快速预检 |
-| 模块身份 | 缓存目录 key = `sanitize_symbol(name)` + `fnv1a64(path)`（`driver_build.cpp:147`） | **不充分**：移动项目即 miss；sanitize 有损（`driver_modules.cpp:15-21`） | 包坐标 + 单射 mangled 名（§5.6） |
+| 模块源码内容 | `fnv1a64(source)` 进清单（`driver/build.cpp:345`） | 用于失效可以；**不能当信任锚** | SHA-256（与锁一致）；FNV 可留作快速预检 |
+| 模块身份 | 缓存目录 key = `sanitize_symbol(name)` + `fnv1a64(path)`（`driver/build.cpp:147`） | **不充分**：移动项目即 miss；sanitize 有损（`driver/modules.cpp:15-21`） | 包坐标 + 单射 mangled 名（§5.6） |
 | 包版本 | 无 | 不充分（多版本场景下无法区分） | 进键（P0 就定） |
-| 编译器身份 | `/proc/self/exe` 的 size+mtime + `rt.o` 的 size+mtime（`driver_build.cpp:132-144`） | **不充分**：不可跨机；mtime 在拷贝/恢复后不可信 | 编译器内容 SHA-256 + 版本串 + 目标 |
-| 目标 ABI | **不在清单**（`driver_build.cpp:166-208` 的字段表里没有） | **现存缺口**：`--target=win64` 改变调用约定/影子空间，却会命中另一 ABI 的 `mod.o` | 进键（P3 必做，并补一条回归） |
+| 编译器身份 | `/proc/self/exe` 的 size+mtime + `rt.o` 的 size+mtime（`driver/build.cpp:132-144`） | **不充分**：不可跨机；mtime 在拷贝/恢复后不可信 | 编译器内容 SHA-256 + 版本串 + 目标 |
+| 目标 ABI | **不在清单**（`driver/build.cpp:166-208` 的字段表里没有） | **现存缺口**：`--target=win64` 改变调用约定/影子空间，却会命中另一 ABI 的 `mod.o` | 进键（P3 必做，并补一条回归） |
 | 代码生成开关（opt/fastmath/zerocostexc/rcsplit/raopt/simd/vect/avx2/loopopt/inlineopt/borrowopt/typetags/dynamicbig/langgaps/csymdefault） | 全在清单 | 充分（这是做得对的地方） | 保持；新增开关**必须**同步加字段 + 加「漏掉会误命中」的测试 |
-| 依赖接口哈希 | `dep <name> <interface_hash>`（`driver_build.cpp:363-369`、`601-608`） | 在「无跨模块代码生成」前提下充分（early cutoff） | 保持；若开跨模块内联/LTO **必须**改成依赖实现哈希（§7-Q4） |
+| 依赖接口哈希 | `dep <name> <interface_hash>`（`driver/build.cpp:363-369`、`601-608`） | 在「无跨模块代码生成」前提下充分（early cutoff） | 保持；若开跨模块内联/LTO **必须**改成依赖实现哈希（§7-Q4） |
 | 依赖实现哈希 | 无 | 将来不充分 | 仅在开启跨模块优化时加入 |
 | 运行期 `rt.o` | 通过 `toolchain_id` 的 mtime 间接覆盖 | 不充分（不可移植） | 内容哈希 |
 | 汇编器/链接器 | 无 | 语义上无影响（只影响 .o 字节） | 可选：进「可复现验证」而不是失效键 |
-| 路径无关性 | 清单无路径，但 `interface_hash` **含绝对 source_path**（`module.cpp:498`、`666`） | **破坏跨机一致** | 接口里去掉绝对路径（只留坐标/相对路径）→ P0/P1 |
+| 路径无关性 | 清单无路径，但 `interface_hash` **含绝对 source_path**（`ir/module.cpp:498`、`666`） | **破坏跨机一致** | 接口里去掉绝对路径（只留坐标/相对路径）→ P0/P1 |
 
 #### 5.4.4 失效传播
 
@@ -664,7 +664,7 @@ $PYADAMAS_HOME/                          # 默认 ~/.local/share/pyadamas（可�
 | 标记 | 从锁里的树哈希/编译键出发 | 键是内容地址，天然可标记 |
 | 清除 | 未标记 **且** mtime 早于宽限期（默认 30 天） | 防止删掉「刚 fetch 还没构建」的条目 |
 | 并发 | 构建对用到的 key 建 **lease**（`leases/<key>.<pid>`，含开始时间）；GC 跳过未过期 lease | 避免删掉正在使用的产物 |
-| 原子性 | 只写 `tmp/` 再 rename（现状已有 `cache_temp_path` / `write_atomic`，`driver_build.cpp:79-87`） | 并发写不会读到截断文件（`tests/cache_race.sh` 的教训） |
+| 原子性 | 只写 `tmp/` 再 rename（现状已有 `cache_temp_path` / `write_atomic`，`driver/build.cpp:79-87`） | 并发写不会读到截断文件（`tests/cache_race.sh` 的教训） |
 | 读校验 | 读 .o/.pya 时校验尺寸 + 哈希；失败 = 报错并删除该项 | **缓存不可信**（uv 的 cache safety 一节持同样立场）：共享 store 可能被污染/半写 |
 | 危险动作 | `gc --prune` 默认 dry-run；`--yes` 才真删 | 不可逆操作必须显式 |
 
@@ -729,7 +729,7 @@ dep http   (root)  ">=2.0.1"        # 直接依赖
 
 #### 5.6.1 引入「模块解析表」（ModuleMap）作为编译输入
 
-现状：编译器自己按路径搜（`driver_modules.cpp:37-79`）。目标：**包模块只能通过解析表进入构建**。
+现状：编译器自己按路径搜（`driver/modules.cpp:37-79`）。目标：**包模块只能通过解析表进入构建**。
 
 ```
 # 由 lock 派生（.pyadamas/modules.map，机器生成，删了可重建）
@@ -739,7 +739,7 @@ module http.client -> mangled=acme_http_2_0_1$http$client …
 
 | 好处 | 说明 |
 |---|---|
-| 幽灵依赖不可能 | 不在表里的包模块 = 未声明 = 编译错误（§4.9）；编译器本来就会扫 import（`driver_modules.cpp:256-352`），强制成本近似为零 |
+| 幽灵依赖不可能 | 不在表里的包模块 = 未声明 = 编译错误（§4.9）；编译器本来就会扫 import（`driver/modules.cpp:256-352`），强制成本近似为零 |
 | 确定 | 同一张表 → 同一解析结果，与目录内容、`-I` 顺序无关 |
 | 可缓存 | 表是纯数据，键是内容地址；不需要「先搜路径再猜缓存键」 |
 | 可解释 | 「为什么解析到它」有现成答案（表里的来源 + 锁里的入边） |
@@ -748,11 +748,11 @@ module http.client -> mangled=acme_http_2_0_1$http$client …
 
 | 优先级 | 来源 | 说明 |
 |---|---|---|
-| 1 | 相对导入（`from . import x`） | 现状语义，不变（`driver_modules.cpp:272-296`） |
+| 1 | 相对导入（`from . import x`） | 现状语义，不变（`driver/modules.cpp:272-296`） |
 | 2 | 本包内绝对模块 | 包内可见性规则（§7-Q2） |
 | 3 | 项目本地模块（入口目录） | 现状语义，保持；但与包**同名**时报错（见 5.9） |
 | 4 | ModuleMap（清单依赖） | **唯一**包入口 |
-| 5 | stdlib Python 源 | 现状：用户文件可覆盖（`driver_modules.cpp:191-207` 的「用户可覆盖」语义）——有清单时建议收紧 |
+| 5 | stdlib Python 源 | 现状：用户文件可覆盖（`driver/modules.cpp:191-207` 的「用户可覆盖」语义）——有清单时建议收紧 |
 | 6 | 内置 native | **不可覆盖**（现状已如此） |
 
 #### 5.6.3 符号命名（mangling）
@@ -761,38 +761,38 @@ module http.client -> mangled=acme_http_2_0_1$http$client …
 
 | 项 | 现状 | 目标 |
 |---|---|---|
-| 前缀 | `pyadamas$` | 保留（`codegen_emit.h:239` 已依赖 `$` 合法） |
+| 前缀 | `pyadamas$` | 保留（`backend/emit.h:239` 已依赖 `$` 合法） |
 | 模块部分 | `sanitize_symbol(module)`：非字母数字→下划线（**有损**） | 单射转义：`-`→`_2d_`、`.`→`_2e_`、`@`→`_40_`…；或统一用「包坐标哈希前 12 位」+ 可读后缀 |
 | 版本 | 不出现 | `pkg_json_1_4_0`（major/minor/patch 都在，保证不同版本不同符号） |
 | 本地/入口模块 | `pyadamas$<mod>$…`（现状） | 保持现状（图局部，不需要跨图复用） |
 | 长度 | 短 | 加版本后变长；现有代码已证明 `$` 符号在汇编/目标文件里合法，但超长符号名的工具容忍度**待核实**（建议设 200 字符上限并做单测） |
 
-为什么单射必须现在就做：现在模块名被限制为标识符（`valid_module_name`，`driver_modules.cpp:23-28`），所以有损 sanitize 不会碰撞；一旦包名允许 `-`，`pkg-json` 与 `pkg_json` 会撞成同一个符号——这是**静默错链接**，比编译错误糟得多。
+为什么单射必须现在就做：现在模块名被限制为标识符（`valid_module_name`，`driver/modules.cpp:23-28`），所以有损 sanitize 不会碰撞；一旦包名允许 `-`，`pkg-json` 与 `pkg_json` 会撞成同一个符号——这是**静默错链接**，比编译错误糟得多。
 
 #### 5.6.4 接口文件（.pya）变更清单
 
 | 变更 | 现状 | 原因 |
 |---|---|---|
-| 去掉绝对 source_path | 编码在头部（`module.cpp:498`），且进 `interface_hash`（`666`） | 可复现（§4.10）；换目录/换机器接口哈希不该变 |
-| 增加包坐标 | 只有 `name` / `origin_module`（`module.h:27-46`） | 类型身份与多版本（§5.3） |
+| 去掉绝对 source_path | 编码在头部（`ir/module.cpp:498`），且进 `interface_hash`（`666`） | 可复现（§4.10）；换目录/换机器接口哈希不该变 |
+| 增加包坐标 | 只有 `name` / `origin_module`（`ir/module.h:27-46`） | 类型身份与多版本（§5.3） |
 | 增加 mangle 名 | 只有逻辑名 | 跨包链接要用物理名 |
-| 保留 origin_qualname 的用户可见性 | 用 `runtime_name + "." + name`（`driver_build.cpp:794-797`） | **版本不进用户可见的 __qualname__**：身份是编译期的，展示名是逻辑的 |
-| 升级 kModuleFormatVersion / kModuleAbiVersion | 12/1（`module.h:54-55`） | 上述字段变化 → 必须 bump，旧缓存一次性失效 |
-| 哈希算法 | `interface_hash` 用 FNV-1a 64（`module.cpp:666`） | 本地失效可以用 FNV；**锁/信任用 SHA-256** |
+| 保留 origin_qualname 的用户可见性 | 用 `runtime_name + "." + name`（`driver/build.cpp:794-797`） | **版本不进用户可见的 __qualname__**：身份是编译期的，展示名是逻辑的 |
+| 升级 kModuleFormatVersion / kModuleAbiVersion | 12/1（`ir/module.h:54-55`） | 上述字段变化 → 必须 bump，旧缓存一次性失效 |
+| 哈希算法 | `interface_hash` 用 FNV-1a 64（`ir/module.cpp:666`） | 本地失效可以用 FNV；**锁/信任用 SHA-256** |
 
 #### 5.6.5 缓存目录与增量编译
 
 | 项 | 现状 | 目标 |
 |---|---|---|
-| 缓存目录 | `<build>/modcache/<name>-<pathhash>`（`driver_build.cpp:146-153`） | `$STORE/obj/<compile-key-hex>`（内容寻址、跨项目） |
-| 命中判定 | 清单逐字段比对（`try_cache`，`driver_build.cpp:581-625`） | 直接按 key 查存在性 + 读 manifest 自检 |
+| 缓存目录 | `<build>/modcache/<name>-<pathhash>`（`driver/build.cpp:146-153`） | `$STORE/obj/<compile-key-hex>`（内容寻址、跨项目） |
+| 命中判定 | 清单逐字段比对（`try_cache`，`driver/build.cpp:581-625`） | 直接按 key 查存在性 + 读 manifest 自检 |
 | 包级聚合 | 无 | 可选：每个包一份「模块 key 列表」，减少 N 次 stat/读 |
-| 并行 | 逐模块串行（`driver_build.cpp:962-978`） | 独立优化项：store 并发安全是前置（已由 lease + 原子写保证） |
-| check 模式 | 只读接口、不编译依赖（`load_check_lookup`，`driver_build.h:106-109`） | 保持，且可直接命中 S2 → check 完全不需要依赖产物 |
+| 并行 | 逐模块串行（`driver/build.cpp:962-978`） | 独立优化项：store 并发安全是前置（已由 lease + 原子写保证） |
+| check 模式 | 只读接口、不编译依赖（`load_check_lookup`，`driver/build.h:106-109`） | 保持，且可直接命中 S2 → check 完全不需要依赖产物 |
 
 #### 5.6.6 全程序链接与「不发二进制」
 
-链接仍然是「全部 `mod.o` + `rt.o`」（`driver_build.cpp:981-1019`）。由此：
+链接仍然是「全部 `mod.o` + `rt.o`」（`driver/build.cpp:981-1019`）。由此：
 
 | 结论 | 理由 |
 |---|---|
@@ -894,14 +894,14 @@ pyadamas build|run --module-map=FILE <entry.py>   # 按显式映射解析 import
 
 | 项目形态 | 解析方式 | 保证 |
 |---|---|---|
-| 没有 `pyadamas.toml` | **完全现状**：路径搜索（`driver_modules.cpp:37-79`）、`-I`、stdlib 兜底 | 现有用例 0 回归（D-7） |
+| 没有 `pyadamas.toml` | **完全现状**：路径搜索（`driver/modules.cpp:37-79`）、`-I`、stdlib 兜底 | 现有用例 0 回归（D-7） |
 | 有清单 | 本地模块仍走路径搜索；**包模块只走 ModuleMap** | 新机制不侵入老机制 |
 
 #### 5.9.2 冲突规则
 
 | 情形 | 行为 | 理由 |
 |---|---|---|
-| 同一逻辑名解析到两个文件 | **错误**（现状已是：`module 'x' resolves to two different files`，`driver_build.cpp:487-494`） | 单值名字空间是正确性前提 |
+| 同一逻辑名解析到两个文件 | **错误**（现状已是：`module 'x' resolves to two different files`，`driver/build.cpp:487-494`） | 单值名字空间是正确性前提 |
 | 本地模块与包提供同名模块 | **错误**，消息给出两个来源与解法（改名/别名/换布局） | 静默覆盖会让人永远搞不清用的是哪个 |
 | 两个包提供同名模块 | **错误**（除非别名） | 同上 |
 | 包占用 stdlib 名 | **错误**（保留名） | 语言语义不能因装包而变 |
@@ -1078,7 +1078,7 @@ error: lock is out of date
 | Q3 | **要不要 feature / 条件编译** | Cargo 的 feature 并集是隐形全局状态（§3.4）；一旦引入，解析出现「同版本不同配置」维度，上界与组合约束就回来了，求解器复杂度也随之而来 | **P0–P4 不做**。若将来做：每包**显式**配置、全局唯一组合、组合进锁与缓存键，**绝不做自动并集** | ≥P5 |
 | Q4 | **跨包内联 / LTO 的边界**：允许跨模块优化吗？优化后缓存键要不要依赖实现哈希？ | 直接决定 §5.4.3 的键是否可靠（现在的 early cutoff 建立在「无跨模块代码生成」上） | 默认**关闭**；开启时键加依赖实现哈希，或把可内联体写进接口（类似 C 的 static inline）。这条值得先做一次小实验再定 | P3/P4 |
 | Q5 | **类型身份跨版本如何定义**：nominal（坐标 + 名字）还是 structural（结构签名）？ | 决定跨版本边界能否隐式转换，以及诊断消息怎么写 | **nominal + 坐标**（现状已基本如此：ImportedClass.origin_module）；不做 structural；跨版本禁隐式转换 | P4 |
-| Q6 | **stdlib 是否纳入同一套包机制** | 现在 stdlib 是硬编码表 + 内置签名（driver_modules.cpp:92-169）；若未来 linalg 这类以「包」形式发布，会与「内建不可覆盖」冲突 | stdlib 保持**内置 + 保留名**，不走 registry；但**复用** store 缓存它的接口/产物 | P2 |
+| Q6 | **stdlib 是否纳入同一套包机制** | 现在 stdlib 是硬编码表 + 内置签名（driver/modules.cpp:92-169）；若未来 linalg 这类以「包」形式发布，会与「内建不可覆盖」冲突 | stdlib 保持**内置 + 保留名**，不走 registry；但**复用** store 缓存它的接口/产物 | P2 |
 | Q7 | **是否支持预编译产物分发**（二进制包） | 与「没有跨包 ABI」直接冲突；做了就必须维护 ABI/键矩阵 | **不做**。只做「同工具链缓存」。若将来做，必须有 ABI 版本 + 完整键 + 签名 | P5 |
 | Q8 | **语言/编译器版本与包的兼容声明**：包能否要求 pyadamas >= x.y？ | 语言还在快速演进（CHANGELOG 每天在动），没有这条，包可能在旧编译器上静默编错 | 只做**下限声明 + 构建时检查**（不进解析、不进锁求解）；不做版本求解 | P2 |
 | Q9 | **workspace / 多入口是否共享一个锁** | monorepo 场景下「每个程序一张图」会导致锁分裂、依赖版本漂移 | 先「一个入口一个锁」；workspace 作为后续增量（共享锁 + 多 root 的图） | P2 之后 |
@@ -1134,31 +1134,31 @@ error: lock is out of date
 | B-1 | import 是编译期别名；from-import 是快照绑定；包必须有 __init__.py；点号 import 必须带 as | language.md:833-846 |
 | B-2 | 每个模块有 __name__/__file__；入口的 __name__ 是 "__main__" | language.md:845-846 |
 | B-3 | 不做 CPython C API / 运行期模块对象 / 内省；换来「没有运行时名字表、没有字典查名字」 | architecture.md「只借语法，不背兼容包袱」 |
-| B-4 | 跨模块接口用二进制 .pya 编码；导入方只读接口不读 AST | module.h:1-5 |
-| B-5 | 接口格式版本 12、ABI 版本 1 | module.h:54-55 |
-| B-6 | interface_hash = 接口编码字节的 FNV-1a 64（hex） | module.h:41、module.cpp:666 |
-| B-7 | 接口编码**包含绝对 source_path** | module.cpp:497-498（编码）；driver_build.cpp:676-677（赋值为 u.path） |
-| B-8 | 跨模块符号形如 pyadamas$<module>$g$<name>，另有 $n$（new）、$vt$（vtable）、$os$、$ms$<slot>、$ready$、$init$、$roots$ | module.cpp:458-489 |
-| B-9 | 模块名 sanitize 是**有损**的（非字母数字 → 下划线） | driver_modules.cpp:15-21 |
-| B-10 | 模块名必须是合法标识符（否则 import 语法不成立） | driver_modules.cpp:23-28 |
-| B-11 | 模块搜索根：导入方目录 → -I → 逐级向上到根 → stdlib；中间目录必须是含 __init__.py 的包 | driver_modules.cpp:37-79 |
-| B-12 | 内置 native 模块不可被用户文件劫持；纯 Python stdlib 源**可被用户覆盖** | driver_modules.cpp:191-207 |
-| B-13 | 模块表是硬编码单一数据源（native / python / native+python 三类） | driver_modules.cpp:81-169、170-175 |
-| B-14 | 循环导入检测：DFS 状态 0/1/2 + 报 circular import 链 | driver_build.cpp:373-381 |
-| B-15 | 同名的模块解析到两个文件 → 错误 resolves to two different files | driver_build.cpp:487-494 |
-| B-16 | 入口模块名保留 __entry__ | driver_build.cpp:464-468 |
-| B-17 | 模块缓存目录 = <build>/modcache/<sanitize(name)>-<hex(fnv1a64(path))> | driver_build.cpp:146-153 |
-| B-18 | 缓存清单字段：source/opt/fastmath/zerocostexc/unknownindex/rcsplit/raopt/simd/vect/avx2/loopopt/inlineopt/borrowopt/typetags/dynamicbig/langgaps/csymdefault/toolchain/dep… | driver_build.cpp:166-208、339-371 |
-| B-19 | toolchain_id = /proc/self/exe 的 size+mtime + rt.o 的 size+mtime | driver_build.cpp:132-144 |
-| B-20 | **目标 ABI 不在清单字段里**（但 --target 会改调用约定/影子空间） | 字段表 driver_build.cpp:166-208；--target 解析 main.cpp:192-205 |
-| B-21 | 依赖失效用 interface_hash（依赖实现变但接口不变 → 下游不重编） | driver_build.cpp:363-369、601-608 |
-| B-22 | 缓存写入是「临时文件 + rename」；有并发回归测试 | driver_build.cpp:79-87、tests/cache_race.sh |
-| B-23 | 链接 = 全部 mod.o + rt.o（或 asan 版）+ -lm -ldl + cimport 链接参数 | driver_build.cpp:981-1019 |
-| B-24 | 模块逐模块串行构建（prepare_program） | driver_build.cpp:962-978 |
-| B-25 | check 模式只加载接口（不编译依赖） | driver_build.h:106-109 |
+| B-4 | 跨模块接口用二进制 .pya 编码；导入方只读接口不读 AST | ir/module.h:1-5 |
+| B-5 | 接口格式版本 12、ABI 版本 1 | ir/module.h:54-55 |
+| B-6 | interface_hash = 接口编码字节的 FNV-1a 64（hex） | ir/module.h:41、ir/module.cpp:666 |
+| B-7 | 接口编码**包含绝对 source_path** | ir/module.cpp:497-498（编码）；driver/build.cpp:676-677（赋值为 u.path） |
+| B-8 | 跨模块符号形如 pyadamas$<module>$g$<name>，另有 $n$（new）、$vt$（vtable）、$os$、$ms$<slot>、$ready$、$init$、$roots$ | ir/module.cpp:458-489 |
+| B-9 | 模块名 sanitize 是**有损**的（非字母数字 → 下划线） | driver/modules.cpp:15-21 |
+| B-10 | 模块名必须是合法标识符（否则 import 语法不成立） | driver/modules.cpp:23-28 |
+| B-11 | 模块搜索根：导入方目录 → -I → 逐级向上到根 → stdlib；中间目录必须是含 __init__.py 的包 | driver/modules.cpp:37-79 |
+| B-12 | 内置 native 模块不可被用户文件劫持；纯 Python stdlib 源**可被用户覆盖** | driver/modules.cpp:191-207 |
+| B-13 | 模块表是硬编码单一数据源（native / python / native+python 三类） | driver/modules.cpp:81-169、170-175 |
+| B-14 | 循环导入检测：DFS 状态 0/1/2 + 报 circular import 链 | driver/build.cpp:373-381 |
+| B-15 | 同名的模块解析到两个文件 → 错误 resolves to two different files | driver/build.cpp:487-494 |
+| B-16 | 入口模块名保留 __entry__ | driver/build.cpp:464-468 |
+| B-17 | 模块缓存目录 = <build>/modcache/<sanitize(name)>-<hex(fnv1a64(path))> | driver/build.cpp:146-153 |
+| B-18 | 缓存清单字段：source/opt/fastmath/zerocostexc/unknownindex/rcsplit/raopt/simd/vect/avx2/loopopt/inlineopt/borrowopt/typetags/dynamicbig/langgaps/csymdefault/toolchain/dep… | driver/build.cpp:166-208、339-371 |
+| B-19 | toolchain_id = /proc/self/exe 的 size+mtime + rt.o 的 size+mtime | driver/build.cpp:132-144 |
+| B-20 | **目标 ABI 不在清单字段里**（但 --target 会改调用约定/影子空间） | 字段表 driver/build.cpp:166-208；--target 解析 main.cpp:192-205 |
+| B-21 | 依赖失效用 interface_hash（依赖实现变但接口不变 → 下游不重编） | driver/build.cpp:363-369、601-608 |
+| B-22 | 缓存写入是「临时文件 + rename」；有并发回归测试 | driver/build.cpp:79-87、tests/cache_race.sh |
+| B-23 | 链接 = 全部 mod.o + rt.o（或 asan 版）+ -lm -ldl + cimport 链接参数 | driver/build.cpp:981-1019 |
+| B-24 | 模块逐模块串行构建（prepare_program） | driver/build.cpp:962-978 |
+| B-25 | check 模式只加载接口（不编译依赖） | driver/build.h:106-109 |
 | B-26 | 已登记缺口：「没有增量重编 Python 源码」「仍缺 … 包管理」 | docs/roadmap.md 第 7 条与第 14 条 |
 | B-27 | 有 -I 目录参数；无清单/锁概念 | main.cpp:208-209 |
-| B-28 | 语言对包管理没有语法支持（import 只认模块名） | language.md:833-846、driver_modules.cpp:23-28 |
+| B-28 | 语言对包管理没有语法支持（import 只认模块名） | language.md:833-846、driver/modules.cpp:23-28 |
 
 ## 附录 C 术语
 

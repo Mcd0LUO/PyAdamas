@@ -22,7 +22,7 @@ perf annotate 逐指令占比（局部周期）：
 | 算术/比较 | cmp/jl/sub/add | ~8% |
 
 **关键发现（新）**：函数入口标签 `.LfN` 发在 `.p2align 5` **之前**
-（codegen_block.cpp emit_function），而 call.direct / FuncAddr / vtable 全部
+（backend/block.cpp emit_function），而 call.direct / FuncAddr / vtable 全部
 引用 `.LfN` —— 每次调用都先执行最多 31 字节对齐 NOP 再进函数体。fib 每次
 递归调用白跑 21 字节 NOP，perf 实测 **8.4% 周期**落在 NOP 上（含 call _skid）。
 nqueens 递归调用同样穿过 10 字节 NOP（0x3af6→0x3b00，0.48%）。
@@ -153,7 +153,7 @@ P0-v2 入口别名（布局逐字节同位、只改分支目标），无 P1/P2/P
   119_gen_except_suspend / 92 / 93 / 94 / 300-303 **全 0**。
 - 异常/生成器/vthread 钉子：92/93/94/119/153_traceback flag-on ran ok；220-229 全过。
 - CPython 对拍：300-303 expect 钉自真实 CPython；fib/nqueens/obj_dispatch 输出一致。
-- check_size：无新增超限（codegen_block 1200 / codegen_impl.h 1200 / codegen_call 1162；
+- check_size：无新增超限（codegen_block 1200 / backend/impl.h 1200 / codegen_call 1162；
   已知 5 超限不变）。
 - manifest inlineopt 缓存键：切开关必然失效（实测验证）。
 - 逐块独立构建：c59c343 快照独立 worktree 构建 EXIT=0。

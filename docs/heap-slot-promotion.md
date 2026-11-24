@@ -29,7 +29,7 @@ static void gc_scan_registers(void) {
 
 ## 2. 真正的障碍：拥有型 vs 借用型
 
-`lower_impl_slots.cpp:260` 把形参槽设为 `slot_owned[p.slot] = false`，
+`lower/impl_slots.cpp:260` 把形参槽设为 `slot_owned[p.slot] = false`，
 即**形参是借用引用**，不需要 dec。
 
 - **拥有型**堆槽：异常展开要按栈槽地址读值来 dec。值在寄存器里 -> 展开读
@@ -37,7 +37,7 @@ static void gc_scan_registers(void) {
 - **借用型**堆槽：不需要 dec；GC 标记由 `gc_scan_registers()` 兜住。
   **进寄存器是安全的。**
 
-而 `codegen_regalloc.cpp` 原来无条件排除所有堆槽，并在第一遍
+而 `backend/regalloc.cpp` 原来无条件排除所有堆槽，并在第一遍
 `gc_scan_slot_` 里把所有堆槽标记为「必须留内存」，于是借用型也被殃及。
 
 ## 3. 实验：放行借用型堆槽

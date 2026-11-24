@@ -30,7 +30,7 @@ PyAdamas 只有第一层的一半（**块级位图**，不是精确区间），�
 
 ## 1. 现状：PyAdamas 有什么
 
-`src/codegen_regalloc.cpp`（2026-11 实测 2461 行）：
+`src/backend/regalloc.cpp`（2026-11 实测 2461 行）：
 
 | 组件 | 实现 | 精度 |
 |---|---|---|
@@ -39,7 +39,7 @@ PyAdamas 只有第一层的一半（**块级位图**，不是精确区间），�
 | `assign_slot_regs_graph()` | 图着色（精确活跃集建图） | 中，但受限于 `slot_reg_` 是整函数布尔标记 |
 | `assign_slot_regs_split()` | 按块分配寄存器；`9688c60` 起用 SpillPlacement 决定块边界 | 有代价模型，但**默认关闭**，实测 +27~28% |
 
-另有 `src/live_interval.h/.cpp` + `live_interval_build.cpp`：阶段 A 的带洞精确
+另有 `src/backend/live_interval.h/.cpp` + `backend/live_interval_build.cpp`：阶段 A 的带洞精确
 区间实现，只给 `PYADAMAS_LI_STATS` 诊断用，不参与分配。
 
 实测数据（`PYADAMAS_RA_LIVENESS_STATS`）：

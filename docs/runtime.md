@@ -419,7 +419,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 ## 函数表
 
-`RtFn` 枚举与 `rt_name()` 都在 `src/ir_ops.h`（`ir.h` 只是把它 include 进来）。生成代码按枚举直接 `call pa_xxx`，不做符号查找。
+`RtFn` 枚举与 `rt_name()` 都在 `src/ir/ops.h`（`ir/ir.h` 只是把它 include 进来）。生成代码按枚举直接 `call pa_xxx`，不做符号查找。
 
 ### 列表
 
@@ -1033,9 +1033,9 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'
 
 ## 加一个运行时函数
 
-1. `src/ir_ops.h`：`RtFn` 加枚举项 + 注释写签名
-2. `src/ir_ops.h` 的 `rt_name()`：加 `case` 返回符号名
-3. `src/codegen_call.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
+1. `src/ir/ops.h`：`RtFn` 加枚举项 + 注释写签名
+2. `src/ir/ops.h` 的 `rt_name()`：加 `case` 返回符号名
+3. `src/backend/call.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
 4. `runtime/rt_*.c`（先看 `rt_internal.h` 选文件）：实现，函数名与第 2 步一致，参数用 `int64_t` / `double`
 5. `docs/runtime.md`：函数表加一行
 

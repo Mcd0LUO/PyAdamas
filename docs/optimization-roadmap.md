@@ -43,7 +43,7 @@
 ### R4 — 去虚拟化深化（0.336）
 - 靶：OO/动态分派（obj_dispatch/nqueens 方法 + 日常语料类代码）。
 - 内容：0.294 守卫式 devirt 基础上加 speculative devirt + 类型守卫 + 内联缓存 → 直调+内联。
-- 已有：codegen_vcall_inline.cpp gen_guarded_vcall。
+- 已有：backend/vcall_inline.cpp gen_guarded_vcall。
 
 ### R5 — 浮点 regalloc / spill 削减（0.337）
 - 靶：spectral_norm/nbody 浮点寄存器压力（热点大量 movsd (%rsp) spill）。
@@ -110,8 +110,8 @@
 | P1 | 定宽整数 i8-i64/u8-u64/char/short | 0.341 | ✅ int_promote 提升规则 C 式定死；64 位域计算+宽度正常化；字面量 coerce 范围检查；抓常量折叠回绕 bug；现有 asm 120/120。集成 |
 | 编译速度 | 位集系列（compute_dom/regalloc 活跃性/哈希→定长数组/注释直写复用/RcMark 单扫） | 0.342 | ✅ **编译吞吐 −46.8%（≈1.88×）**，重案 234_re_opt 1.48s→0.15s（≈10×）；compute_dom 20.2%→1.6%、assign_vreg_slots 14.2%→1.1%、VReg 哈希 14%→0；asm 413 文件 sha256 全同。集成 |
 | P4块1+2 | 异常类当值（CLASS tag）+suppress/closing；file 协议泛化+io.StringIO/BytesIO+csv 互操作 | 0.343 | ✅ 修 custom 异常类 qualname except 匹配命门+repr 全限定名+GC name leak；file 零 codegen 改动源码分派；异常钉子 12/12 leak 0；CPython 340/341 字节同。集成 |
-| SIMD通用化 | 结构驱动通用循环向量化器 codegen_vect.cpp（map/reduction/原地/偏移/SSA） | 0.344 | ✅ **非基准探针 1.93×**（saxpy+dot，近 2-lane 上限）；别名/依赖保守跳过+循环版本化；基准不回归（spectral_norm 1.00×/nbody 0.98×/matmul 0.99×）；回应基准特化质疑。集成 |
-| UAF修 | ir.cpp vreg_str 缓存 vector→deque | 0.345 | ✅ 修 0.342 引入的 resize 重分配致 string_view 悬空 heap-UAF（ASan 编译器构建暴露）；asm 不变。集成 |
+| SIMD通用化 | 结构驱动通用循环向量化器 backend/vect.cpp（map/reduction/原地/偏移/SSA） | 0.344 | ✅ **非基准探针 1.93×**（saxpy+dot，近 2-lane 上限）；别名/依赖保守跳过+循环版本化；基准不回归（spectral_norm 1.00×/nbody 0.98×/matmul 0.99×）；回应基准特化质疑。集成 |
+| UAF修 | ir/ir.cpp vreg_str 缓存 vector→deque | 0.345 | ✅ 修 0.342 引入的 resize 重分配致 string_view 悬空 heap-UAF（ASan 编译器构建暴露）；asm 不变。集成 |
 | P4块3+4 | traceback 帧捕获+sys.exc_info+tb 对象+traceback.py；dataclass 编译期 AST 展开 | 0.346 | ✅ 修 3 命门 bug（重查轮门控传递/单值 BoolOp 悬空块/CFA 提交口径）；异常钉子 10/10 leak 0；CPython 350/351 字节同；dataclass 7 类保守拒绝钉住。集成 |
 | tarfile | stdlib/tarfile.py 纯 pa 自举（ustar 读写/gz/GNU L-K/pax x-g 读/流式 BytesIO） | 0.347 | ✅ ustar 头字节同 CPython 3.14；5 用例字节同+跨实现互操作；src 仅 +1 行（复用既有 _shutilc）；pax/GNU 写保守跳过。集成 |
 | 重构 | 拆 5 个超 1200 行文件（regalloc/driver/typecheck_types/ir_ops/lower_impl） | 0.348 | ✅ **check_size 超限 5→0**；纯代码移动（逐行多重集核对 0 缺失）；asm 38/38 不变；cache_race 仍安全。集成 |
@@ -119,7 +119,7 @@
 | stdlib5 | textwrap（CPython 3.14 口径全参数面）/string（Template/capwords/常量）/pprint sort_dicts+参数面 | 0.350 | ✅ 纯 stdlib 无 src 改动；pprint 1926 行 0 diff、textwrap 8490 行、string 1481 行对拍；pprint 无递归检测（无 id()）/容器元素退化（P2 边界）负面记录。集成 |
 | SIMD深化 | int 乘 map（pmuludq 全 i64 重建无守卫）/Convert i64→float（cvtdq2pd 逐位）/多 reduction 并行累加器 | 0.351 | ✅ 非基准 int 乘 2.36×/Convert 2.34×/多 reduction 1.38×；**复活 0.344 起死代码 reduction 路径并修 5 潜伏 bug**（int acc 出口覆盖写静默算错/跨块 list 基址 RC move-from NULL 段错误等）；基准不回归噪声带。集成 |
 | stdlib6 | statistics（mean/median 家族/mode/离散度/geometric/harmonic/quantiles/covariance/correlation/linear_regression） | 0.352 | ✅ 纯 pa 无 src 改动；380-385 CPython 对拍（3 条浮点精度边界钉住，pa 无 big 精确分数中间量）；NormalDist/weights 保守跳过。集成 |
-| UB修2 | lower_impl.h def 非负提示先算右值再取左值引用+守 size | 0.353 | ✅ 修预存求值顺序 UB 堆越界（ASan 编译器 118_suspend_expr 暴露）；asm 不变；继 0.345 后第二处编译器内存安全 bug。集成 |
+| UB修2 | lower/impl.h def 非负提示先算右值再取左值引用+守 size | 0.353 | ✅ 修预存求值顺序 UB 堆越界（ASan 编译器 118_suspend_expr 暴露）；asm 不变；继 0.345 后第二处编译器内存安全 bug。集成 |
 | stdlib7 | configparser（INI 解析/类型化取值/BasicInterpolation/修改/write/SectionProxy/错误族） | 0.354 | ✅ 纯 pa 853 行无 src 改动；253/254/390-394 CPython 7/7 字节同；ExtendedInterpolation/converters 保守跳过。集成 |
 | 异常leak修 | except 体 raise 新异常补上下文收尾（4 漏斗对齐 pa_eh_raise_value_from：drop_save+exc_free current_exc） | 0.355 | ✅ 取证修正「RC 环」误判——实为捕获异常 current_exc+帧链未释放（longjmp 跳过 ExcDone）；最小复现/363/390/391 leak→0；异常钉子 92/93/94/119/153 全 0；纯 runtime +23/−2 asm 不变。集成 |
 | 插值leak修 | configparser _interp_some 早返回 return→break（纯 stdlib） | 0.356 | ✅ ASan/gdb 取证 2 串（optionxform 名+提交值）漏 dec；根因编译器 release_slots 早返回用单遍部分槽标记（var/v 堆写入前 slot_owned 未置）；纯 stdlib break 修避漏 dec 出口，复现/392/253 leak→0 asm 不变。**编译器通用修（fixup_early_return_releases）会改 a2_config_parse 基准 asm（其 coerce 自身潜伏 leak）违闸门→回退留独立任务**（strfix-rc-early-return.md）。集成 |
@@ -128,7 +128,7 @@
 - **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
 - **通用性兑现**：borrow（dict_wordfreq −4.5% 日常语料）+ SIMD 通用化（非基准 1.93×）回应基准特化质疑；编译速度 −46.8% 普惠所有编译。
 - **语言面大幅完善**：定宽整数全（P1+收尾）+ unknown 类型标签（P2，pprint 解锁）+ P4 全 4 块（异常类当值/file-io/traceback/dataclass）+ tarfile stdlib。
-- **代码整洁**：check_size 超限清零（重构）；ir.cpp UAF 修。
+- **代码整洁**：check_size 超限清零（重构）；ir/ir.cpp UAF 修。
 - **暂缓**：P3 big BigInt（用户停，big1 有 rt_big.c partial 留档）；SIMD AVX2/改序 reduction（输出风险）；pax/GNU 写。
 - 测试规模 262→347+（含定宽/类型标签/语言缺口/tarfile/向量化回归）；difftest 328/0；语料零差异。
 
@@ -216,7 +216,7 @@ spectral_norm 的 1.15× 差距是「最后 5 条」量级（`[j,j+1]` 物化 5 
 - 0.420 修好 `promote_globals_in_loops` 后，模块级 `count`/`i` 才变成槽；
 - 但 `optimize_ir` 里 ifconv 跑在 promote **之前** → sieve 计数循环的菱形在 ifconv 看来
   「累加器是全局」→ 拒；promote 之后没有第二遍 → 到 codegen 时体块仍以 `Branch` 结尾，
-  向量化器在终止符门就拒（`vect_planner_loop.cpp:53`）。
+  向量化器在终止符门就拒（`opt/vect_planner_loop.cpp:53`）。
 - 0.423 的修法是**补第二遍 ifconv**（纯调度，判据/变换不变）→ 触发 0→1、sieve −4.78%。
 - 教训：**一个 pass 的判据如果依赖另一个 pass 的产物，调度顺序就是隐式契约**；
   要么在同一次调度里补跑，要么在注册点显式写明依赖。

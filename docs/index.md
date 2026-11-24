@@ -8,11 +8,11 @@
 
 | 文档 | 回答什么问题 | 主要对应的源码 |
 |---|---|---|
-| [architecture.md](architecture.md) | 整体怎么切分？各阶段之间靠什么契约衔接？ | `src/main.cpp` `src/driver_build.cpp` |
-| [language.md](language.md) | 支持哪些语法？类型规则是什么？语义和 Python 哪里不一样？ | `lexer.h` `parser.cpp` `typecheck*.cpp` |
-| [ir.md](ir.md) | IR 长什么样？每条指令什么语义？AST 怎么降级成它？ | `ir.h` `lower*.cpp` |
+| [architecture.md](architecture.md) | 整体怎么切分？各阶段之间靠什么契约衔接？ | `src/main.cpp` `src/driver/build.cpp` |
+| [language.md](language.md) | 支持哪些语法？类型规则是什么？语义和 Python 哪里不一样？ | `syntax/lexer.h` `syntax/parser.cpp` `typecheck*.cpp` |
+| [ir.md](ir.md) | IR 长什么样？每条指令什么语义？AST 怎么降级成它？ | `ir/ir.h` `lower*.cpp` |
 | [codegen.md](codegen.md) | 汇编怎么生成？栈帧和调用约定怎么定的？ | `codegen*.cpp` |
-| [stack-alignment.md](stack-alignment.md) | 栈对齐违规查到了哪两处 ABI 根因？`-mstackrealign` 为什么能撤掉？ | `src/codegen_block.cpp` `src/codegen.cpp` |
+| [stack-alignment.md](stack-alignment.md) | 栈对齐违规查到了哪两处 ABI 根因？`-mstackrealign` 为什么能撤掉？ | `src/backend/block.cpp` `src/backend/codegen.cpp` |
 | [runtime.md](runtime.md) | 编译产物运行时依赖什么？对象在内存里怎么摆？ | `runtime/rt_*.c` |
 | [unknown-semantics-audit.md](unknown-semantics-audit.md) | 「类型/种类未知」时运行时为什么容易退化成指针语义？今天修了哪 4 个 bug、还剩哪些缺口？ | `runtime/rt_dict.c` `runtime/rt_list.c` `runtime/rt_any.c` |
 | [semantics-audit-playbook.md](semantics-audit-playbook.md) | 语义审计怎么做：穷举对拍、先查文档、UB 期望、找全同类点位、标准流程 | `tests/` `docs/compatibility.md` |
@@ -20,17 +20,17 @@
 | [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `CMakeLists.txt` `tests/` |
 | [roadmap.md](roadmap.md) | 现在做到哪、下一步做什么、为什么是这个顺序 | — |
 | [zero-cost-exceptions.md](zero-cost-exceptions.md) | 零开销异常怎么做？LSDA / personality 的实测格式与 Z1-Z5 路线 | `runtime/rt_personality.c` `tests/exc/` `tools/lsda_ref/` |
-| [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower_exc.cpp` |
+| [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower/exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
-| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？三条路线（第三层 / 全局提升 / 块级分裂）各自为什么被判负？ | `src/codegen_regalloc.cpp` |
-| [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/codegen_regalloc.cpp` |
-| [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt_loop.cpp` |
-| [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower_impl_slots.cpp` `runtime/rt_core.c` |
-| [ivsr-negative-result.md](ivsr-negative-result.md) | 归纳变量强度削减（IVSR）为什么在 nbody 上运行时间退步 15.7%？ | `src/opt_loop.cpp` |
-| [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower_builtin.cpp` |
-| [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver_build.cpp` |
+| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？三条路线（第三层 / 全局提升 / 块级分裂）各自为什么被判负？ | `src/backend/regalloc.cpp` |
+| [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/backend/regalloc.cpp` |
+| [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt/loop.cpp` |
+| [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower/impl_slots.cpp` `runtime/rt_core.c` |
+| [ivsr-negative-result.md](ivsr-negative-result.md) | 归纳变量强度削减（IVSR）为什么在 nbody 上运行时间退步 15.7%？ | `src/opt/loop.cpp` |
+| [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower/builtin.cpp` |
+| [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver/build.cpp` |
 | [nightly-summary.md](nightly-summary.md) | 2026-11-22/23 夜间迭代 + 白天语义审计的总账：模块化、性能两张表、向量化覆盖、bug 清单、剩余工作 | — |
-| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：哪些基准/循环触发、8 个 0 触发基准各自的第一道拒绝门（IR 证据） | `src/vect_planner_loop.cpp` `src/codegen_vect.cpp` |
+| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：哪些基准/循环触发、8 个 0 触发基准各自的第一道拒绝门（IR 证据） | `src/opt/vect_planner_loop.cpp` `src/backend/vect.cpp` |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
 其中 [regalloc-architecture.md](regalloc-architecture.md) 的 §8、[bounds-elimination-attempt.md](bounds-elimination-attempt.md)、

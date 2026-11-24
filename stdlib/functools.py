@@ -1,9 +1,9 @@
 """functools 的 stdlib 扩展层（原生模块 + Python 补丁）。
 
-PyAdamas 的 functools 原生实现（builtin_sigs.cpp 签名 + 降级里的特化）提供
+PyAdamas 的 functools 原生实现（typecheck/builtin_sigs.cpp 签名 + 降级里的特化）提供
 reduce / wraps / partial / lru_cache；本文件只补原生没有的 CPython 接口。
 导入时编译器把扩展源编成模块，接口与原生接口合并：原生名字优先，本文件里
-原生没有的名字作为扩展全局导出（见 src/driver_build.cpp 的 kModuleTable）。
+原生没有的名字作为扩展全局导出（见 src/driver/build.cpp 的 kModuleTable）。
 往 functools 补 API 只需要改这个文件，不用碰 src/。
 
 语义边界（PyAdamas 不建模运行期函数元数据与缓存）：

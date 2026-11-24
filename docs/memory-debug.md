@@ -193,4 +193,4 @@ GUARD OK：抓到越界写
 | `runtime/rt_core.c` 顶部 `PYADAMAS_ALLOC_DEBUG` 段 | canary/guard 分配器与释放校验；`PA_DBG_MALLOC/PA_DBG_FREE/PA_DBG_HEAD_INIT` 钩子宏 |
 | `runtime/rt_core.c` 的 `rc_alloc_core` / `pa_rc_dec_slow` / `rc_leaf_free` / `gc_free_body` / 5 个 `*_pool_put` | 分配与**所有**释放路径接钩子；调试版不复用池块 |
 | `CMakeLists.txt` 的 `pyadamas_rt_debug` | 用 `-DPYADAMAS_ALLOC_DEBUG=1 -O2 -g` 重编 runtime，合成 `rt_allocdbg.o` |
-| `src/driver_build.cpp` | 环境变量选择链接 `rt_allocdbg.o`；缺失时报错；工具链指纹并入调试版摘要 |
+| `src/driver/build.cpp` | 环境变量选择链接 `rt_allocdbg.o`；缺失时报错；工具链指纹并入调试版摘要 |

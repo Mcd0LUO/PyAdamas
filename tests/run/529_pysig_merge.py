@@ -9,7 +9,7 @@ import sys
 
 # 声明侧（stdlib/sigs/sys.pysig）：maxsize 常量 + exit 函数
 print("maxsize", sys.maxsize)
-# 硬编码侧（builtin_sigs.cpp 的 sys 基础分支）
+# 硬编码侧（typecheck/builtin_sigs.cpp 的 sys 基础分支）
 print("argv_len", len(sys.argv) >= 1)
 print("executable_nonempty", sys.executable != "")
 print("stdout_ok", sys.stdout is not None)

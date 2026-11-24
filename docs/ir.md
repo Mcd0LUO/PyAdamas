@@ -51,7 +51,7 @@ vreg 已经是 SSA 的，活跃区间天然精确，不需要 phi 也不需要 S
 
 ## 数据结构
 
-`src/ir.h`。
+`src/ir/ir.h`。
 
 | 结构 | 说明 |
 |---|---|
@@ -245,8 +245,8 @@ O2 在降级完成后运行 `optimize_ir`（O0/O1 不运行）：
   参与：它常和紧跟的分支融合成 `cmp+jcc`，融合后不会真的写出布尔值，
   跨块复用那个 vreg 会读到没写过的寄存器。CSE 在循环旋转之后运行，随后
   再跑一遍常量折叠 + DCE。
-- **槽位/全局装载转发**（`forward_slot_loads`，0.155；`forward_global_loads`，0.290，`src/opt_forward.cpp`）：前者转发短路布尔值经临时槽的往返（循环旋转后再跑一遍，收掉新的 load+branch 形态）；后者把块内读到刚被 store.global 写入的全局的 load.global 直接转发到存入的 vreg 并删除 load——中间只隔纯 IR 指令或 RC 族 CallRt，要求装载结果块内只用一次且类型一致；GlobalAddr / 用户调用（Call/VCall/…）/ CallExtern / GenYield 使映射失效。**0.295 起 RcDec / RcDecUnknown / RcCleanup 也使全局转发失效**：释放旧生成器会执行用户 finally 并重入改写刚发布的全局——0.290「RC 析构全是运行时内部代码」的安全论证已被 197 用例的 heap-use-after-free 推翻，勿沿用旧论证。
-- **字典模式融合**（`fuse_dict_bump`，0.268，`src/opt_dict_bump.cpp`；`fuse_dict_tryget`，0.284，`src/opt_dict_fuse.cpp`）：bump 把 `d[k] = d.get(k, def) + delta` 计数器更新融合成一次哈希查找 + 原地写回（`RtFn::DictBump`）；tryget 把 `DictContains + branch` 与真分支纯前缀后的 `DictGet`（同 dict 同 key）改写成 `DictTryGet`（found 直接进分支寄存器，值经新帧槽中转，真分支的 get 变 load.slot），一次哈希+探测替代两次。守卫：真分支唯一前驱是分支块、contains→分支与分支入口→get 之间都是纯指令、值只在真分支内用；值槽与 SlotAddr 一样排除寄存器提升，一律留在内存。两者放在内联之后、CSE 之前。
+- **槽位/全局装载转发**（`forward_slot_loads`，0.155；`forward_global_loads`，0.290，`src/opt/forward.cpp`）：前者转发短路布尔值经临时槽的往返（循环旋转后再跑一遍，收掉新的 load+branch 形态）；后者把块内读到刚被 store.global 写入的全局的 load.global 直接转发到存入的 vreg 并删除 load——中间只隔纯 IR 指令或 RC 族 CallRt，要求装载结果块内只用一次且类型一致；GlobalAddr / 用户调用（Call/VCall/…）/ CallExtern / GenYield 使映射失效。**0.295 起 RcDec / RcDecUnknown / RcCleanup 也使全局转发失效**：释放旧生成器会执行用户 finally 并重入改写刚发布的全局——0.290「RC 析构全是运行时内部代码」的安全论证已被 197 用例的 heap-use-after-free 推翻，勿沿用旧论证。
+- **字典模式融合**（`fuse_dict_bump`，0.268，`src/opt/dict_bump.cpp`；`fuse_dict_tryget`，0.284，`src/opt/dict_fuse.cpp`）：bump 把 `d[k] = d.get(k, def) + delta` 计数器更新融合成一次哈希查找 + 原地写回（`RtFn::DictBump`）；tryget 把 `DictContains + branch` 与真分支纯前缀后的 `DictGet`（同 dict 同 key）改写成 `DictTryGet`（found 直接进分支寄存器，值经新帧槽中转，真分支的 get 变 load.slot），一次哈希+探测替代两次。守卫：真分支唯一前驱是分支块、contains→分支与分支入口→get 之间都是纯指令、值只在真分支内用；值槽与 SlotAddr 一样排除寄存器提升，一律留在内存。两者放在内联之后、CSE 之前。
 
 ## 后端的局部优化
 
@@ -470,10 +470,10 @@ bb0 (entry):
 
 ## 加一条新指令要动哪里
 
-1. `ir.h`：`IrOp` 加枚举 + `irop_name` 加名字
-2. `ir.cpp`：`Inst::text()` 加打印
+1. `ir/ir.h`：`IrOp` 加枚举 + `irop_name` 加名字
+2. `ir/ir.cpp`：`Inst::text()` 加打印
 3. `lower*.cpp`：产出这条指令（别忘了 `def()` 里登记类型）
-4. `codegen_ops.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
+4. `backend/ops.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
 5. `docs/ir.md`：指令表加一行，`docs/codegen.md` 说明生成策略
 
 漏掉第 4 步编译不过，这正是当初把 `op` 做成 `enum class` 而不是字符串的原因。

@@ -33,7 +33,7 @@ $1
 fail=0
 
 echo "== 文件行数（硬限制 ${FILE_LIMIT}）=="
-for f in src/*.cpp src/*.h; do
+for f in $(find src -type f \( -name '*.cpp' -o -name '*.h' \)); do
     [ -e "$f" ] || continue
     n=$(wc -l < "$f")
     if [ "$n" -gt "$FILE_LIMIT" ]; then
@@ -51,7 +51,7 @@ echo "== 函数行数（仅警告，> ${FUNC_LIMIT}）=="
 # 只认从第 1 列开始、以 '{' 结尾的定义（顶层函数/类/结构体），
 # 用花括号配平算长度；字符串里的花括号先剥掉。
 warned=0
-for f in src/*.cpp src/*.h; do
+for f in $(find src -type f \( -name '*.cpp' -o -name '*.h' \)); do
     [ -e "$f" ] || continue
     out=$(awk -v limit="$FUNC_LIMIT" '
         BEGIN { depth = 0; start = 0; name = "" }

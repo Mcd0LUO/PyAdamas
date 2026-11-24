@@ -8,9 +8,9 @@
 | 超 1000 行的文件 | 19 个（前几名卡在 1190–1195，紧贴 1200 硬限制） |
 | `AsmGen` | 约 300 个方法、**161 个字段**，实现散在 **29 个 `.cpp`** |
 | `Lowerer` | 约 224 个方法、**97 个字段**，实现散在 **43 个 `.cpp`** |
-| `codegen_impl.h` | 1191 行，被 **33 个 TU** include（含 81 处内联函数体） |
-| `lower_impl.h` | 1114 行，被 **44 个 TU** include |
-| 改 `codegen_impl.h` 一行 | 重编译 **33 个 TU，53.7 秒** |
+| `backend/impl.h` | 1191 行，被 **33 个 TU** include（含 81 处内联函数体） |
+| `lower/impl.h` | 1114 行，被 **44 个 TU** include |
+| 改 `backend/impl.h` 一行 | 重编译 **33 个 TU，53.7 秒** |
 | 改一个普通 `.cpp` | 重编译 **1 个 TU，8.2 秒** |
 | 文件级可变 `static` | **1 个**（几乎无全局状态） |
 | `codegen` ↔ `typecheck` 反向依赖 | **0**（阶段边界干净） |
@@ -36,8 +36,8 @@
       验收：单类方法数 ≤ 60、字段数 ≤ 40。
 
       **A5 实测（VectPlanner 抽完后，ccache 关、`-j4`）**：改
-      `src/vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
-      `src/codegen_core.h` 一行 = **31 个 TU / 55.16 s**。这就是「方法搬进
+      `src/opt/vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
+      `src/backend/core.h` 一行 = **31 个 TU / 55.16 s**。这就是「方法搬进
       独立协作对象」相对「方法挂在类体头文件里」的兑现：向量化器主体从
       「改一行 30 个 TU」变成「改一行 1 个 TU」，约 **1:7**。
 - [ ] **第 3 步 · 目录按阶段分**：`src/{driver,front,ir,low,opt,gen}/`（纯移动）。
@@ -63,12 +63,12 @@ auto int_ok = [](VK k) { return k == VK::InvI || k == VK::VecI; };
 
 | 文件 | 内容 |
 |---|---|
-| `src/intmath.h`（新） | `is_pow2` / `pow2_log2`：标量除法强度削减与向量化判据**共用一份算法** |
-| `src/vect_rules.h`（新） | `enum class VK` + `int_operand_ok` / `float_operand_ok` / `index_affine_ok` / `reducible_ok`，每条带「为什么」的注释 |
-| `src/vect_rules_test.cpp`（新） | 40 条 `static_assert` 真值表，**每次构建都验证** |
-| `codegen_vect.h` | 枚举改成 `using VK = vect::VK;`，类内写法不变 |
-| `codegen_vect.cpp` | 两个 lambda 换成具名判据 |
-| `codegen_div.h` | `pow2_log2` 不再自己实现，复用 `intmath.h`（保留 uint64 域与 2^63 边界） |
+| `src/common/intmath.h`（新） | `is_pow2` / `pow2_log2`：标量除法强度削减与向量化判据**共用一份算法** |
+| `src/opt/vect_rules.h`（新） | `enum class VK` + `int_operand_ok` / `float_operand_ok` / `index_affine_ok` / `reducible_ok`，每条带「为什么」的注释 |
+| `src/opt/vect_rules_test.cpp`（新） | 40 条 `static_assert` 真值表，**每次构建都验证** |
+| `backend/vect.h` | 枚举改成 `using VK = vect::VK;`，类内写法不变 |
+| `backend/vect.cpp` | 两个 lambda 换成具名判据 |
+| `backend/div.h` | `pow2_log2` 不再自己实现，复用 `common/intmath.h`（保留 uint64 域与 2^63 边界） |
 
 ### 验证
 
@@ -84,17 +84,17 @@ auto int_ok = [](VK k) { return k == VK::InvI || k == VK::VecI; };
 
 ```bash
 # 改一个头文件的重编译代价（关 ccache，否则看不出真实增量）
-cp src/codegen_impl.h /tmp/b; echo "// x" >> src/codegen_impl.h
+cp src/backend/impl.h /tmp/b; echo "// x" >> src/backend/impl.h
 CCACHE_DISABLE=1 /usr/bin/time -f "%e 秒" cmake --build build/lead -j4
-cp /tmp/b src/codegen_impl.h
+cp /tmp/b src/backend/impl.h
 
 # 类规模
-awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a-z_][A-Za-z0-9_]*\s*(=|;)"
+awk "/^class AsmGen/,0" src/backend/impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a-z_][A-Za-z0-9_]*\s*(=|;)"
 ```
 
 **注意**：`touch` 不会触发重编译（ninja 按 mtime 判），必须真改内容；
 而且改完要恢复内容再量下一个，否则恢复动作本身会让下一次测量失真（踩过）。
-## 5. 第 1 步（已完成）：拆 `codegen_impl.h`
+## 5. 第 1 步（已完成）：拆 `backend/impl.h`
 
 ### 5.1 先更正一条错误的验收标准
 
@@ -104,9 +104,9 @@ awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 
 | 改动 | 重编译 | 耗时 |
 |---|---|---|
-| 改被搬走的函数体（`codegen_impl.cpp`） | **1 个 TU** | **7.9 s** |
-| 改薄壳 `codegen_impl.h` 一行 | 30 个 TU | 55.0 s |
-| 改 `codegen_regalloc.h` 一行 | 30 个 TU | 54.6 s |
+| 改被搬走的函数体（`backend/impl.cpp`） | **1 个 TU** | **7.9 s** |
+| 改薄壳 `backend/impl.h` 一行 | 30 个 TU | 55.0 s |
+| 改 `backend/regalloc.h` 一行 | 30 个 TU | 54.6 s |
 
 所以「33 → 8」必须等**第 2 步**把 `AsmGen` 拆成多个对象之后才可能。
 第 1 步的真实收益只有一条：**改那 41 个有逻辑的函数体从 54 s 变成 8 s**。
@@ -115,12 +115,12 @@ awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 
 | 文件 | 行数 | 内容 |
 |---|---|---|
-| `src/codegen_impl.h` | 1192 → **249** | 薄壳：public 开关 + 23 个核心字段 + 4 个类体片段 include |
-| `src/codegen_core.h` | 507 | 位置状态 / 输出辅助 / 目标指示符 / 函数·块·指令·对象·调用 |
-| `src/codegen_regalloc.h` | 101 | 全局寄存器分配 / live range splitting |
-| `src/codegen_frame.h` | 90 | 栈槽分配 / 帧记录 / 帧布局·尾声 |
-| `src/codegen_tag.h` | 129 | shadow tag / 直调 tag ABI / 零开销异常 |
-| `src/codegen_impl.cpp` | 276（新） | 41 个搬出来的函数体 |
+| `src/backend/impl.h` | 1192 → **249** | 薄壳：public 开关 + 23 个核心字段 + 4 个类体片段 include |
+| `src/backend/core.h` | 507 | 位置状态 / 输出辅助 / 目标指示符 / 函数·块·指令·对象·调用 |
+| `src/backend/regalloc.h` | 101 | 全局寄存器分配 / live range splitting |
+| `src/backend/frame_members.h` | 90 | 栈槽分配 / 帧记录 / 帧布局·尾声 |
+| `src/backend/tag.h` | 129 | shadow tag / 直调 tag ABI / 零开销异常 |
+| `src/backend/impl.cpp` | 276（新） | 41 个搬出来的函数体 |
 
 **内联体：搬 41 / 留 40。** 留下的都是每行发射路径上的：`line`（13/40 行，
 每行发射入口）、`fresh_label`、`func_label`、`slot_mop`（34 行，查表核心）、
@@ -128,7 +128,7 @@ awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 判据是「被别的内联函数调用 / 在热路径上」。
 
 类体成员程序化比对：原 320 个 = 新 5 个文件拼起来 320 个，missing/extra 均为空。
-`codegen_vect.h` / `codegen_simd.h` / `codegen_emit.h` 仍是**在类体内 `#include`**
+`backend/vect.h` / `backend/simd.h` / `backend/emit.h` 仍是**在类体内 `#include`**
 的片段，机制不变（类体里不许出现 `namespace` / `#include` —— 踩过）。
 
 ### 5.3 验证
@@ -148,14 +148,14 @@ awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 
 ### 5.4 没做的事
 
-- `codegen_impl.h` 里 13 个**文件级** `inline` 自由函数（`reg32`/`reg8` 各 26 行等）
+- `backend/impl.h` 里 13 个**文件级** `inline` 自由函数（`reg32`/`reg8` 各 26 行等）
   不在「类成员」口径内，未动 —— 后续可选收益。
 - 声明层面的重编译代价没变（30 个 TU），这不是第 1 步的目标，是第 2 步的。
 ## 6. 第 2 步（进行中）：AsmGen 拆协作对象
 
 ### 6.1 已完成：`Frame`（帧布局 + 帧记录）
 
-新文件 `src/frame.h`（60 行）：`class Frame` 持有原来散在 AsmGen 里的帧状态 ——
+新文件 `src/backend/frame.h`（60 行）：`class Frame` 持有原来散在 AsmGen 里的帧状态 ——
 
 | 类别 | 成员 |
 |---|---|
@@ -189,7 +189,7 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 | 12 基准指令数 | 除 `binary_trees` −0.27%（4.7M 指令的小程序固有噪声）外全部 ±0.000% |
 ### 6.4 已完成：`Emitter`（输出侧状态）
 
-新文件 `src/emitter.h`：`class Emitter` 持有三样输出侧状态 ——
+新文件 `src/backend/emitter.h`：`class Emitter` 持有三样输出侧状态 ——
 
 | 成员 | 说明 |
 |---|---|
@@ -207,7 +207,7 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 等下次把它们整体搬过来，`Emitter` 才名副其实地成为「发射器」。
 ### 6.5 已完成：`TagLower`（tag + 零开销异常状态）
 
-新文件 `src/tag_lower.h`：14 个字段搬进去 ——
+新文件 `src/backend/tag_lower.h`：14 个字段搬进去 ——
 
 | 类别 | 成员 |
 |---|---|
@@ -215,7 +215,7 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 | EH（7） | `eh_plans`（含 `EhPlanRec` 结构）+ 三个标签表 + 三个取用序号 |
 
 **约 149 处**用法改成 `tag_.x`，横跨 15 个文件。`EhPlanRec` 是 TagLower 内嵌类型，
-外部引用改写成 `TagLower::EhPlanRec`（只有 `codegen.cpp` 一处）。
+外部引用改写成 `TagLower::EhPlanRec`（只有 `backend/codegen.cpp` 一处）。
 
 验证：构建绿 / 369 ran ok / difftest 348/0 / ASan 369 ran ok 0 报告 / check_size 通过；
 12 基准输出全一致，指令数全部 ±0.000%（`binary_trees` +0.03%，在噪声内）。
@@ -228,7 +228,7 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 - **`VectPlanner`**：原列在这里，已在阶段 A（0.402–0.406）完成，见 §6.8。
 ### 6.7 已完成：`RegAlloc`（槽提升状态）
 
-新文件 `src/reg_alloc.h`：12 个字段 ——
+新文件 `src/backend/reg_alloc.h`：12 个字段 ——
 
 | 类别 | 成员 |
 |---|---|
@@ -239,7 +239,7 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 取值路径上（`slot_mop` 每次查一次），所以除了产物等价还专门看指令数 —— 全部 ±0.000%，
 证明多一层成员间接没有引入可见成本。
 
-改名时踩到一个真坑：`ra_opt.cpp` 名字不带 `codegen` 前缀，第一轮脚本没覆盖，
+改名时踩到一个真坑：`backend/ra_opt.cpp` 名字不带 `codegen` 前缀，第一轮脚本没覆盖，
 编译报错才发现。机械改名必须用「全 src 扫描 + 编译验证」，不能靠命名前缀猜。
 
 ### 6.8 已完成：`VectPlanner`（阶段 A，2026-11-23）
@@ -257,20 +257,20 @@ AsmGen 成员调用。设计决定（`docs/vect-planner-design.md`）：
 
 | 文件 | 行数 | 内容 |
 |---|---|---|
-| `src/vect_planner.h` | 319 | `VectPlanner` + 嵌套 `Loop`（状态 + 方法声明）+ `VAffBase`/`VAccess`/`VRed` 等类型 |
-| `src/vect_planner.cpp` | 677 | `Loop` 方法（classify / xmm_of / take / list_* / 仿射分析 / 归约识别…） |
-| `src/vect_planner_loop.cpp` | 949 | `VectPlanner::try_loop` 主体（原 `try_vect_loop`，约 800 行） |
-| `src/codegen_vect.cpp` | 1178 → **59** | 只剩设计注释 + `vect_func_ok` + 一行转发 |
-| `src/codegen_vect_affine.cpp` | 141 → 58 | 分析/守卫/基址/装载全部搬走，只剩设计说明 |
-| `src/codegen_vect_jvec.cpp` / `_avx2.cpp` | 184 / 380 | 仍是 `AsmGen` 方法（`vect_jvec2` / `vect_avx2_emit` / `vect_alloc_temps` / `vect_mark_nonindex_uses`） |
+| `src/opt/vect_planner.h` | 319 | `VectPlanner` + 嵌套 `Loop`（状态 + 方法声明）+ `VAffBase`/`VAccess`/`VRed` 等类型 |
+| `src/opt/vect_planner.cpp` | 677 | `Loop` 方法（classify / xmm_of / take / list_* / 仿射分析 / 归约识别…） |
+| `src/opt/vect_planner_loop.cpp` | 949 | `VectPlanner::try_loop` 主体（原 `try_vect_loop`，约 800 行） |
+| `src/backend/vect.cpp` | 1178 → **59** | 只剩设计注释 + `vect_func_ok` + 一行转发 |
+| `src/backend/vect_affine.cpp` | 141 → 58 | 分析/守卫/基址/装载全部搬走，只剩设计说明 |
+| `src/backend/vect_jvec.cpp` / `_avx2.cpp` | 184 / 380 | 仍是 `AsmGen` 方法（`vect_jvec2` / `vect_avx2_emit` / `vect_alloc_temps` / `vect_mark_nonindex_uses`） |
 
 **边界（诚实记录）**：阶段 A4 第 ④ 步「辅助文件跟着搬 + 删转发」**没有做**。那四个
 文件的方法直接发指令、且被 `AsmGen` 的发射路径调用，按当前「三接口 + 反向引用」
-的边界留在 `AsmGen` 更简单（`codegen_vect.h` 里一行转发暴露给 `VectPlanner`）。
+的边界留在 `AsmGen` 更简单（`backend/vect.h` 里一行转发暴露给 `VectPlanner`）。
 主体（`try_loop` + `Loop` 状态/方法）已全部搬完，这不算遗留缺口。
 
-**A5 实测**：改 `vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
-`codegen_core.h` 一行 = **31 个 TU / 55.16 s**（ccache 关、`-j4`）→ **1:7**。
+**A5 实测**：改 `opt/vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
+`backend/core.h` 一行 = **31 个 TU / 55.16 s**（ccache 关、`-j4`）→ **1:7**。
 
 **验证**：每个阶段都按产物等价验收 —— 12 基准输出与 CPython 逐字节一致、
 matmul/spectral_norm 汇编 md5 不变（`6eee8414…` / `58be63a7…`）、指令数在噪声内；

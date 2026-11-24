@@ -28,14 +28,14 @@
 
 | 基准 | 热循环 | 第一道拒绝的门（判据位置） | IR 证据摘要 |
 |---|---|---|---|
-| mandelbrot | `while i < maxiter and zr*zr+zi*zi <= 4.0` | **循环形状**（`vect_planner_loop.cpp:77 if (!shaped)`，底层 `simd_while_shape_ok`，`codegen_simd.cpp:388`） | cond 的**真分支是 `bb12`（and 短路块）而不是体块 `bb10`**；退出由运行期比较决定 |
-| sieve | ① 跨步清零 `while q < N: flags[q]=0; q += p` | ① 全局提升后**循环形状**过了，但 **loop_ops**（`codegen_simd.cpp:416`）仍拒：体内 `call.rt pa_rc_dec_unknown`（全局 q 类型 unknown 的 RC 清理）+ 步长 `p`≠1 | cond 首指令已是 `load.slot`（0.420 promote 生效）；体尾是 `LoadSlot/Add p/StoreSlot`，但 `simd_const_int(step, 1)` 失败、`pa_rc_dec_unknown` 不在白名单 |
-| sieve | ② 计数 `while i < N: if flags[i]==1: count+=1; i+=1` | **✅ 0.423 已向量化**（触发 1 次，SSE2 2-lane） | 0.418 时第一道门是**体块终止符**（`vect_planner_loop.cpp:53`：体块以 `Branch` 结尾）；根因其实是 **pass 顺序**（if-conversion 在 promote 之前跑，那时 `count` 还是全局被保守门拒），详见 §3.2 末尾 |
-| nqueens | `for c in range(n)`（`place`） | **体块终止符**（`vect_planner_loop.cpp:53`） | for.body 以 `branch` 结尾（`if cols[c]==0 and …` 的 and 链拆成 4~5 块） |
-| collatz | `while n != 1`（`steps`） | **体块终止符**（`vect_planner_loop.cpp:53`） | 条件 `cmp.ne`（数据依赖，不是 `j < n`）；体块以 if/else 的 `branch` 结尾 |
+| mandelbrot | `while i < maxiter and zr*zr+zi*zi <= 4.0` | **循环形状**（`opt/vect_planner_loop.cpp:77 if (!shaped)`，底层 `simd_while_shape_ok`，`backend/simd.cpp:388`） | cond 的**真分支是 `bb12`（and 短路块）而不是体块 `bb10`**；退出由运行期比较决定 |
+| sieve | ① 跨步清零 `while q < N: flags[q]=0; q += p` | ① 全局提升后**循环形状**过了，但 **loop_ops**（`backend/simd.cpp:416`）仍拒：体内 `call.rt pa_rc_dec_unknown`（全局 q 类型 unknown 的 RC 清理）+ 步长 `p`≠1 | cond 首指令已是 `load.slot`（0.420 promote 生效）；体尾是 `LoadSlot/Add p/StoreSlot`，但 `simd_const_int(step, 1)` 失败、`pa_rc_dec_unknown` 不在白名单 |
+| sieve | ② 计数 `while i < N: if flags[i]==1: count+=1; i+=1` | **✅ 0.423 已向量化**（触发 1 次，SSE2 2-lane） | 0.418 时第一道门是**体块终止符**（`opt/vect_planner_loop.cpp:53`：体块以 `Branch` 结尾）；根因其实是 **pass 顺序**（if-conversion 在 promote 之前跑，那时 `count` 还是全局被保守门拒），详见 §3.2 末尾 |
+| nqueens | `for c in range(n)`（`place`） | **体块终止符**（`opt/vect_planner_loop.cpp:53`） | for.body 以 `branch` 结尾（`if cols[c]==0 and …` 的 and 链拆成 4~5 块） |
+| collatz | `while n != 1`（`steps`） | **体块终止符**（`opt/vect_planner_loop.cpp:53`） | 条件 `cmp.ne`（数据依赖，不是 `j < n`）；体块以 if/else 的 `branch` 结尾 |
 | fannkuch | 翻转 / 排列更新 / 复制 | **循环形状** + 规模 | 所有循环 trip count ≤ n=8；翻转循环数据依赖（`while temp[0] != 0`）且**双归纳变量**（i 递增、m 递减） |
-| fasta | 随机序列生成 | **体块终止符**（`vect_planner_loop.cpp:53`）+ 全局写 | 体块以 if 的 `branch` 结尾；module-level 循环用全局变量 |
-| wordfreq | 逐词计数 | **体块终止符**（`vect_planner_loop.cpp:53`）+ loop_ops | 体块以 `branch` 结尾；体内 `call.rt pa_dict_contains` 等调用 |
+| fasta | 随机序列生成 | **体块终止符**（`opt/vect_planner_loop.cpp:53`）+ 全局写 | 体块以 if 的 `branch` 结尾；module-level 循环用全局变量 |
+| wordfreq | 逐词计数 | **体块终止符**（`opt/vect_planner_loop.cpp:53`）+ loop_ops | 体块以 `branch` 结尾；体内 `call.rt pa_dict_contains` 等调用 |
 | binary_trees | —（**0 个循环块**） | 无循环可向量化 | 纯递归建树/销毁 + 类分配 |
 | fib | —（**0 个循环块**） | 无循环可向量化 | 纯递归 |
 
@@ -64,8 +64,8 @@ bb10 (while.body):
   jump bb9
 ```
 
-- **第一道门**：`run_1 bb10 stage=31 size=15` → `vect_planner_loop.cpp:77 if (!shaped)`，
-  底层 `simd_while_shape_ok`（`codegen_simd.cpp:388`）要求 cond 的**真分支就是体块**
+- **第一道门**：`run_1 bb10 stage=31 size=15` → `opt/vect_planner_loop.cpp:77 if (!shaped)`，
+  底层 `simd_while_shape_ok`（`backend/simd.cpp:388`）要求 cond 的**真分支就是体块**
   （`C[2].target != body_bi` 即失败），这里真分支是 `bb12`。
 - **为什么放宽分支目标也不够**：迭代次数由 `bb12` 的运行期比较决定（数据依赖提前退出），
   不是 `j < n` —— 现有「j+1<n 守卫 + 标量尾」模型算不出迭代数，需要逐 lane
@@ -92,11 +92,11 @@ bb11 (while.body):
   jump bb10
 ```
 
-- **0.418 时的第一道门**：`__pa_main bb11 stage=31 size=10` → `vect_planner_loop.cpp:77`。原因链（按门顺序）：
-  1. `simd_while_shape_ok` 要求 cond 首指令是 `LoadSlot`（`codegen_simd.cpp:393`），
+- **0.418 时的第一道门**：`__pa_main bb11 stage=31 size=10` → `opt/vect_planner_loop.cpp:77`。原因链（按门顺序）：
+  1. `simd_while_shape_ok` 要求 cond 首指令是 `LoadSlot`（`backend/simd.cpp:393`），
      0.418 时这里是 `LoadGlobal`；体块尾部要求 `LoadSlot / Add 1 / StoreSlot`，那时全是 global；
-  2. 步长必须是 1（`simd_const_int(B[k+1].b, 1)`，`codegen_simd.cpp:404`），这里是 `p`；
-  3. 即使形状过，`simd_loop_ops_ok`（`codegen_simd.cpp:416`）拒绝 `store.global` 与
+  2. 步长必须是 1（`simd_const_int(B[k+1].b, 1)`，`backend/simd.cpp:404`），这里是 `p`；
+  3. 即使形状过，`simd_loop_ops_ok`（`backend/simd.cpp:416`）拒绝 `store.global` 与
      `pa_rc_dec_unknown`；
   4. 全局 q 类型 unknown → int Bin 分类要求两操作数都是 int，也会在角色阶段失败。
 
@@ -116,7 +116,7 @@ bb14 (while.body):
   branch %86, bb17, bb16            ← 体块以 Branch 结尾
 ```
 
-- **0.418 时的判断**：第一道门 = 体块终止符（`vect_planner_loop.cpp:53 if (L.BI.back().op != IrOp::Jump)`），
+- **0.418 时的判断**：第一道门 = 体块终止符（`opt/vect_planner_loop.cpp:53 if (L.BI.back().op != IrOp::Jump)`），
   体块以 `branch` 结尾（体内 if 把体块拆成多块）→ 需要 if-conversion。
 - **0.423 修正（本文唯一一条被推翻的门序判断）**：0.420 的全局提升修好后 `count`/`i` 已是槽，
   if-conversion 本可压平这个菱形，但它跑在 `promote_globals_in_loops` **之前**（`optimize_ir` 的调度顺序），
@@ -153,7 +153,7 @@ bb8 (and.rhs) → bb9 (and.rhs) → bb10 (if.then):
 bb7 (if.end) → jump bb5 (for.incr)
 ```
 
-- **第一道门**：`place_1 bb4 stage=21 size=7` → `vect_planner_loop.cpp:53`：
+- **第一道门**：`place_1 bb4 stage=21 size=7` → `opt/vect_planner_loop.cpp:53`：
   体块以 Branch 结尾（`if cols[c]==0 and d1[...]==0 and d2[...]==0` 的 and 链拆成多块）。
 - 即使 if 单块化：体内 `call.direct f1`（递归）+ 6 个 `index.set` → `simd_loop_ops_ok`
   拒绝调用；递归本身不可向量化。
@@ -176,7 +176,7 @@ bb6 (if.else): ... store.slot s0, %23 ; jump bb4
 bb4 (if.end):  %27 = bin.add（计数 c）; store.slot s1 ; jump bb1
 ```
 
-- **第一道门**：`steps_1 bb2 stage=21 size=4` → `vect_planner_loop.cpp:53`（体块以 Branch 结尾）。
+- **第一道门**：`steps_1 bb2 stage=21 size=4` → `opt/vect_planner_loop.cpp:53`（体块以 Branch 结尾）。
 - 双重根本原因：条件 `n != 1` 是数据依赖（trip count 不可知，计数循环模型不适用）；
   体内 if/else 把体块拆成多块。
 - 外层 `__pa_main` 的 `while i < N`：`stage=31`，体内 `call steps_1` + if。

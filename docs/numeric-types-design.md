@@ -6,10 +6,10 @@
 
 ## 0. 现状（代码取证）
 
-- **TyKind**（typecheck_types.h:25）：Unknown/None/Bool/**Int**/Float/Complex/Str/Bytes/List/.../File/.../Struct/Chan 等 47 种。
-  **Int 是单一类型 = i64 机器字**（ir_types.h int64_t；asm addq/imulq）；无定宽/无符号/big。Float=f64，无 f32。Bool 已有。
+- **TyKind**（typecheck/types.h:25）：Unknown/None/Bool/**Int**/Float/Complex/Str/Bytes/List/.../File/.../Struct/Chan 等 47 种。
+  **Int 是单一类型 = i64 机器字**（ir/types.h int64_t；asm addq/imulq）；无定宽/无符号/big。Float=f64，无 f32。Bool 已有。
 - **整数溢出**：i64 二进制补码回绕（2**63→-2**63，2**64→0），**非 CPython 无限精度**。无 BigInt。
-- **P3 shadow tag**（codegen_impl.h:334 PaTag / rt_any.c:376）：UNK0/INT1/FRAW2/FBOX3/STR4/HEAP5。
+- **P3 shadow tag**（backend/impl.h:334 PaTag / rt_any.c:376）：UNK0/INT1/FRAW2/FBOX3/STR4/HEAP5。
   用途=RC/算术免探针优化，**不是完整运行期类型信息**：INT 不区分 bool/None/宽度；HEAP 不区分 list/dict/tuple/set。
 - **unknown 表示**：i64 机器字（None=0/bool=0,1/float 位模式/堆地址），探针 rc_index_has 判堆。
 - **isinstance/repr 缺口**（stdlib-b3 实测）：unknown 值 int/bool/None 分不清（True≡1、None≡0）、tuple 打印成指针、set 认成 dict、bytes/str 混同 → pprint 不可能正确。
@@ -67,7 +67,7 @@
 
 - 定宽整数存 unknown i64 槽：值符号/零扩展到 i64，**tag 需带宽度/符号**（见 §2）或运算由静态类型驱动（unknown 边界擦宽度→提升 i64）。
 - 简化 v1：定宽整数过 unknown 边界**提升为 i64/int**（擦宽度，保守），回来需 cast。big 过 unknown 是 HEAP/BIG tag。
-- C FFI 对齐：cimport 已有 C 类型（cimport.h CK Int=i64/Bool/Float），扩 char/short/unsigned 映射到原生定宽。
+- C FFI 对齐：cimport 已有 C 类型（cimport/cimport.h CK Int=i64/Bool/Float），扩 char/short/unsigned 映射到原生定宽。
 
 ### 1.5 char 定义
 

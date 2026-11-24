@@ -175,7 +175,7 @@ zero_hit=<name1>,<name2>
 
 `changed` 是「pass 前后函数 IR 指纹变化」的函数次数；`funcs` 是 pass 被调用的函数次数。
 指纹覆盖块序列 + 每条指令的操作码/操作数/立即数/跳转目标/实参/类型，所以改 CFG、改操作数、
-改立即数都会算命中；**pass 只在驱动里包一层**（`src/opt.cpp` 的 `opt_stats_run`），不污染 pass 本身。
+改立即数都会算命中；**pass 只在驱动里包一层**（`src/opt/opt.cpp` 的 `opt_stats_run`），不污染 pass 本身。
 
 **同名 pass 调用两次要分别计数**（`forward_slot_loads#1` / `#2`、`if_convert_accumulators#1` / `#2`、
 `inline#1` / `#2`、`cse#1` / `#2`）—— 历史上「第二次调用 0 命中」是插桩命名伪影，工具通过调用点后缀

@@ -94,7 +94,7 @@ public:
 
 ### 阶段 1：抽接口，不改调用方
 
-- 新增 `src/emit_sink.h`（10 个纯虚 + 2 个默认实现）；
+- 新增 `src/backend/emit_sink.h`（10 个纯虚 + 2 个默认实现）；
 - `class AsmGen : public EmitSink`，把现有方法标 `override`；
 - **不改任何调用点**，不新增 `VectPlanner`。
 - 验收：构建绿 + 12 基准输出与指令数不变。
@@ -105,9 +105,9 @@ public:
   `AsmGen` 的薄层（它们本来就短），或直接留在 AsmGen 实现接口。
 - 目的：确认接口签名够用，**不搬向量化代码**。
 
-### 阶段 3：搬 `codegen_vect.cpp` 主体
+### 阶段 3：搬 `backend/vect.cpp` 主体
 
-- 新增 `src/vect_planner.h/.cpp`：`class VectPlanner { EmitSink& sink_; ... }`；
+- 新增 `src/opt/vect_planner.h/.cpp`：`class VectPlanner { EmitSink& sink_; ... }`；
 - 把 `try_vect_loop` 及其全部辅助方法整体搬进去，`AsmGen::try_vect_loop` 留一行转发；
 - 辅助文件（`_affine` / `_avx2` / `_intdiv` / `_jvec`）跟着搬，成为 `VectPlanner` 的方法。
 - 验收：12 基准输出逐字节一致 + 指令数 ±0.000% + 向量化触发数不变。
@@ -115,7 +115,7 @@ public:
 ### 阶段 4：删转发 + 量重编译
 
 - 删掉 `AsmGen` 里的转发与残留声明；
-- 实测「改 `vect_planner.cpp`」的重编译 TU 数（应 ≈ 1–2，而不是 30）。
+- 实测「改 `opt/vect_planner.cpp`」的重编译 TU 数（应 ≈ 1–2，而不是 30）。
 
 ## 5. 风险与缓解
 
@@ -137,14 +137,14 @@ public:
 ## 7. 验收标准
 
 1. `AsmGen` 的方法数从约 300 降到 250 以下（脚本统计）；
-2. 改 `src/vect_planner.cpp` 的重编译 TU 数 ≤ 2（实测，关 ccache）；
+2. 改 `src/opt/vect_planner.cpp` 的重编译 TU 数 ≤ 2（实测，关 ccache）；
 3. 12 基准 × 3 优化档：输出逐字节一致、指令数 ±0.000%、向量化触发数不变；
 4. 普通套件 / difftest / ASan / check_size 全绿。
 ## 8. 实施进度
 
 ### 阶段 1 已完成（2026-11-22）
 
-- 新增 `src/emit_sink.h`：`class EmitSink`，7 个纯虚 ——
+- 新增 `src/backend/emit_sink.h`：`class EmitSink`，7 个纯虚 ——
   `emit2` / `emit_imm` / `emit_jmp`(×2) / `line` / `label` / `src_mop` / `fresh_label`；
 - `class AsmGen : public EmitSink`，8 处实现加 `override`（`emit_jmp` 两个重载）。
 - **没有改任何调用点，没有新增 `VectPlanner`**。
@@ -253,22 +253,22 @@ public:
 | 1 | `EmitSink` 落地 + `override` | ✅ 0.398 |
 | 2 | 修正成三接口 | ✅ 0.399 |
 | 2b | 核对剩余成员（多数是局部 lambda） | ✅ 0.400，无需改代码 |
-| 3 | 搬 `try_vect_loop` + `Loop` 状态/方法（`vect_planner*` 合计 1,945 行） | ✅ 0.403–0.406；`codegen_vect.cpp` 1,178 → 59 行 |
-| 4 | 删转发 + 量重编译 TU | ✅ 只剩一行转发（`AsmGen::try_vect_loop`）；改 `vect_planner_loop.cpp` = **1 TU / 7.76 s**，改 `codegen_core.h` = **31 TU / 55.16 s** |
+| 3 | 搬 `try_vect_loop` + `Loop` 状态/方法（`vect_planner*` 合计 1,945 行） | ✅ 0.403–0.406；`backend/vect.cpp` 1,178 → 59 行 |
+| 4 | 删转发 + 量重编译 TU | ✅ 只剩一行转发（`AsmGen::try_vect_loop`）；改 `opt/vect_planner_loop.cpp` = **1 TU / 7.76 s**，改 `backend/core.h` = **31 TU / 55.16 s** |
 
 **阶段 3/4 已实施完毕，重编译收益也量到了**：向量化器主体（`try_loop` 约 800 行）
-搬进 `src/vect_planner_loop.cpp`，每次调用状态与 20 个捕获 lambda 收进
-`VectPlanner::Loop`（`vect_planner.h` 319 行 / `vect_planner.cpp` 677 行 /
-`vect_planner_loop.cpp` 949 行）。**边界**：`vect_affine_*` / `vect_jvec2` /
+搬进 `src/opt/vect_planner_loop.cpp`，每次调用状态与 20 个捕获 lambda 收进
+`VectPlanner::Loop`（`opt/vect_planner.h` 319 行 / `opt/vect_planner.cpp` 677 行 /
+`opt/vect_planner_loop.cpp` 949 行）。**边界**：`vect_affine_*` / `vect_jvec2` /
 `vect_avx2_emit` / `vect_alloc_temps` 仍留在 `AsmGen`（它们直接发指令、且被发射路径
 调用，按「三接口 + 反向引用」的边界留在原处更简单），阶段 3 只搬了 `try_vect_loop`
 主体 —— 原定的「辅助文件跟着搬」这条经实践证明不必要。
 
 **1:7** 是这块拆分的最终兑现：改向量化器一行只要 1 个 TU / 7.76 s，而改类体头文件
-（`codegen_core.h`）一行仍是 31 个 TU / 55.16 s（ccache 关、`-j4`）。
+（`backend/core.h`）一行仍是 31 个 TU / 55.16 s（ccache 关、`-j4`）。
 ## 12. 阶段 3 盘点：`try_vect_loop` 的局部状态（2026-11-22）
 
-`codegen_vect.cpp`（1,178 行）里有 **21 个局部 lambda**，它们捕获的是**每次调用的**
+`backend/vect.cpp`（1,178 行）里有 **21 个局部 lambda**，它们捕获的是**每次调用的**
 局部状态（`cond_bi`/`body_bi`/`incr_bi`/`vec`/`avx`/`si`/`jalias`…）。这是搬迁的真正
 难点：方法可以搬，捕获状态不能。
 

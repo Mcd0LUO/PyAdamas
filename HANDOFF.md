@@ -165,10 +165,10 @@ binary_trees/fasta/fib 快过 Go；binary_trees/fasta 快过 C++；mandelbrot �
 | 23e94a4 | 0.289 Bin+StoreGlobal 融合（can_fuse_global）| obj_dispatch −5.7% |
 | c5826d7 | 0.290 store.global→load.global 转发（forward_global_loads）| obj_dispatch −13.7% |
 
-关键机制位置：内联发射集中在 codegen_call_rt.cpp（gen_rc_inline /
+关键机制位置：内联发射集中在 backend/call_rt.cpp（gen_rc_inline /
 gen_tuple_inline / gen_append_inline / gen_str_index_inline）；
-gen_call_rt（codegen_call.cpp）有 MathSqrt / DictTryGet 特判；
-opt_dict_fuse.cpp（DictTryGet 融合）、opt_forward.cpp（槽转发 + 全局转发）。
+gen_call_rt（backend/call.cpp）有 MathSqrt / DictTryGet 特判；
+opt/dict_fuse.cpp（DictTryGet 融合）、opt/forward.cpp（槽转发 + 全局转发）。
 
 ## 5. 下一步（按杠杆排序，均已完成取证）
 
@@ -258,9 +258,9 @@ copy_range 3.3%、list_destroy 3%、rc_link 2.8%、rc_unlink 1.9%。
 ## 7. 已知问题（不要当新发现重复排查）
 
 1. **check_size.sh 失败**（5 个已知超限，清单只能删不能加）：
-   codegen_regalloc.cpp(2475)、driver_build.cpp(1421)、ir_ops.h(1249)、
-   lower_impl.h(1233)、typecheck_types.h(1296)。新代码放新文件或
-   codegen_call_rt.cpp（1010）/opt_dict_fuse.cpp 等有余量的文件。
+   backend/regalloc.cpp(2475)、driver/build.cpp(1421)、ir/ops.h(1249)、
+   lower/impl.h(1233)、typecheck/types.h(1296)。新代码放新文件或
+   backend/call_rt.cpp（1010）/opt_dict_fuse.cpp 等有余量的文件。
 2. **RC 统计盲区（部分）**：gen_rc_inline 的 inc/dec 快路径不读
    pa_rc_stats_on_fast（统计会漏）；0.286 的 temp push/take 内联**有**
    stats 守卫。要精确统计临时关 inc/dec 内联。
@@ -314,7 +314,7 @@ copy_range 3.3%、list_destroy 3%、rc_link 2.8%、rc_unlink 1.9%。
 
 ```
 src/           C++23 前端：词法 → AST → 脱糖 → 类型检查 → IR → codegen
-               优化 pass：opt.cpp 调度（fold/inline/licm/forward/dict_bump/
+               优化 pass：opt/opt.cpp 调度（fold/inline/licm/forward/dict_bump/
                dict_fuse/global_promote/bounds_version/loop_rotate/cse/rc）
 runtime/       C11 运行时（38 个 .c，ld -r 合成 rt.o）；池：str/list/
                list_inline/dict（含缓冲）；temp 栈；增量 GC

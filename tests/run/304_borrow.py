@@ -5,7 +5,7 @@
 
 # 只读借用槽细化（0.338，PYADAMAS_BORROW_OPT）：命中形态。
 # 循环变量从稳定容器借用元素、全程只读 → 免每轮 inc/dec 与出口 release。
-# 计数守恒：容器持有元素那份引用贯穿函数体（见 lower_borrow.cpp 论证）。
+# 计数守恒：容器持有元素那份引用贯穿函数体（见 lower/borrow.cpp 论证）。
 
 def probe_range(xs: list[str], n: int) -> int:
     total = 0

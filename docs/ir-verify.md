@@ -15,7 +15,7 @@ PYADAMAS_VERIFY_IR=2 pyadamas run app.py    # 报告违规并中止（退出码 
 ```
 
 默认关闭，关闭时开销是**一次 `getenv`**（在 `optimize_ir` 前后各一次）。
-检查点在 `src/lower.cpp`：`pre-opt`（降级刚结束）与 `post-opt`（优化刚结束），
+检查点在 `src/lower/lower.cpp`：`pre-opt`（降级刚结束）与 `post-opt`（优化刚结束），
 所以报告里能直接看出是哪个阶段把 IR 改坏的。
 
 ## 检查什么
@@ -37,7 +37,7 @@ PYADAMAS_VERIFY_IR=2 pyadamas run app.py    # 报告违规并中止（退出码 
 之后才收敛掉的，记下来免得下次又踩：
 
 1. **生成器/协程允许 vreg 重复定义。** 跨挂起点的槽位溢出会在每个续跑块
-   开头把值从堆帧槽重新装回同一个 vreg（`lower_gen_spill.cpp`）。这是既定
+   开头把值从堆帧槽重新装回同一个 vreg（`lower/gen_spill.cpp`）。这是既定
    形态，不是 bug。
 2. **`call.rt pa_raise(...)` 出现在块中间是合法的。** `raise` 降级成 noreturn
    调用，后面可能还跟着不可达的清理指令。只有**结构性**终止指令提前出现才是
@@ -49,7 +49,7 @@ PYADAMAS_VERIFY_IR=2 pyadamas run app.py    # 报告违规并中止（退出码 
 
 - **下标归属按 `op` 判定，不按 `idx.kind`。** `Operand::kind` 是迁移期留下的
   元信息，`opt_global_promote` 把 `load.global` 改成 `load.slot` 时不会同步它，
-  拿 kind 当权威会把合法指令判成越界（我第一版就踩了）。`src/ir.cpp` 里那个
+  拿 kind 当权威会把合法指令判成越界（我第一版就踩了）。`src/ir/ir.cpp` 里那个
   `PYADAMAS_IR_CHECK` 用的是 kind，所以它现在基本不会报。
 - **外部变量和外部函数是两张表**：`CallExtern` 查 `externs`，`LoadExtern` /
   `StoreExtern` 查 `extern_vars`。混用会全量误报。

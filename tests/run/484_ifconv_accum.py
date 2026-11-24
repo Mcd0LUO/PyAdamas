@@ -1,6 +1,6 @@
 # if-conversion：简单菱形（then 块 = 累加器自增/自减 ±1、else 空）压成单块。
 #
-# 判据（见 src/opt_ifconv.cpp）：
+# 判据（见 src/opt/ifconv.cpp）：
 #   * then 块只有「不抛异常、无副作用、不读可能非法指针」的指令；
 #     store 唯一且是最后一条；累加器必须是同一个**局部槽**；常量 k 必须 ±1；
 #   * then 块唯一前驱是条件块；条件值是 bool（机器上 0/1）；

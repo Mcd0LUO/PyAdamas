@@ -41,7 +41,7 @@ cc 默认搜索路径可达）+ libcurl.so（libcurl4-openssl-dev，8.18.0），
 | stdlib/urllib/__init__.py + error.py + request.py | urlopen/Request/Response/HTTPMessage；URLError/HTTPError |
 | stdlib/curl_glue.c + _curlc.cpya | libcurl easy API 全封装（link curl + link "curl_glue.c"，**glue 在前库在后**——Ubuntu gcc 默认 --as-needed，库先于引用它的目标出现会被丢弃） |
 
-模块表（src/driver_build.cpp kModuleTable）登记：zipfile / shutil / tempfile /
+模块表（src/driver/build.cpp kModuleTable）登记：zipfile / shutil / tempfile /
 urllib / urllib.error / urllib.request。
 
 ### 前端/运行时使能（最小修复，都是基线问题）
@@ -49,13 +49,13 @@ urllib / urllib.error / urllib.request。
 | 编号 | 改动 | 位置 | 回归 |
 |---|---|---|---|
 | E1 | open() fopen 失败按 errno 映射 FileNotFoundError/FileExistsError/PermissionError/NotADirectoryError/IsADirectoryError（此前一律 OSError "cannot open file"）；消息 "[Errno N] strerror: 'path'" | runtime/rt_file.c | 275 |
-| E2 | os.close(fd) + os.unlink 别名（mkstemp 裸 fd 关闭/脚本自然写法） | rt_os.c、rt_internal.h、ir_ops.h（**OsClose 枚举尾部**）、builtin_sigs.cpp、lower_import.cpp、codegen_call_rt.cpp | 274/275 |
-| E3 | os.makedirs 的 exist_ok **关键字**此前被降级静默丢弃（签名声明了但只装位置参）→ copytree(dirs_exist_ok=True) 恒 FileExistsError | src/lower_import_native.cpp | 273/275 |
-| E4 | os.path.islink（lstat S_ISLNK；symlink 脚本刚需） | rt_os.c、ir_ops.h（**OsPathIslink 枚举尾部**）、builtin_sigs.cpp、lower_import.cpp、codegen_call_rt.cpp | 273/275 |
-| F1 | **cmp+branch 融合排除 Bytes**（同 Str 既有排除）：bytes 切片 eq/ne 在循环条件位置被融合成指针 cmpq，内容相等的新切片 vs 字面量恒判不等。基线 0.327 已存在（主树 release 二进制复现），zipfile 循环 magic 校验抓出；顶层"碰巧对"是常量折叠把两侧折成同一驻留字面量 | src/codegen_block.cpp can_fuse_branch（一行） | 275 |
+| E2 | os.close(fd) + os.unlink 别名（mkstemp 裸 fd 关闭/脚本自然写法） | rt_os.c、rt_internal.h、ir/ops.h（**OsClose 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/import.cpp、backend/call_rt.cpp | 274/275 |
+| E3 | os.makedirs 的 exist_ok **关键字**此前被降级静默丢弃（签名声明了但只装位置参）→ copytree(dirs_exist_ok=True) 恒 FileExistsError | src/lower/import_native.cpp | 273/275 |
+| E4 | os.path.islink（lstat S_ISLNK；symlink 脚本刚需） | rt_os.c、ir/ops.h（**OsPathIslink 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/import.cpp、backend/call_rt.cpp | 273/275 |
+| F1 | **cmp+branch 融合排除 Bytes**（同 Str 既有排除）：bytes 切片 eq/ne 在循环条件位置被融合成指针 cmpq，内容相等的新切片 vs 字面量恒判不等。基线 0.327 已存在（主树 release 二进制复现），zipfile 循环 magic 校验抓出；顶层"碰巧对"是常量折叠把两侧折成同一驻留字面量 | src/backend/block.cpp can_fuse_branch（一行） | 275 |
 
 RtFn 新增（OsClose/OsPathIslink）全部追加枚举末尾，不改既有编号（一批约定）；
-codegen_call_rt.cpp 只在既有 switch 组里加 case 标签（无新区域）。
+backend/call_rt.cpp 只在既有 switch 组里加 case 标签（无新区域）。
 
 ## 三、API 覆盖
 
@@ -207,14 +207,14 @@ bytes/str 比较按字节、None/0 同形、unknown 域 bool 裸值等），本�
   270/271/272/273/276/277 剩余 118B–9.4KB 小量基线泄漏（§六.5 分类与
   绕行记录，pristine 1501040 同机制复现）。
 - check_size：无新增超限（stdlib/*.py 与 glue 不在 src/ 1200 行规则内；
-  src 改动落在有余量文件，ir_ops.h 为既有超限文件的最小增量）。
+  src 改动落在有余量文件，ir/ops.h 为既有超限文件的最小增量）。
 
 ## 八、集成建议（与 p3next 0.328 并行）
 
 - 本批 RtFn 追加（OsClose/OsPathIslink）在枚举**尾部**；p3next 若也追加，
-  按落地顺序重排编号（rt_name 同步）。codegen_call_rt.cpp 只加 case 标签
+  按落地顺序重排编号（rt_name 同步）。backend/call_rt.cpp 只加 case 标签
   进既有组，与 p3next 的 gen_any_tagged 拦截区域不重叠。
-- codegen_block.cpp 的 can_fuse_branch 一行修复（Bytes 排除）与 p3next
+- backend/block.cpp 的 can_fuse_branch 一行修复（Bytes 排除）与 p3next
   改动面（codegen_tag/rt_any）正交。
 - 模块接口格式未动（无 v12→v13）；新模块登记即生效，旧 modcache 按源哈希
   自然失效。

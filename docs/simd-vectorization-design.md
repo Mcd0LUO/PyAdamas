@@ -4,7 +4,7 @@
 >
 > 默认值（0.384）：**默认关**。这套 matcher 是照着 `bench/compare` 的循环形状
 > 写的固定 IR 模板，放进默认管线等于拿靶子上的性能冒充通用性能。默认路径改走
-> 通用向量化（`codegen_vect.cpp`，默认开）；差距量化与泛化计划见
+> 通用向量化（`backend/vect.cpp`，默认开）；差距量化与泛化计划见
 > `docs/vectorization-generalization.md`。
 > 本轮只证明一个循环模式（eval_A 的 `1/(i+j)` 除法 + 乘加累加 reduction）的收益，
 > 不做通用自动向量化器。通用化分阶段（§9）。正确性优先：宁可保守跳过，不可误向量化。
@@ -71,7 +71,7 @@ bb_incr:  %ji = load.slot sJ
 关键事实（决定原型可行性）：
 
 * **list[float] 是 kind0 非装箱数组**：对象布局 +0 len、+16 data、+24 elem_kind，
-  元素是裸 double（`codegen_index.cpp` 的 kind0 快路径直接 `movsd (data,j,8)`）。
+  元素是裸 double（`backend/index.cpp` 的 kind0 快路径直接 `movsd (data,j,8)`）。
   所以 `v[j]`、`v[j+1]` 可以一条 `movupd` 取两个。
 * **floordiv //2 被展成 ~14 条整数指令**（sarq/andq/addq/sarq + 余数校正分支），
   因为通用常量 floordiv  lowering 不知道被除数非负且为偶。向量化用 `psrlq $1`
@@ -132,7 +132,7 @@ bb_incr:  %ji = load.slot sJ
 
 原型选**codegen 直接 lowering**：vreg 层已是 SSA、槽位提升已把 total/j 放进寄存器，
 发射层拿得到一切物理位置信息（`slot_mop`/`src_mop`），无需新 IR 语义。新增
-`src/codegen_simd.cpp`（codegen 文件已贴近 1200 行闸门，向量化 lowering 独立成文件），
+`src/backend/simd.cpp`（codegen 文件已贴近 1200 行闸门，向量化 lowering 独立成文件），
 在 `AsmGen::gen_block` 开头挂钩：匹配成功 → 发「守卫 + 向量循环 + 跳标量尾」，
 随后**让原有指令发射机器照常发射全部标量指令作为尾循环/fallback**（§4）。
 匹配失败 → 一个字节都不发，走原路径。
@@ -211,10 +211,10 @@ spectral_norm/nbody 打印输出在全部基准规模下与标量一致（钉住
 
 ## 4. 与 cgspeed 结构化发射机器（MOperand/MInstr）集成
 
-发射全走结构化层（`codegen_emit.h` 的 `emit2/emit1/emit_imm` + `op_reg/op_mem`
+发射全走结构化层（`backend/emit.h` 的 `emit2/emit1/emit_imm` + `op_reg/op_mem`
 工厂），不拼字符串：
 
-* 新 packed 助记符进 `MOp` 枚举 + `mach_emit.cpp` 的 `kOpNames` 表
+* 新 packed 助记符进 `MOp` 枚举 + `backend/mach_emit.cpp` 的 `kOpNames` 表
   （`kOpNameByEnum` 编译期自动生成，数组容量 128 足够）。**只加枚举项不改任何
   现有发射点 → flag-off 逐字节不变**。
 * 向量体用 `emit2(MOp::kMulpd, op_reg(kXmm0), op_reg(kXmm1))` 等直建；
@@ -321,7 +321,7 @@ perf stat 为准，未做微基准假设）。**当前瓶颈转移到保序 adds
 * difftest（O0/O2，flag-on）270/0；全套件 normal flag-off/on EXIT=0（288 ran ok）。
 * 回归用例 283（向量化路径，N=5 奇数尾）/284（标量 fallback/边界/大范围/IndexError）
   normal+ASan flag-on/off 均 ran ok。
-* check_size 无新增超限（codegen_simd.cpp 313 行；codegen_impl.h 拆片段后 1198 行）。
+* check_size 无新增超限（backend/simd.cpp 313 行；backend/impl.h 拆片段后 1198 行）。
 * ASan 全套件 **JOBS=1 flag-off/on 均 EXIT=0（290 ran ok）**。JOBS=8 高并行下偶发
   环境性 flake（网络超时/GC 时序/C 编译资源竞争，失败用例每轮不同：
   277_urllib/174_gc/cfi_unwind/cdecl_sample），基线同样偶发（cfi_unwind 在 ASan 下
@@ -359,10 +359,10 @@ AVX2 `vmulpd/vaddpd/vdivpd ymm` 4 double/指令，理论再翻倍。但：
 
 > 状态：**已落地**（simd2 分支）。门控沿用 `PYADAMAS_SIMD`，默认 0。
 > 三个新匹配器 + 共享判据，全部精确形状匹配（不做通用向量化器）。
-> 文件：codegen_simd_int.cpp（196 行）/ codegen_simd_nbody.cpp（206）/
-> codegen_simd_nbody_pair.cpp（397）/ codegen_simd.cpp 共享 helpers（461）。
+> 文件：backend/simd_int.cpp（196 行）/ backend/simd_nbody.cpp（206）/
+> backend/simd_nbody_pair.cpp（397）/ backend/simd.cpp 共享 helpers（461）。
 
-### 10.1 matmul 整数内循环（P3，codegen_simd_int.cpp）
+### 10.1 matmul 整数内循环（P3，backend/simd_int.cpp）
 
 实际基准形态不是教科书 `sum += a[i][k]*b[k][j]`（k-reduction），而是循环重排后的
 **j 内循环逐元素 map**：`for j: c[i*N+j] += aik * b[k*N+j]`（aik 外提）。
@@ -402,7 +402,7 @@ instructions 89.2M→16.6M。标量每元素 ~49 条（3 组边界检查 + kind 
 → 向量每 2 元素 ~15 条。perf annotate：movupd 29.15% + pmuludq 14.18%。
 墙钟 min 12.76→5.95ms（含启动）；同窗口 Go 6.45ms → **PA-on 3.10ms = 0.48× Go**。
 
-### 10.2 nbody 位置更新 map（P2a，codegen_simd_nbody.cpp）
+### 10.2 nbody 位置更新 map（P2a，backend/simd_nbody.cpp）
 
 `for i in range(5): b[i7+k] += dt*b[i7+k+3]`（k=0,1,2），34 条核心体。
 stride-7 逐元素 map：沿 i 轴取 (i,i+1) 两体，同分量相距 56 字节，SSE2 无 gather →
@@ -411,7 +411,7 @@ movsd×2 + unpcklpd 拼对。dt*vel + pos 逐 lane IEEE 同标量，元素独立
 {0..5} 写 {0,1,2} 分量先读后写；跨迭代行不相交。守卫 7n<=len（imulq $7 + js）、
 kind0、j>=0。只用 xmm0-4 → 不碰提升池，任何 fp 提升形态都安全。奇数 n 标量尾。
 
-### 10.3 nbody pairwise 力循环（P2b，codegen_simd_nbody_pair.cpp）
+### 10.3 nbody pairwise 力循环（P2b，backend/simd_nbody_pair.cpp）
 
 113 条核心体精确匹配（dx/dy/dz → d2 → sqrt → mag → i 侧 3 减 + j 侧 3 加）。
 
@@ -487,7 +487,7 @@ spectral_norm 的保序 addsd 链（0.333 §3.4）与 nbody 的标量 sqrt/div �
 剩余瓶颈：改序/加宽都必须先钉住输出（逐位或基准规模全验证），否则不启用。
 
 
-## 11. 0.344 通用化（P4 tractable 核心）：codegen_vect.cpp
+## 11. 0.344 通用化（P4 tractable 核心）：backend/vect.cpp
 
 > 状态：**已落地**（vect1 分支）。门控 `PYADAMAS_VECT`，**默认 0**。与特化
 > matcher（§1-10，认 spectral_norm/nbody/matmul 精确形状）**互补**：gen_block
@@ -575,7 +575,7 @@ read/write/try_cache 比对）。flag-off `vect_func_ok` 第一判断返回，�
 * difftest（O0/O2，vect-on）**317/0**。
 * 全套件 normal vect-on **EXIT=0（335 ran ok）**；normal flag-off EXIT=0（334）；
   **ASan vect-on JOBS=1 EXIT=0（335 ran ok）**。
-* check_size 无新增超限文件（codegen_vect.cpp <1200；codegen_impl.h 保持 1200；
+* check_size 无新增超限文件（backend/vect.cpp <1200；backend/impl.h 保持 1200；
   其余超限为 master 既有）。
 * 回归 344-349（非基准 map/reduction/原地/偏移/int map + 别名依赖负例 + 边界）
   flag-off/vect-on 均 ran ok，CPython 对拍零差异。
@@ -680,7 +680,7 @@ SSA 必然读在写前 → 所有通用 reduction 被静默跳过，§11.6 的 d
 * difftest（O0/O2，vect-on）**335/0**；38 基准语料 flag-on/off 输出**零差异**。
 * 全套件 normal vect-on **EXIT=0（354 ran ok）**；normal flag-off **EXIT=0
   （354）**；ASan vect-on JOBS=1 **EXIT=0（354 ran ok）**。
-* check_size 通过（codegen_vect.cpp 998 行 < 1200，无新增超限）。
+* check_size 通过（backend/vect.cpp 998 行 < 1200，无新增超限）。
 * 回归 375-378（非基准）：int 乘（mod 2^64 大值/负数/INT64_MIN、原地、
   临时槽、dot、前值非 0）/ Convert（INT64_MIN/MAX、>2^53 舍入、float(j)/
   float(j+2)/不变量/乘后折算/保序 reduction）/ 多 reduction（10 形状）/

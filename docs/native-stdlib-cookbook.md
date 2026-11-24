@@ -9,9 +9,9 @@
 
 | 你想做的事 | 以前（硬编码） | 现在（声明式，模块已迁移） |
 |---|---|---|
-| 给 `time` 加一个新函数 | 改 `builtin_sigs.cpp` + `lower_import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `def f(...) -> T: pass` |
+| 给 `time` 加一个新函数 | 改 `typecheck/builtin_sigs.cpp` + `lower/import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `def f(...) -> T: pass` |
 | 接通一个已有运行期入口（`pa_*`） | 还要 `ir_rtfn*` / codegen 分组 | 同上，**一行**（符号名按 `pa_<模块>_<名字>` 约定推导） |
-| 新模块 | 改 `driver_modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
+| 新模块 | 改 `driver/modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
 | 加一个新**运行期实现** | 必须 C（`runtime/rt_*.c`）+ RtFn 编号 + codegen 参数分组 | **仍然要**，这是运行期边界，不是签名问题（§6.4） |
 
 已迁移：`time`（试点）、`os.path`、`math`（57 函数）、`sys`（maxsize + exit）、`os` 模块级（16 函数 + 6 常量）、`random`（模块级 + `Random` 类）、`re.Pattern`/`Match`、`datetime` 三类、`collections.deque`、`pathlib.Path`。不可迁移：`operator`（无 RtFn 入口）。未迁移：`subprocess`、`json`、`asyncio`、`python`/`c`/`dylib`（以及 collections 其余构造器）。
@@ -22,19 +22,19 @@
 
 原生模块（没有 `.pya` 源文件）在编译器里有三张手写表：
 
-1. **签名表** `src/builtin_sigs.cpp`：`builtin_module(name)` 返回 `ModuleInfo`，
-   里面按模块名分支，把「属性名 → 类型」塞进 `globals`。类型检查（`typecheck_call_forms.cpp`）
+1. **签名表** `src/typecheck/builtin_sigs.cpp`：`builtin_module(name)` 返回 `ModuleInfo`，
+   里面按模块名分支，把「属性名 → 类型」塞进 `globals`。类型检查（`typecheck/call_forms.cpp`）
    直接读这份表做实参检查；`from M import f` 的可调用性也靠它。
-2. **成员 → RtFn 映射** `src/lower_import.cpp` 的 `Lowerer::native_fn(module, member)`：
+2. **成员 → RtFn 映射** `src/lower/import.cpp` 的 `Lowerer::native_fn(module, member)`：
    把 `time.sleep` 映射到枚举 `RtFn::TimeSleep`。
-3. **降级装填** `src/lower_import_native.cpp` 的 `Lowerer::call_native`：
+3. **降级装填** `src/lower/import_native.cpp` 的 `Lowerer::call_native`：
    正常路径是 `bind_args(c, info, nullptr)` + `call_runtime(fn, ret, args)`（通用，
    由 `FuncInfo` 决定每个实参怎么 coerce）；只有「可选参数/可变参/返回类型随实参变」
    的函数才需要在这里写手工分支（`time.strftime`、`subprocess.run`、`re.findall` ……）。
 
-再加上 `src/ir_rtfn.h`（枚举编号）、`src/ir_rtfn_names.h`（编号 → `pa_*` 符号）、
-`src/codegen_call_rt.cpp`（按 RtFn 决定参数落在哪些寄存器类：i0/i1/i2/f1/str…）、
-`src/driver_modules.cpp` 的 `kModuleTable`（模块登记）。
+再加上 `src/ir/rtfn.h`（枚举编号）、`src/ir/rtfn_names.h`（编号 → `pa_*` 符号）、
+`src/backend/call_rt.cpp`（按 RtFn 决定参数落在哪些寄存器类：i0/i1/i2/f1/str…）、
+`src/driver/modules.cpp` 的 `kModuleTable`（模块登记）。
 
 **关键观察**：签名（1）和映射（2）是**纯数据**——它们只回答「参数是什么类型」「调到哪个运行期入口」。
 真正需要 C++ 的只有：运行期实现、RtFn 编号/参数分组、以及少数「参数装配不规则」的函数。
@@ -57,7 +57,7 @@ P0 只把纯数据部分搬进声明文件，其余保持原样。
 这样「未迁移模块的生成代码」天然逐字节不变（同一个 RtFn、同一个 FuncInfo 形状），
 迁移风险被压到「声明是否等价」这一件事上。
 
-实现是 **header-only** 的 `src/native_sigs.h`：不需要在 `CMakeLists.txt` 里登记新 TU
+实现是 **header-only** 的 `src/cimport/native_sigs.h`：不需要在 `CMakeLists.txt` 里登记新 TU
 （P0 期间那里有别人在改分配器调试开关），任何 TU `#include` 即可；
 所有函数 `inline`、缓存用函数内 `static`（C++11 magic static，无线程问题、无初始化顺序问题）。
 
@@ -152,7 +152,7 @@ native 签名不写类型等于让调用点放弃 coerce，运行期会按错的
 
 有些函数的返回类型**由实参决定**（`random.choice(seq)` 返回 `seq` 的元素类型、
 `random.sample/choices` 返回 `list[元素]`）。硬编码里它们是
-`FuncInfo{ret=unknown, ret_known=false}`，由 `typecheck_call_modules.cpp` 的
+`FuncInfo{ret=unknown, ret_known=false}`，由 `typecheck/call_modules.cpp` 的
 `random_call()` 在**调用点**按实参推导。
 
 声明侧用装饰器表达同样语义（仍是 Python 语法，不加新关键字）：
@@ -212,13 +212,13 @@ class Random:
 | `FuncInfo::name` | 模块限定：构造器 `random.Random`、方法 `random.Random.<method>`（`check_args` 的 `random.` 前缀分派依赖它，裸名会让调用点类型退化 → 栈帧/GC mask 变化） |
 | 继承 / 类装饰器 / 类关键字 | 一律拒绝（声明类没有基类语义） |
 
-**类型身份是唯一留在 C++ 的一层**：`native_sigs.h` 的 `declared_class_type()`
+**类型身份是唯一留在 C++ 的一层**：`cimport/native_sigs.h` 的 `declared_class_type()`
 把 `(module, class)` 映射到编译器的内建类型种类（目前只有 `random.Random` →
 `TyKind::Random`）。声明负责方法表与构造签名，类型种类属于编译器；新增原生类时
 在这里登记一行（下一批若做 `deque`/`Counter`/`date`/`Path` 等，建议先加一个通用的
 native-object 类型种类把这层也声明化）。
 
-**方法的降级（参数装配）仍在 C++**：与原生的模块级函数一致，`lower_method_misc.cpp`
+**方法的降级（参数装配）仍在 C++**：与原生的模块级函数一致，`lower/method_misc.cpp`
 的 `lower_method_random()` 按方法名装配实参并 `call_runtime`（§6.4）。本轮只把
 **签名表**（typecheck 的硬编码方法表，~58 行）与构造器签名迁进声明；方法调用
 的汇编与迁移前逐字节相同。
@@ -239,7 +239,7 @@ native-object 类型种类把这层也声明化）。
 
 ## 5. 加载器与接线
 
-### 5.1 `src/native_sigs.h` 对外接口
+### 5.1 `src/cimport/native_sigs.h` 对外接口
 
 ```c++
 namespace pyadamas::nativesig {
@@ -257,7 +257,7 @@ namespace pyadamas::nativesig {
 
 ### 5.2 接线只有两处（各 3~4 行）
 
-**A. 签名表（`src/builtin_sigs.cpp`，`builtin_module()` 开头，`cpy_proxy` 分支之后）：**
+**A. 签名表（`src/typecheck/builtin_sigs.cpp`，`builtin_module()` 开头，`cpy_proxy` 分支之后）：**
 
 ```c++
 // 声明式签名与硬编码**按名字合并**：.pysig 里的 func/const 覆盖同名硬编码，
@@ -268,13 +268,13 @@ if (auto declared = pyadamas::nativesig::module_info(name)) {
 }
 ```
 
-**B. 成员 → RtFn（`src/lower_import.cpp` 的 `Lowerer::native_fn()` 开头）：**
+**B. 成员 → RtFn（`src/lower/import.cpp` 的 `Lowerer::native_fn()` 开头）：**
 
 ```c++
 if (auto f = nativesig::func_rtfn(module, member)) return *f;
 ```
 
-**C.（可选，迁移带常量的模块时用）`src/lower_import.cpp` 的 `Lowerer::builtin_value()` 开头：**
+**C.（可选，迁移带常量的模块时用）`src/lower/import.cpp` 的 `Lowerer::builtin_value()` 开头：**
 
 ```c++
 if (const auto* c = nativesig::find_const(module, member)) {
@@ -290,15 +290,15 @@ if (const auto* c = nativesig::find_const(module, member)) {
 }
 ```
 
-**没有第三处。** 类型检查（`typecheck_call_modules.cpp` / `typecheck_call_forms.cpp`）不需要改：
+**没有第三处。** 类型检查（`typecheck/call_modules.cpp` / `typecheck/call_forms.cpp`）不需要改：
 它对原生模块的普通函数调用走的是通用路径 `check_args(mod->globals[attr]->fn, c)`，
 只要 `ModuleInfo` 里有正确的 `FuncInfo` 就够了。
 降级也不需要改：`call_native` 的通用尾巴（`bind_args` + `call_runtime`）由 `FuncInfo` 驱动。
 
-> 迁移一个模块**不需要**动：`typecheck_call_modules.cpp`（除非它对该模块有专门分派）、
-> `ir_rtfn.h` / `ir_rtfn_names.h` / `codegen_call_rt.cpp`（RtFn 已存在时）、
+> 迁移一个模块**不需要**动：`typecheck/call_modules.cpp`（除非它对该模块有专门分派）、
+> `ir/rtfn.h` / `ir/rtfn_names.h` / `backend/call_rt.cpp`（RtFn 已存在时）、
 > `runtime/*.c`（运行期实现已存在时）。
-> `driver_modules.cpp` 也只是「新模块」才需要（§6.3）。
+> `driver/modules.cpp` 也只是「新模块」才需要（§6.3）。
 
 ### 5.3 失败路径（刻意硬失败）
 
@@ -331,7 +331,7 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 ### 6.1 给「已迁移模块」新增一个 API（零 C++）
 
-前提：需要的运行期入口 `pa_*` 已经存在（在 `src/ir_rtfn_names.h` 里能查到）。
+前提：需要的运行期入口 `pa_*` 已经存在（在 `src/ir/rtfn_names.h` 里能查到）。
 
 1. 在 `stdlib/sigs/<模块路径>.pysig` 加一行 Python stub：
    ```
@@ -353,23 +353,23 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 以 `time` 为例（本次试点）：
 
-1. **抄签名**：从 `builtin_sigs.cpp` 的 `name == "<模块>"` 分支抄出每个函数的形参/返回类型；
-   从 `lower_import.cpp` 的 `native_fn()` 抄出「成员 → `RtFn::X`」；
-   `RtFn::X` 的 `pa_*` 符号从 `src/ir_rtfn_names.h` 查。
+1. **抄签名**：从 `typecheck/builtin_sigs.cpp` 的 `name == "<模块>"` 分支抄出每个函数的形参/返回类型；
+   从 `lower/import.cpp` 的 `native_fn()` 抄出「成员 → `RtFn::X`」；
+   `RtFn::X` 的 `pa_*` 符号从 `src/ir/rtfn_names.h` 查。
 2. **写 `stdlib/sigs/<模块>.pysig`**（§3）。
 3. **接线**（§5.2 A/B/C，若还没接）。
 4. **删硬编码（可选）**：hook 是**按名字合并**，迁移可以分步做——只声明一部分成员时，其余成员
    继续由硬编码提供（`sys` 就是半迁移状态：`maxsize/exit` 在 .pysig，
    `argv/stdout/exc_info` 等 6 个无法声明的运行期成员留在硬编码）。整个模块都能用声明
-   表达后，再删硬编码：`builtin_sigs.cpp` 的分支整段删、`lower_import.cpp` 里该模块的
-   `if (member == ...)` 行全删（注意 `lower_import_native.cpp` 的**手工装配分支要留着**，
+   表达后，再删硬编码：`typecheck/builtin_sigs.cpp` 的分支整段删、`lower/import.cpp` 里该模块的
+   `if (member == ...)` 行全删（注意 `lower/import_native.cpp` 的**手工装配分支要留着**，
    它不是签名，是参数装配）。
 5. **重建 + 三档等价性**（§7）。
 6. 把该模块从 `kModuleTable` 的 Native 行删掉（若启用 §6.3 的自动登记）。
 
 ### 6.3 新模块（零 C++，可选能力）
 
-`driver_modules.cpp` 的 `find_module_entry()` 在查表失败后会再看
+`driver/modules.cpp` 的 `find_module_entry()` 在查表失败后会再看
 `stdlib/sigs/<模块路径>.pysig` 是否存在：存在则合成一条 `ModuleKind::Native` 的条目
 （名字字符串的生命周期由函数内 `static` 容器持有）。于是：
 **新模块 = 新建一个 `.pysig` 文件 + 重建**，`kModuleTable` 一行都不用加。
@@ -384,8 +384,8 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | 需求 | 为什么 |
 |---|---|
 | 新的运行期函数 | `runtime/*.c` 要实现；声明只是名字 |
-| 新的 `pa_*` 入口 + RtFn 编号 | 要加 `ir_rtfn.h`（枚举）+ `ir_rtfn_names.h`（符号名）——但这是**运行期边界**，一次性的 |
-| codegen 参数分组 | `codegen_call_rt.cpp::gen_rt_args` 按 RtFn 决定实参进 i0/f1/str* 等哪个类；新增 RtFn 时**必须**在这里加 case（漏了会生成错调用） |
+| 新的 `pa_*` 入口 + RtFn 编号 | 要加 `ir/rtfn.h`（枚举）+ `ir/rtfn_names.h`（符号名）——但这是**运行期边界**，一次性的 |
+| codegen 参数分组 | `backend/call_rt.cpp::gen_rt_args` 按 RtFn 决定实参进 i0/f1/str* 等哪个类；新增 RtFn 时**必须**在这里加 case（漏了会生成错调用） |
 | 参数装配不规则 | 可选参数需要「不传时填什么」以外的逻辑（`strftime` 的 9 元组、`subprocess.run` 的关键字、`re.findall` 的返回类型随捕获组数变）→ `call_native` 里的手工分支。注意：**签名侧**的「返回类型随实参特化」现在能声明了（`@ret_specialized`，§4.3），调用点推导逻辑仍在 C++ |
 | 构造器（`collections.Counter`、`pathlib.Path` …） | 需要类/对象语义，声明格式暂不表达（`module_ctor`） |
 | 属性读降级 | `builtin_value`：常量已支持（§5.2 C），其它（如 `os.environ` 是调用不是读）走各自 hook |
@@ -424,13 +424,13 @@ if (const auto* c = nativesig::find_const(module, member)) {
 ## 9. 踩坑记录
 
 1. **`TypeChecker::parse_annotation*` 原本是 private**：复用编译器注解解析前，先在
-   `typecheck.h` 的 public 段加了一个 3 行薄封装 `parse_annotation_for_decl()`
+   `typecheck/typecheck.h` 的 public 段加了一个 3 行薄封装 `parse_annotation_for_decl()`
    （转发到 `parse_annotation`，语义零变化）。**不要**在加载器里复制一份类型解析——
    那正是这次换语法的起因（两套类型语法必然漂移）。
 2. **`parse_annotation` 对不认识的名字返回 `unknown` 而不是报错**（用户代码里
    前向引用/自造类型要放行）。声明文件必须自己判：注解解析成 unknown 且源表达式不是
    显式 `unknown/Any/object` → 报错。否则拼错类型名不会有人发现。
-3. **默认值要走 `literal_of_expr()`**（`typecheck_types.h` 的自由函数）：它已经处理了
+3. **默认值要走 `literal_of_expr()`**（`typecheck/types.h` 的自由函数）：它已经处理了
    `-1e300` 这种「一元负号包数字常量」的折叠，不要自己写。
 4. **Python 的默认值对齐规则**：`args.defaults.size()` 作用于**最后** N 个位置参数
    （posonly + args 拼起来之后），不是从头对齐。
@@ -453,13 +453,13 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower_import_native.cpp`（签名已声明） |
+| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower/import_native.cpp`（签名已声明） |
 | `os.path` | ✅ 已迁移（`stdlib/sigs/os/path.pysig`，Python 语法） | 16 个函数（路径即模块名）；常量 `sep/altsep/curdir/pardir` 属于 `os` 模块，不在本文件 |
 | `math` | ✅ 已迁移（`stdlib/sigs/math.pysig`，Python 语法） | 57 个函数 + 5 个常量；`inf`/`nan` 用 `float("inf")`/`float("nan")` 调用形式声明，**不再有 C++ 特判**；asm 等价 |
-| `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
+| `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `typecheck/builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
-| `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower_method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
+| `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower/method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
 | `re` | ✅ 已迁移 `Pattern`/`Match` 方法表（`stdlib/sigs/re.pysig`） | 2 个原生类共 15 个方法（`@native` 覆盖 `pa_re_*`）；模块级函数/flag 常量保留硬编码（`-> Regex`/`Optional[Match]` 等类型 pysig 无法表达，迁了会破坏 `re.compile` 的返回类型）；`lower_method_regex/match` 参数装配不动；asm 38/38 逐字节相同 |
 | `datetime` | ✅ 已迁移 3 个原生类（`stdlib/sigs/datetime.pysig`） | `date`/`datetime`/`timedelta` 构造器（默认值表达重载）+ 6 实例方法；模块函数 today/now 保留 C++（返回 TyKind::DateTime 无法声明）；属性读/运算符/参数装配不动；asm 38/38 逐字节相同 |
 | `collections` | ✅ 已迁移 deque 方法表（`stdlib/sigs/collections.pysig`） | 10 个实例方法声明化；构造器保留 C++（默认值 `[]` 非 pysig 字面量、`list[unknown]` 静态类型影响 asm）；pop/popleft/copy 的接收者元素类型返回保留 typecheck 口径；asm 38/38 逐字节相同 |
@@ -474,9 +474,9 @@ if (const auto* c = nativesig::find_const(module, member)) {
 `@ret_specialized`（无参数）表示「返回类型按第一实参特化」（random.choice）。
 deque 的 pop/popleft/copy 需要的是「接收者元素类型」（`recv->sub[0]`），
 现有形态表达不了。**本轮取舍**：这三个方法的返回类型口径保留在
-`typecheck_call_method.cpp` 按方法名硬编码（与 datetime.replace 同模式），
+`typecheck/call_method.cpp` 按方法名硬编码（与 datetime.replace 同模式），
 pysig 里只声明方法存在性 + argc/arg 类型（返回写 `object` 占位）。
-这样不需要给 `@ret_specialized` 加新形态（那要改 pydecl.h 的装饰器解析，超出本轮边界），
+这样不需要给 `@ret_specialized` 加新形态（那要改 cimport/pydecl.h 的装饰器解析，超出本轮边界），
 asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element")`
 字符串参数形态（decorator_of 已支持字符串实参），在 SigFunc 加 kind 字段并
 在 typecheck 里按 kind 分派——但这是机制扩展，不是签名迁移。
@@ -488,15 +488,15 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 - `pop()`/`popleft()` 返回 `elem()` = `recv->sub[0]`（元素类型随接收者变）→ 需要 `@ret_specialized` 扩展支持「接收者元素类型」而不仅是「第一实参类型」；
 - `copy()` 返回 `mk_deque(elem())` 同理；
 - 构造器 `deque(iterable, maxlen=0)` 的 maxlen 语义在降级阶段检查（保留 C++）。
-**改哪层**：native_sigs.h 的 declared_class_type 加一行（deque → TyKind::Deque）+ typecheck_call_method.cpp 声明查表 + stdlib/sigs/collections.pysig 新建。
+**改哪层**：cimport/native_sigs.h 的 declared_class_type 加一行（deque → TyKind::Deque）+ typecheck/call_method.cpp 声明查表 + stdlib/sigs/collections.pysig 新建。
 **判断依据**：类型身份映射仍要 C++（同 Random/re/datetime），但方法表本身可声明。
 
 **pathlib.Path**（高，3~5 天）：方法表共 ~17 个（mkdir/exists/is_file/is_dir/read_text/write_text/iterdir/glob/unlink/rmdir/touch/with_suffix/read_bytes/write_bytes/is_absolute/joinpath/relative_to/resolve/absolute），
 其中 5 个返回 `new_ty(TyKind::Path)`（iterdir/glob 返回 list[Path]、with_suffix/joinpath/relative_to/resolve/absolute 返回 Path）。
 额外难点：
-- `mkdir` 只收关键字（mode/parents/exist_ok）→ pysig 的 `def mkdir(self, *, mode: int = 0, parents: bool = False, exist_ok: bool = False)` 需验证关键字-only 形参在原生类方法上的装配（`lower_method_native.cpp:9` 的 kw_ok 白名单按方法名硬编码，不能直接改）；
-- `Path` 的 `/` 运算符（`p / "sub"`）在 typecheck_expr.cpp 里特判，不属方法表，保留 C++；
-- `declared_class_type` 加一行（pathlib.Path → TyKind::Path），并在 module_info 里把 Path 构造器注册（当前 `func("Path", {t_str()}, p)` 在 builtin_sigs.cpp）。
+- `mkdir` 只收关键字（mode/parents/exist_ok）→ pysig 的 `def mkdir(self, *, mode: int = 0, parents: bool = False, exist_ok: bool = False)` 需验证关键字-only 形参在原生类方法上的装配（`lower/method_native.cpp:9` 的 kw_ok 白名单按方法名硬编码，不能直接改）；
+- `Path` 的 `/` 运算符（`p / "sub"`）在 typecheck/expr.cpp 里特判，不属方法表，保留 C++；
+- `declared_class_type` 加一行（pathlib.Path → TyKind::Path），并在 module_info 里把 Path 构造器注册（当前 `func("Path", {t_str()}, p)` 在 typecheck/builtin_sigs.cpp）。
 **改哪层**：与 deque 相同，外加运算符与 kw_ok 白名单保持 C++ 不动。
 
 **共同结论**：两个类都能用现有原生类机制迁移（与 Random/re/datetime 同构），
@@ -523,10 +523,10 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 
 | 文件 | 变化 | 说明 |
 |---|---|---|
-| `src/native_sigs.h` | **新增 670 行** | 加载器（格式/词法/语法/符号反查/缓存/失败路径），一次性成本 |
-| `src/builtin_sigs.cpp` | +18 / −26 | 7 行 hook + include；删 `time` 段 40 行、`os.path` 段 21 行 |
-| `src/lower_import.cpp` | +25 / −22 | 2 行 hook + 常量 hook；删 `time` 段 12 行、`os.path` 段 20 行 |
-| `src/driver_modules.cpp` | +63 / −1 | `.pysig` 自动登记（新模块零 C++） |
+| `src/cimport/native_sigs.h` | **新增 670 行** | 加载器（格式/词法/语法/符号反查/缓存/失败路径），一次性成本 |
+| `src/typecheck/builtin_sigs.cpp` | +18 / −26 | 7 行 hook + include；删 `time` 段 40 行、`os.path` 段 21 行 |
+| `src/lower/import.cpp` | +25 / −22 | 2 行 hook + 常量 hook；删 `time` 段 12 行、`os.path` 段 20 行 |
+| `src/driver/modules.cpp` | +63 / −1 | `.pysig` 自动登记（新模块零 C++） |
 | `stdlib/sigs/time.pysig` | 33 行 | 8 func + 2 const |
 | `stdlib/sigs/os.path.pysig` | 25 行 | 16 func |
 
@@ -573,7 +573,7 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 
 - `os` 模块的 `environ` / `walk` / `system` 与 `time` 的 `strftime` 仍保留 C++ 降级分支：
   它们不是签名问题，是「参数装配/返回类型随实参变」的问题（§6.4）。
-- `driver_modules.cpp` 的自动登记只覆盖 `stdlib/sigs/*.pysig`；纯 `.py` 新模块（`codecs` 这类）仍然要登记 `kModuleTable`，
+- `driver/modules.cpp` 的自动登记只覆盖 `stdlib/sigs/*.pysig`；纯 `.py` 新模块（`codecs` 这类）仍然要登记 `kModuleTable`，
   两件事不要混。
 
 ### 11.5 第二轮：`.pysig` 换成 Python 语法（本机实测）
@@ -584,7 +584,7 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 
 | 项 | 结果 |
 |---|---|
-| 加载器代码量 | `src/native_sigs.h` 670 行 → **642 行**：删掉自写 lexer（~190 行）+ 类型名映射表（~90 行），换成 AST 白名单 + 注解复用（新增 ~120 行校验/诊断） |
+| 加载器代码量 | `src/cimport/native_sigs.h` 670 行 → **642 行**：删掉自写 lexer（~190 行）+ 类型名映射表（~90 行），换成 AST 白名单 + 注解复用（新增 ~120 行校验/诊断） |
 | 前置验证（3 段语法） | `def f(*args: unknown) -> str: pass` / `def g(secs: float = -1e300) -> tuple[int, ...]: pass` / `@native("pa_time_time")` + `def h() -> float: pass` —— **全部一次通过，parser 零改动** |
 | 声明文件 | `stdlib/sigs/time.pysig`（8 func + 2 const）、`stdlib/sigs/os/path.pysig`（16 func，路径即模块名 `os.path`） |
 | 12 基准 × 3 档 asm vs HEAD `61c2c57` | **36/36 `cmp` 逐字节相同** |

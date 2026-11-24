@@ -36,7 +36,7 @@
 
 ## 二、覆盖矩阵（51 个模块）
 
-现状分类：**原生**＝src/builtin_sigs.cpp + 降级里手写；**Python 源**＝stdlib/*.py 自举；**部分**＝能 import，但常用 API 有缺口；**缺失**＝import 直接编译失败；**受限**＝受语言/运行时能力限制，纯源码做不了。
+现状分类：**原生**＝src/typecheck/builtin_sigs.cpp + 降级里手写；**Python 源**＝stdlib/*.py 自举；**部分**＝能 import，但常用 API 有缺口；**缺失**＝import 直接编译失败；**受限**＝受语言/运行时能力限制，纯源码做不了。
 
 | 模块 | 现状 | 缺口 / 说明 | 实测 |
 |---|---|---|---|
@@ -105,9 +105,9 @@
 
 ## 三、实测得到的三个关键架构事实
 
-1. **内建模块名单是硬编码的**：`src/driver_build.cpp:609-618` 的 `program_module()` 与 `:890-897` 的 `check_builtin_name()` 只认 math/sys/asyncio/random/os/os.path/subprocess/time/itertools/collections/json/re/functools/datetime/pathlib/operator。
+1. **内建模块名单是硬编码的**：`src/driver/build.cpp:609-618` 的 `program_module()` 与 `:890-897` 的 `check_builtin_name()` 只认 math/sys/asyncio/random/os/os.path/subprocess/time/itertools/collections/json/re/functools/datetime/pathlib/operator。
    → **给 functools/itertools/collections 这些模块补 API 必须改 `src/`，加 `stdlib/functools.py` 会被内建名单挡住**（同名 stdlib 文件不生效）。这是任务 L「优先自举」边界的关键。
-2. **注解解析器已内置 typing 名字**：`src/typecheck.cpp:240-385` 直接按名字把容器/联合/可选类型映射成内部类型，**不要求真的 import typing**。所以 `typing.py` 只需要「能 import + 提供值级名字（cast/TYPE_CHECKING/TypeVar）」就能解锁大量真实脚本。
+2. **注解解析器已内置 typing 名字**：`src/typecheck/typecheck.cpp:240-385` 直接按名字把容器/联合/可选类型映射成内部类型，**不要求真的 import typing**。所以 `typing.py` 只需要「能 import + 提供值级名字（cast/TYPE_CHECKING/TypeVar）」就能解锁大量真实脚本。
 3. **stdlib/*.py 里的模块是真正被编译的**（`set_strict_module_names`），不是解释执行：写模块时同样受类型检查约束；默认参数只能是标量字面量（list 默认值编译不过），`list()` 不能消费只有 `__iter__` 的用户类，等等。这些约束直接决定了各模块能做到什么程度。
 
 ## 四、优先级排序（按「真实脚本被它阻塞的概率」）
@@ -207,7 +207,7 @@ $ PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/std build/std/pyadamas
 
 配套测试：`tests/run/515_stdlib_a.py`，28 行 expect 与实际输出逐行一致（用本地模块副本 build 验证）。模块表注册后即可跑全量闸门。
 
-需要 lead 在 `src/driver_modules.cpp` 的 `kModuleTable` 里加 5 条（按字母序插入）：
+需要 lead 在 `src/driver/modules.cpp` 的 `kModuleTable` 里加 5 条（按字母序插入）：
 
 ```cpp
 {"errno", ModuleKind::Python, "errno.py", ""},
@@ -424,7 +424,7 @@ encoding="utf-8")`，直接调用 `str.encode` / `bytes.decode`。
 CPython 对拍：`codecs.encode("hello")` → `b'hello'`，
 `codecs.decode(b'hello')` → `'hello'`；ascii 显式编码也一致 —— **0 diff**。
 
-**阻塞**：`src/driver_modules.cpp` 的 `kModuleTable` 还没有 `codecs` 条目，
+**阻塞**：`src/driver/modules.cpp` 的 `kModuleTable` 还没有 `codecs` 条目，
 直接 `import codecs` 报 `stdlib module 'codecs' is not registered in the builtin
 module table`。已报告 lead，由 lead 在 src/ 加 `{"codecs", ModuleKind::Python,
 "codecs.py", ""},`（或等价登记）。**测试文件本轮不含 codecs 用例，待登记后补。**
@@ -440,7 +440,7 @@ argument, got 2`）。因此 **joinpath 变长参数 + with_name 本轮未补**�
 `suffix` / `parent`，与 CPython 语义一致。
 
 需 lead 决策（见第一节架构事实 2）：把 pathlib 改成 `NativePython` +
-`stdlib/pathlib.py` 扩展源，或改 `src/builtin_sigs.cpp` 的 joinpath 变长签名。
+`stdlib/pathlib.py` 扩展源，或改 `src/typecheck/builtin_sigs.cpp` 的 joinpath 变长签名。
 本轮按 lead 指示不碰 src/，记为待办。
 
 ### 9.6 验收
@@ -502,31 +502,31 @@ argument, got 2`）。因此 **joinpath 变长参数 + with_name 本轮未补**�
 
 **enum**：成员是 int 类属性（`Color.RED` → `1`），无 `.value`/`.name`/`Color(1)` 反查/`__members__`/迭代/`auto()`。
 - 缺口：需要 **类体赋值拦截 + 元类/描述符语义**。CPython 的 EnumMeta.__new__ 在类创建时把
-  `RED = 1` 转成 EnumMember 对象；PA 的类体赋值 `x = 1` 在 `lower_class.cpp:491` 直接存 int 槽，
-  没有可拦截的 hook；`metaclass=` 类关键字在 `typecheck_func.cpp:488` 明确「语义没建模」。
+  `RED = 1` 转成 EnumMember 对象；PA 的类体赋值 `x = 1` 在 `lower/class.cpp:491` 直接存 int 槽，
+  没有可拦截的 hook；`metaclass=` 类关键字在 `typecheck/func.cpp:488` 明确「语义没建模」。
 - 判据：现有 __setattr__/__getattr__ 只在实例访问时触发，类属性读取走静态类表
-  （`typecheck_expr_attr.cpp`），没有运行期类对象可挂描述符。
+  （`typecheck/expr_attr.cpp`），没有运行期类对象可挂描述符。
 - 工作量（粗估）：**大**（2~3 周）。需要 typecheck 层识别 Enum 基类并标记类、lower 层在类构造后
   插入成员包装调用、运行期加 EnumMember 类型 + `__members__` dict + 反查表，
   还要处理 IntEnum/Flag/StrEnum 的继承语义。建议排到 lang-gaps v2。
 - 改哪层：typecheck（类标记）+ lower（类体成员转换）+ runtime（新对象类型）。
 
 **dataclasses**：**已能工作**（`PYADAMAS_LANG_GAPS=1`）。`@dataclass` 的 `__init__`/`__repr__`/`__eq__`
-由 `src/typecheck_dataclass.cpp` 在编译期合成（`expand_dataclass`），运行期装饰器恒等。
+由 `src/typecheck/dataclass.cpp` 在编译期合成（`expand_dataclass`），运行期装饰器恒等。
 - 「坏」的误判原因：默认门控关时 `@dataclass` 只是恒等装饰器，带参构造自然失败。
   测试文件头加 `# pyadamas: lang-gaps` 即通过。
 - 剩余缺口：继承 dataclass / `field()` / frozen / order / kw_only / slots / unsafe_hash
-  在 `typecheck_dataclass.cpp` 里明确报错（lang-gaps v1 范围外）。
+  在 `typecheck/dataclass.cpp` 里明确报错（lang-gaps v1 范围外）。
   要支持需要扩展编译期字段收集与代码合成（仍是 typecheck 层，非运行期类修改）。
 - 工作量（粗估）：**中**（每个特性 2~5 天）；基础用法已交付，无紧急缺口。
 
 **abc**：`ABC`/`@abstractmethod` 只是空基类/恒等装饰器；抽象类可被实例化（CPython 抛 TypeError）。
 - 缺口：需要 **元类或等价的实例化拦截**。CPython 用 ABCMeta.__call__ 检查 `__abstractmethods__`
   并抛错；PA 没有元类，`metaclass=` 未建模（同 enum 的根因）。
-- 判据：`abstractmethod` 在 `typecheck_call.cpp:442` 只是「名字放行」，没有给函数打
+- 判据：`abstractmethod` 在 `typecheck/call.cpp:442` 只是「名字放行」，没有给函数打
   `__isabstractmethod__` 标记（实测 `getattr(A.f, "__isabstractmethod__", 0)` → 0）。
 - 工作量（粗估）：**中大**（1~2 周）。最小可行方案：typecheck 层识别 `@abstractmethod`
-  并给 ClassInfo 加 abstract 方法集合，在 `typecheck_call_forms.cpp` 的实例化检查里拒绝
+  并给 ClassInfo 加 abstract 方法集合，在 `typecheck/call_forms.cpp` 的实例化检查里拒绝
   （纯编译期，无需运行期元类）；完整 `ABC.register`/虚拟子类需要运行期注册表。
 - 改哪层：typecheck（标记 + 实例化检查），可选 runtime（注册表）。
 

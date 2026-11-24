@@ -2,7 +2,7 @@
 
 > 分支 ra1，基线 master 131e7bd（0.335）。门控 `PYADAMAS_RA_OPT=0/1`，**默认 0**。
 > flag-off 生成 asm 逐字节不变；flag-on 只改分配决策，不改指令语义。
-> 新代码在 src/ra_opt.cpp（codegen_regalloc.cpp 已 2511 行超限，不再往里加逻辑）。
+> 新代码在 src/backend/ra_opt.cpp（backend/regalloc.cpp 已 2511 行超限，不再往里加逻辑）。
 
 ## 1. 实测取证（本轮复核，build -O2，taskset -c 24，perf cycles:u）
 
@@ -48,7 +48,7 @@ cmp 0x90(%rsp),%r14   2.77%   ; n 副本（循环上界）重载
 
 栈触碰合计占函数周期 21.2%。这些副本的值**恒等于槽寄存器**——
 不需要新寄存器，直接别名到槽寄存器即可（现有单使用别名机制
-codegen_ops.cpp gen_load_slot 只覆盖 use_count==1 且同块，多使用/跨块副本漏掉）。
+backend/ops.cpp gen_load_slot 只覆盖 use_count==1 且同块，多使用/跨块副本漏掉）。
 
 ### 1.3 matmul：6 个 callee-saved 被槽占满，跨块不变量住栈
 
@@ -67,7 +67,7 @@ mov 0x208(%rsp),%rsi   5.16%  ; 下标装参重载
 
 栈触碰合计占函数周期 72.2%。**容量问题**：槽与跨块 vreg 两趟分配，
 槽先占满。统一分配/live range splitting 是历史多次失败区
-（codegen_regalloc.cpp 1856/2244 两处失败记录：slot_reg_ 是整函数布尔标记，
+（backend/regalloc.cpp 1856/2244 两处失败记录：slot_reg_ 是整函数布尔标记，
 代码生成器不做区间判断；短区间槽拿寄存器 → 区间外读过期值 → 算错）。
 本轮保守处理：P1/P2 先落地实测；matmul 需要的「槽让位给高权重跨块 vreg」
 作为独立实验（§4），收益不抵风险就交付负面结论。
@@ -137,7 +137,7 @@ c2_inventory 的 gen_rows：s0（n）在入口 hoist load 后即死，%rbx 随�
 206_list_store_kind / 233_json_perf / 236_fp_spill_call + 9 个日常语料。
 
 **修复**：P2 只别名「全函数没有第二个槽认领同一寄存器」的槽
-（reg_users==1，ra_opt.cpp）。参数槽/整函数活跃槽天然满足；nqueens
+（reg_users==1，backend/ra_opt.cpp）。参数槽/整函数活跃槽天然满足；nqueens
 row/n 收益保留。跨块 vreg 提升（含 P1）不受此问题影响：那些寄存器从
 n_saved_regs_ 起独占分配，本就不与槽复用。
 
@@ -227,7 +227,7 @@ move elimination 零延迟）；2.77% 的 n 上界栈 cmp 变 cmp %r12,%r14。
   + daily 23）对主树 build/lead 0.335 基线 cmp 全过，多轮复验。
 - 异常/生成器/vthread 钉子 92/93/94/119/225 + 回归 297-299：flag-on
   全套件内通过；297-299 flag-on/off 双模式独立验证。
-- check_size：无新增超限（ra_opt.cpp 239 行；codegen_impl.h 压回 1199）。
+- check_size：无新增超限（backend/ra_opt.cpp 239 行；backend/impl.h 压回 1199）。
 - 模式组合抽查：RA_GRAPH+RA_OPT、RA_SPLIT+RA_GRAPH+RA_OPT 全过；
   **RA_SPLIT+RA_OPT 在 119/299（生成器+except）SIGSEGV —— 归因：
   RA_SPLIT 单独（无 RA_OPT）同样 rc=139，主树 0.335 基线编译器亦

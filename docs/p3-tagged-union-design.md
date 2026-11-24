@@ -23,12 +23,12 @@
 1. **unknown = 裸 i64**；float 进 unknown 装箱成 CPYFLOAT（0.324）；堆判别
    靠探针 rc_index_has（主哈希索引 + 叶子位图）+ exact-RC 回退（rt_core.c
    unknown_is_heap）。小整数 <65536 一条比较短路。
-2. **unknown 槽/unknown vreg 从不寄存器提升**：codegen_regalloc.cpp 槽提升
+2. **unknown 槽/unknown vreg 从不寄存器提升**：backend/regalloc.cpp 槽提升
    门控显式跳过 Unknown（GC 要靠帧记录里的栈槽地址找根）；块内临时 GPR 池
    与跨块 vreg 提升同样跳过 Unknown/Float/Optional。所以 unknown 值全程在
    内存帧槽/vreg 栈槽/全局里——**加 tag 只影响内存路径与 unknown 的
    load/store，静态类型提升槽（热路径）完全不涉及**。
-3. **标量 unknown 的 RC 序列**（lower_impl_slots.cpp store_slot/store_global）：
+3. **标量 unknown 的 RC 序列**（lower/impl_slots.cpp store_slot/store_global）：
    retain_for_store(v)（unknown 源 → RcIncUnknown）→ old = load → store_raw
    → RcDecUnknown(old)；出口 release_slots/release_globals 再 RcDecUnknown。
    临时值 RcTempUnknown（先探针再入栈）。u3 每轮 IR 实测：
@@ -36,7 +36,7 @@
    rc_temp_unknown(探针) → rc_inc_unknown(探针) → load.global acc →
    store.global → rc_dec_unknown(探针) → cleanup。**每轮 ≥6 次哈希探针 +
    1 次新盒分配/回收**——与 P2 §1 perf 剖析逐条对应。
-4. **kind2 内联 1-bit heap_bits 只服务静态已知 kinds**：codegen_index.cpp
+4. **kind2 内联 1-bit heap_bits 只服务静态已知 kinds**：backend/index.cpp
    gen_index_store 的内联 btsq/btrq 仅在 hk=0/1（静态标量/堆）走；hk=2
    （unknown 新值）只留「kind2 且无位图」内联（无位可维护），其余交运行时
    pa_list_set 探针。**给 unknown 值加平行 tag 不触碰这条内联路径**（P2 的
@@ -184,27 +184,27 @@ rc==1 再验唯一所有权。匹配失败/跨块/Mov 链 → 提示 0 → 正�
   pa_any_to_i64_t；pa_any_load_tag（i64→tag，一次探针+kind）。旧入口全保留
   （门控关模块/容器内部仍用）。
 - runtime/rt_internal.h：声明 + tag 常量（与 codegen 共享口径）。
-- src/ir_ops.h：RtFn 增 AnyArithT/AnyCmpT/AnyNegT/AnyIsFloatT/AnyToF64T/
-  AnyToI64T/AnyLoadTag + rt_name；src/ir.cpp：新入口进「必须保留 unknown
+- src/ir/ops.h：RtFn 增 AnyArithT/AnyCmpT/AnyNegT/AnyIsFloatT/AnyToF64T/
+  AnyToI64T/AnyLoadTag + rt_name；src/ir/ir.cpp：新入口进「必须保留 unknown
   索引」集合（UNK 回退要探针）。
-- src/lower_expr_ops.cpp：AnyArith/AnyCmp/AnyNeg → T 入口（tag 由 codegen
+- src/lower/expr_ops.cpp：AnyArith/AnyCmp/AnyNeg → T 入口（tag 由 codegen
   装填，降级器只改实参表：去掉 desc，留 op/a/b）；移除 unknown±float 常量
   的解盒-再装箱特例（§1.7）。isinstance/int()/float() 的 unknown 分支 → T。
-- src/codegen_impl.h：tags_enabled_ 门控、tag 区偏移/操作数缓存、
+- src/backend/impl.h：tags_enabled_ 门控、tag 区偏移/操作数缓存、
   is_pair 辅助、静态类型导 tag。
-- src/codegen_regalloc.cpp：tag 区分配（unknown vreg/槽专属字）、帧布局
+- src/backend/regalloc.cpp：tag 区分配（unknown vreg/槽专属字）、帧布局
   计入 tag 字数、序言清零。
-- src/codegen_ops.cpp：Mov/LoadSlot/StoreSlot/LoadGlobal/StoreGlobal/
+- src/backend/ops.cpp：Mov/LoadSlot/StoreSlot/LoadGlobal/StoreGlobal/
   Const*/Convert 的 unknown 分支搬 tag（门控内）；unknown 槽禁用别名/
   常量折叠（门控内，冷路径让位正确性）。
-- src/codegen_block.cpp：store-load 转发/load 省略对 unknown 槽禁用（门控
+- src/backend/block.cpp：store-load 转发/load 省略对 unknown 槽禁用（门控
   内）；DictTryGet 融合写 unknown 槽时清 tag。
-- src/codegen_call_rt.cpp：Any*T 装填（payload+tag，rdx tag 落 dst tag 字）；
+- src/backend/call_rt.cpp：Any*T 装填（payload+tag，rdx tag 落 dst tag 字）；
   RC 三入口 tag 内联；reuse 模式匹配；ListAppend/MakeList 等 heap 实参由
   tag 导出（门控内）。
-- src/codegen_call.cpp / codegen_index.cpp：IndexLoad unknown dst 的 tag
+- src/backend/call.cpp / backend/index.cpp：IndexLoad unknown dst 的 tag
   导出（kind/位图/探针三路）；IndexStore hk2 门控内交运行时带 tag heap。
-- src/codegen.cpp：unknown 全局平行 tag 符号发射。
+- src/backend/codegen.cpp：unknown 全局平行 tag 符号发射。
 - **不动**：容器布局/位图格式/内联 bts/btr、临时栈、EH 帧记录与展开、GC
   扫描、生成器帧、类字段、闭包统一约定、cimport/C ABI、推断/单态化。
 

@@ -109,7 +109,7 @@
 
 ## 3. 差距在哪：逐条定位
 
-`codegen_vect.cpp` 的头注释（0.384 时代）把适用范围写得很清楚：可数 for、体是纯
+`backend/vect.cpp` 的头注释（0.384 时代）把适用范围写得很清楚：可数 for、体是纯
 算术表达式 DAG、下标只认 `j+常量`、**无调用**、无 `store.global`。这五条后来被逐条
 放宽（P1/P3/P5 + 0.408–0.411），现在的实际卡点：
 
@@ -146,7 +146,7 @@
 | `x / 2^k` | `(x + ((x>>63) & (2^k-1))) >> k` | 5 |
 
 原来 floor 借用了 trunc 的式子再算余数修正，16 条 + 一个数据相关分支。
-定宽整数（`u8`/`i16`/`u64`…）另外走 `codegen_int_fixed.cpp`，槽内值一律非负，
+定宽整数（`u8`/`i16`/`u64`…）另外走 `backend/int_fixed.cpp`，槽内值一律非负，
 `//`、`%` 同样退化成一条 `shrq` / `andq`（0.386）。
 
 **一个重要的否定结论**：这里不能用「被除数非负」来省指令。本语言 `int` 溢出
@@ -158,8 +158,8 @@
 ### P1 · 仿射下标分析 —— **已完成（0.388）**
 
 下标模型从 `j + 常量` 扩成 **`coef·j + inv + off`**（`coef > 0` 编译期常量、
-`inv` 循环不变 int 值、`off` 编译期常量）。新增 `src/codegen_vect_affine.cpp`
-（230 行），`codegen_vect.cpp` 改 165 行接入。
+`inv` 循环不变 int 值、`off` 编译期常量）。新增 `src/backend/vect_affine.cpp`
+（230 行），`backend/vect.cpp` 改 165 行接入。
 
 | 块 | 做法 |
 |---|---|
@@ -245,7 +245,7 @@ n=0/1/2/3/5、负值、以及「体里有调用 → 保守 fallback」）。
 每轮必须把 lane 拆成标量加，形成串行依赖链；4-lane 只会把链拉得更长。这不是
 实现差距，是语义选择 —— gcc 能 packed 累加是因为 C 不承诺顺序。
 
-实现：`src/codegen_vect_avx2.cpp`（298 行），整数 map / reduction 走 4-lane
+实现：`src/backend/vect_avx2.cpp`（298 行），整数 map / reduction 走 4-lane
 ymm；**运行时派发**读 `pa_cpu_avx2`（构造函数里由 `__builtin_cpu_supports` 填，
 初值 0 = 保守回退），非 AVX2 机器走原 SSE2 路径，不会 SIGILL。
 
@@ -314,7 +314,7 @@ if (simd_enabled_ && vect_enabled_ && block_int_only(b)) {
 **第一道（真正的首因）**：`int_ok` 只收 `InvI`/`VecI`，`VK::J` 不在里面 —— 归纳
 变量只要不当下标（而是参与算术），整个表达式就判 Fail。`float(j*j)`、
 `float(i+j)` 都不向量化。修法：j 当 VecI 用，在首个算术使用点物化成 `[j, j+1]`
-（`src/codegen_vect_jvec.cpp`，213 行；4-lane 物化 `[j..j+3]`）。
+（`src/backend/vect_jvec.cpp`，213 行；4-lane 物化 `[j..j+3]`）。
 
 **第二道**：`BinKind::FloorDiv`。修法：除数是 2 的幂常量时接受，用 2 的补码合成
 算术右移（SSE2/AVX2 都没有 64 位 lane 的 `psraq`）：

@@ -12,7 +12,7 @@
 | 版本条目 | 夜间 0.408–0.415 + 白天 0.416–0.446（共 **39 条**，CHANGELOG） |
 | 测试规模 | 369 → **409** 用例；difftest 348 → **386** |
 | 最终闸门 | **409 ran ok / difftest 386-0 / ASan 409-0 报告 / check_size 通过** |
-| 模块化 | ✅ 完成（VectPlanner 拆分，codegen_vect.cpp 1178 → 59 行） |
+| 模块化 | ✅ 完成（VectPlanner 拆分，backend/vect.cpp 1178 → 59 行） |
 | 通用优化 | ✅ 向量化从 3 基准/8 循环 → **4 基准/9 循环**；nbody −45.31%、spectral_norm −61.75% |
 | 修的 bug | **30 个**（多数是静默错值/崩溃；含 1 个异常控制流错误、1 个 pass 从未生效、3 个 unknown 域 dunder 身份语义、7 个 0.437–0.445 修复；另 0.421 是我引入的崩溃，已回退。计 30 时含 4 个「文档承诺/语义缺口」记录项：未初始化变量读 0、装饰后 `__iter__`、`asyncio.run`(None) 打印 0、`min/max` 混合类型） |
 | 语义审计 | unknown 语义 / 算术与转换 / 切片 / 字符串 / 异常 / 迭代协议 / OOP / 容器方法 / 推导式与作用域 / 模块与导入 / 文件 I/O / 数字格式化 / 装饰器与属性 / RC·GC / stdlib 两轮，共 22 轮；迭代协议、OOP、stdlib 续集未发现代码 bug |
@@ -23,17 +23,17 @@
 
 | 文件 | 行数 |
 |---|---|
-| `vect_planner_loop.cpp` | 1098（`try_loop` 主体） |
-| `vect_planner.cpp` | 877 |
-| `vect_planner.h` | ~330 |
-| `codegen_vect.cpp` | **59**（只剩一行转发） |
+| `opt/vect_planner_loop.cpp` | 1098（`try_loop` 主体） |
+| `opt/vect_planner.cpp` | 877 |
+| `opt/vect_planner.h` | ~330 |
+| `backend/vect.cpp` | **59**（只剩一行转发） |
 
 **重编译收益（实测，关 ccache）**：
 
 | 改动 | TU | 耗时 |
 |---|---|---|
-| `vect_planner_loop.cpp` | **1** | **7.76 s** |
-| `codegen_core.h`（对照） | 31 | 55.16 s |
+| `opt/vect_planner_loop.cpp` | **1** | **7.76 s** |
+| `backend/core.h`（对照） | 31 | 55.16 s |
 
 比例 **1 : 7**，达成设计目标。
 
@@ -67,7 +67,7 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 |---|---|
 | 0.416 | 特化/通用按**体块类型分流**：整数循环走通用（AVX2 4-lane），浮点循环保持特化优先；默认配置 12 基准二进制逐字节不变 |
 | 0.417 | **32 位守卫快路径**：int64 索引算术「可证 < 2^31」时降到 32 位序列，spectral_norm −48.24%，通用/特化差距 2.22× → 1.15× |
-| 0.419 | **if-conversion + 尾块合并**（`src/opt_ifconv.cpp`）；matmul −4.52%、spectral_norm −1.91% |
+| 0.419 | **if-conversion + 尾块合并**（`src/opt/ifconv.cpp`）；matmul −4.52%、spectral_norm −1.91% |
 | 0.420 | **pass 顺序修复**：`if_convert_accumulators` 跑在 `promote_globals_in_loops` 之前（第二遍 ifconv），sieve 计数循环因此进入向量化 |
 | 0.423 | sieve 计数循环向量化（SSE2 2-lane；`if flags[i] == 1: count += 1` 形状） |
 
@@ -118,9 +118,9 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 | **0.444** | **GC·生命周期** | `PYADAMAS_GC_INCR_MARK=1` 下退出时 `pa_gc_shutdown` UAF / `refcount decrement on a freed object`（增量标记在途 + pend 先 free 后 dec） | shutdown 先 `gc_incr_finish()` 收尾在途增量收集；`gc_pend` drain 移到 free 堆链之前 |
 | **0.442** | **格式化** | `%#x`/`%#o` 忽略进制前缀（`ff` vs `0xff`）；`%10s` 不补宽且默认对齐错（format 的 str 默认左对齐） | 新增 `alt` 标志 + `pct_alt_join`（前缀计入宽度/zero 落在前缀后）；`%s`/`%r` 默认补 `>` |
 | **0.441** | **文件编码** | strict 解码丢弃文件尾残缺多字节序列（不抛 `UnicodeDecodeError`）；`errors="replace"` 编码按字节补 `?`（`caf??` vs `caf?`） | EOF 检查 `rawleft` 按 errors 策略处理；编码/解码 EILSEQ 按完整字符（最大非法子部件）跳 |
-| **0.440** | **模块导入** | 包 `__init__.py` 的 `from . import mod` 被误判循环导入（标准包写法编译失败） | `driver_build.cpp`：req.name == 当前单元且 from_names 都是子模块时只排队子模块 |
+| **0.440** | **模块导入** | 包 `__init__.py` 的 `from . import mod` 被误判循环导入（标准包写法编译失败） | `driver/build.cpp`：req.name == 当前单元且 from_names 都是子模块时只排队子模块 |
 | **0.438** | **容器比较** | 容器大小比较未实现却按指针静默比（`[2] < [1,9]` True、`set([1]) <= a` False、混合类型不抛 TypeError） | 静态类型任一侧为 list/tuple/dict/set 时编译期拒绝（`==`/`!=` 不受影响） |
-| **0.437** | **生成器·async** | 跨挂起 spill 的活性分析按 vreg 编号误判（vreg 非 SSA），对从未定义的 vreg 做 `rc_inc` 读到栈垃圾 → async「await 已取消的 task」panic | `lower_gen_spill.cpp` 加支配集过滤：只溢出「定义块支配挂起点」的 vreg |
+| **0.437** | **生成器·async** | 跨挂起 spill 的活性分析按 vreg 编号误判（vreg 非 SSA），对从未定义的 vreg 做 `rc_inc` 读到栈垃圾 → async「await 已取消的 task」panic | `lower/gen_spill.cpp` 加支配集过滤：只溢出「定义块支配挂起点」的 vreg |
 | **0.436** | **类型检查·异常** | `except ... as e` 处理器里对外层变量赋值创建影子符号（静默错值：int 槽存 str 指针按 int 打印） | handler 体结束后把绑定回写父作用域（函数级作用域），顺带恢复 annotated 检查 |
 | **0.435** | **unknown 域哈希** | 无类型 dict/set 的实例键按机器字哈希 + 身份比较：等值不同对象查不到、set 不去重；`hash(unknown)` 编译期报错 | `rt_dict.c` 的 kind=3 增 `__hash__`/`__eq__` 槽分派；只有 `__eq__` 无 `__hash__` → unhashable TypeError；`hash()` 用 `kind=-1` 运行期探针 |
 | **0.434** | **unknown 域比较** | 实例 `==`/`<` 在 unknown 域按身份；`sorted(实例)` 只是抛 TypeError；typed `list[P]` 的 `in`/`index` 按身份 | 元数据第 7 字改为槽表指针 `[eq,lt,hash,-1]` + `pa_instance_dunder_fn`；`__lt__` 打通、`sort_objlt` 稳定排序；typed list 元素比较走槽分派 |

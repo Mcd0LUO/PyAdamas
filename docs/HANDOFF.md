@@ -60,8 +60,8 @@ bash tools/checkall.sh --full     # 约 3 分钟；必须整套跑
 
 - **声明式签名**（.pysig）：time、os.path、math（57 函数）、sys、os、random 模块级、
   random.Random、re.Pattern/Match（15 方法）、datetime 三类、collections.deque（10 方法）。
-  `src/native_sigs.h` + `stdlib/sigs/*.pysig`；新增原生 API 不再改 C++。
-- **声明语法统一**：`.pysig`/`.cpya` 都改成 Python 语法，共用 `src/pydecl.h`；
+  `src/cimport/native_sigs.h` + `stdlib/sigs/*.pysig`；新增原生 API 不再改 C++。
+- **声明语法统一**：`.pysig`/`.cpya` 都改成 Python 语法，共用 `src/cimport/pydecl.h`；
   `.cpya` 支持 union/定长数组/`@packed`。
 - **语言**：enum/abc 编译期语义（0.456）；`.pysig` 类声明、`@ret_specialized`。
 - **标准库**：第 3 批纯 py（itertools/functools/logging/codecs）；22 个模块 CPython 对拍
@@ -87,7 +87,7 @@ bash tools/checkall.sh --full     # 约 3 分钟；必须整套跑
 - **0.465 LSP formatting + workspace/symbol**：formatting 只归一缩进（4 空格）与行尾空白，
   括号续行/三引号内部原样，幂等；workspace/symbol 扫 rootUri 下 `.py`/`.pyi`（≤2000），
   复用 scan_symbols。冒烟 **201 → 228**。
-- **0.466 kind0 列表写路径**：`src/codegen_index.cpp` 的 hk==0 热路径 elem_kind 检查
+- **0.466 kind0 列表写路径**：`src/backend/index.cpp` 的 hk==0 热路径 elem_kind 检查
   合并为一次比较；fannkuch **33,292,318 → 31,424,592（−5.61%，累计约 −10%）**；
   nqueens +0.28%（布局噪声）；`tools/perf_baseline.txt` 已更新 fannkuch。
   **LoadSlot 块内 CSE 负收益已回退**（fannkuch +6.4%）。

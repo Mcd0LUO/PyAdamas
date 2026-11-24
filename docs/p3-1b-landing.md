@@ -155,8 +155,8 @@ FRAW → 装箱」分支 + 回归。
 - ASan detect_leaks=1 抽查：247/248/13_gc/231/262/263/264/265/266 全 0；
   j12/m5/pf3/pf5（leak 复现族）全 0。
 - 生成器回归：118/119/122/123/124/128/129/131/133/136 全过。
-- check_size：无新增超限（发射集中 codegen_tag.cpp 382 行；
-  codegen_call.cpp 1199 / codegen_block.cpp 1200 / lower_stmt.cpp 1200；
+- check_size：无新增超限（发射集中 backend/tag.cpp 382 行；
+  backend/call.cpp 1199 / backend/block.cpp 1200 / lower/stmt.cpp 1200；
   既有 5 处超限文件不变）。
 - A/B（绑核 24，交替多轮中位，同一运行时仅生成代码不同）：
   u4_call_tag −34.2%（73.3→48.3ms，7 轮）、u5_dict_multiuse −12.9%

@@ -79,11 +79,11 @@
 | 0.149 | 分代循环收集：minor 用 trial-deletion、major 用标记-清扫；修复 RC 索引墓碑哨兵误命中 |
 | 0.150 | GC 保守根收窄：帧记录扩展成影子根表，不再扫描整段真实栈 |
 | 0.151 | 修复 `str(unknown)` 的运行期分派（堆字符串不再被格式化成地址数字） |
-| 0.152 | 工程治理：拆分 `lower_method.cpp`（2131 行上帝函数 → 15 个按接收者类型划分的成员函数） |
-| 0.153 | 工程治理：拆完 `gen_call_rt` / `builtin_module` / `lower_builtin_call` / `call` / `stmt`，拆分 `ir.h`、`typecheck.h`、`lower_impl.h`，新增 `tests/check_size.sh` |
+| 0.152 | 工程治理：拆分 `lower/method.cpp`（2131 行上帝函数 → 15 个按接收者类型划分的成员函数） |
+| 0.153 | 工程治理：拆完 `gen_call_rt` / `builtin_module` / `lower_builtin_call` / `call` / `stmt`，拆分 `ir/ir.h`、`typecheck/typecheck.h`、`lower/impl.h`，新增 `tests/check_size.sh` |
 | 0.154 | 工程治理：拆完剩余 7 个大文件（`typecheck_call` / `lower_expr` / `lower_import` / `lower_stmt` / `lower_gen` / `lower` / `cdecl`），全部源文件 ≤1200 行 |
 | 0.155 | 浮点数值循环优化：块内 xmm 临时寄存器、浮点比较分支融合、短路布尔槽转发；mandelbrot 同机 1.87× |
-| 0.156 | 拷贝合并与跨块公共子表达式消除：`opt_cse.cpp` 前向可用表达式；mandelbrot release 26.4→12.0ms（约 CPython 23.3×） |
+| 0.156 | 拷贝合并与跨块公共子表达式消除：`opt/cse.cpp` 前向可用表达式；mandelbrot release 26.4→12.0ms（约 CPython 23.3×） |
 | 0.157 | 浮点比较分支去掉 NaN 专用跳转：有序比较交换操作数、改用 `ja`/`jae`，内层循环少一条分支 |
 | 0.158 | 正确性 + asyncio 收尾：NaN `!=` 分支修复、生成器浮点提升状态修复、Task 多等待者与结果类型、gather 结果类型、from-import asyncio 特化；基线 281/596 |
 | 0.159 | 调试信息：IR 指令带源码行，生成代码发 DWARF `.file`/`.loc` 与可读函数符号；`addr2line`/`readelf` 可映射回源码 |
@@ -219,14 +219,14 @@
 | **A. 标量全局提升** | 把分配器候选集从 slot 扩到**标量** global，复用现有活跃区间 + 线性扫描 | 不改程序结构，语义 / traceback / 异常路径零风险。标量不是 GC 根，提升到 callee-saved 后不需要在 `call.rt` 前写回，绕开 R4 列的 GC / 展开耦合。**主要工作量是审计一份「哪些 `call.rt` 会回调用户代码」的白名单**（sort 比较器、生成器 resume、`__exit__`、C 回调跳板），这些必须保守写回。堆全局先不碰。收益上限仍受 6 个 callee 寄存器约束，且只覆盖顶层 |
 | **B. 顶层热循环 outlining** | 把顶层循环包成合成函数，诱导变量变局部槽（等价于自动化 0.204 对 matmul 的手工改造） | 更通用，覆盖未来任意顶层代码。但要处理 try 保护区切割、traceback 的 PC→函数表、GC 帧记录链与控制流边界，风险与工作量高一档 |
 
-**A 路线：全局提升已评估并放弃。** 先做了一个窄版本实验：对循环体内没有任何 `call.*` 的循环，把读写的标量全局缓存进新分配的局部槽、循环出口写回（`src/opt_global_promote.cpp` 的 `promote_globals_in_loops`，提交 `89885a0`，已接进优化管线）。结果是**微基准 −84%、真实基准无收益**——所以按 A 的完整形态（把分配器候选集扩到标量 global）继续做的预期收益不成立，这条方向不再作为下一步。B（顶层热循环 outlining）仍未定案，后续若做需先给出实测证据。
+**A 路线：全局提升已评估并放弃。** 先做了一个窄版本实验：对循环体内没有任何 `call.*` 的循环，把读写的标量全局缓存进新分配的局部槽、循环出口写回（`src/opt/global_promote.cpp` 的 `promote_globals_in_loops`，提交 `89885a0`，已接进优化管线）。结果是**微基准 −84%、真实基准无收益**——所以按 A 的完整形态（把分配器候选集扩到标量 global）继续做的预期收益不成立，这条方向不再作为下一步。B（顶层热循环 outlining）仍未定案，后续若做需先给出实测证据。
 
 **验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 204 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
 
 **注意 0.212 的教训**：判断「还有多少提升空间」必须看修正后的调试输出（整型与浮点分开统计）。此前的 `7/14 slots promoted` 是错的，实际已接近饱和——不要基于饱和的池子再承诺收益。
 ### 1. 工程收尾
 
-- **`tests/check_size.sh` 当前会失败**（0.242 实测）：硬限制 1200 行、`ALLOW_FILES` 为空，5 个文件超限 —— `src/driver_build.cpp` 1395、`src/codegen_regalloc.cpp` 1325、`src/typecheck_types.h` 1253、`src/ir_ops.h` 1241、`src/lower_impl.h` 1207。按 [development.md](development.md) 的规矩清单只能删不能加，这五个必须拆。0.152–0.154 那轮拆分后的回弹主要来自寄存器分配（0.203–0.204）、IR 基础设施（0.205–0.208）和 0.234–0.242 的性能优化（`lower_impl.h` +7 是 RAII 宏，`driver_build.cpp` +9 是方案 C 的判定接入）。
+- **`tests/check_size.sh` 当前会失败**（0.242 实测）：硬限制 1200 行、`ALLOW_FILES` 为空，5 个文件超限 —— `src/driver/build.cpp` 1395、`src/backend/regalloc.cpp` 1325、`src/typecheck/types.h` 1253、`src/ir/ops.h` 1241、`src/lower/impl.h` 1207。按 [development.md](development.md) 的规矩清单只能删不能加，这五个必须拆。0.152–0.154 那轮拆分后的回弹主要来自寄存器分配（0.203–0.204）、IR 基础设施（0.205–0.208）和 0.234–0.242 的性能优化（`lower/impl.h` +7 是 RAII 宏，`driver/build.cpp` +9 是方案 C 的判定接入）。
 - 标准库前端基线 0.171 复测（Debian 3.13.5：本体 501 / 596，去掉 `test/` 449 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
 - **CHANGELOG 轮转逾期**：现含 0.100–0.242 共 140 个版本 / 2582 行。既有约定是把旧区间整块移到 `docs/archive/`（已有 `changelog-0.40.md`、`changelog-0.41-0.99.md`），下一次轮转建议归档 0.100–0.199、保留 0.200–0.242，并同步 `docs/index.md` 与本文里指向被移动条目的链接。

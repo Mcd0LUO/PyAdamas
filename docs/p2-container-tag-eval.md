@@ -72,7 +72,7 @@ slice_assign）先装箱裸 float 再丢 tag 回退探针。运行时改完可�
 **tests/run/206_list_store_kind.py SIGSEGV**。
 
 根因（gdb + 诊断定位）：**kind2 下标写入的生成代码内联维护 1-bit 位图**
-（src/codegen_index.cpp gen_index_store / gen_index_store_unchecked 的
+（src/backend/index.cpp gen_index_store / gen_index_store_unchecked 的
 `btsq/btrq` 内存位操作），与运行时 2-bit 域语义冲突——内联 bts/btr 按
 1-bit 置位，把 2-bit 域字写花（实测 m2=[1,"x",3] 经 m2[1]=8 / m2[0]="z"
 后域字从 2 变成 9，dom[1] 误判 HEAP，销毁把整数 8 当堆指针 dec → SIGSEGV）。

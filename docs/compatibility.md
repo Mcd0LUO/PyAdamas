@@ -159,7 +159,7 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
 
 - **`del obj.attr` 是「重置为默认值」，不是移除属性**：删掉字段后对象布局不变，字段被写回
   None/0；之后 `p.x` 读得到 `0`/`None`，而不是 CPython 的 `AttributeError`。这是字段布局
-  编译期定死的直接结果（src/lower_exc.cpp 的 store_field(..., const_none())），
+  编译期定死的直接结果（src/lower/exc.cpp 的 store_field(..., const_none())），
   tests/run/41_decorators.py 的 expect 已按 `0` 钉住；语义是设计取舍，不改。
 - **类实例列表的 `sorted()` / `list.sort()`**：0.432 起不再静默按机器字（堆指针）排；
   0.434 起 dunder 槽表打通后，**有 `__lt__` 槽的类实例按 `__lt__` 稳定排序**（CPython 口径，

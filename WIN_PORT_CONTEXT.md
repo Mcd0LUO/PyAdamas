@@ -6,7 +6,7 @@ PyAdamas：Python 语法的静态编译器。C++23 前端产出 x86-64 AT&T 汇�
 Windows(win64) 目标，通过 --target=win64 选择。
 
 ## 关键机制
-- `src/target_abi.h`：TargetABI 结构描述一个目标的 ABI 事实（实参寄存器、
+- `src/backend/target_abi.h`：TargetABI 结构描述一个目标的 ABI 事实（实参寄存器、
   callee-saved 池、浮点池、scratch、栈对齐、影子空间、setjmp 符号名等）。
   两个实例：`kX86_64SysV`（默认）与 `kX86_64Win64`。
 - 生成代码的实参一律走 `arg_reg_i(n)` / `arg_reg_f(n)`（按 ABI 取寄存器）或

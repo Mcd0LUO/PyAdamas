@@ -12,8 +12,8 @@
  *   z2_norec_fn        同形 handler 帧，但**不压帧记录**（证明等价性证明的另一半：
  *                      链上第一条 cfa > target 的记录才是停止点，此时 top = NULL）
  *
- * 帧记录布局完全按 codegen 的口径手摆（src/codegen_impl.h 的 rec_off、
- * src/codegen_block.cpp 的压帧序列，6 个字头 + 槽地址×n），并由 driver.c 的
+ * 帧记录布局完全按 codegen 的口径手摆（src/backend/impl.h 的 rec_off、
+ * src/backend/block.cpp 的压帧序列，6 个字头 + 槽地址×n），并由 driver.c 的
  * _Static_assert/offsetof 交叉校验，防止两边漂移：
  *   word0 prev / word1 n / word2 scan_base / word3 scan_words /
  *   word4 scan_mask / word5 cfa / word6.. 槽地址（低两位标志）

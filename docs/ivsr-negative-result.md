@@ -23,7 +23,7 @@
 
 ## 实现
 
-`src/opt_loop.cpp` 新增 `strength_reduce_iv_function()`（约 300 行）：
+`src/opt/loop.cpp` 新增 `strength_reduce_iv_function()`（约 300 行）：
 
 1. **识别自然循环**：回边 = `b -> h` 且 `h` 支配 `b`；循环体从回边来源
    反向可达（不含 `h` 的循环外前驱）构成。
@@ -131,7 +131,7 @@ Go 不是在循环里维护累加器，而是**把 `i*7+k` 预计算成 7 个独
 ## 复现步骤
 
 ```bash
-# 1. 在 src/opt.cpp 的 licm_function 之后插入：
+# 1. 在 src/opt/opt.cpp 的 licm_function 之后插入：
 #    for (auto& fptr : m.funcs) strength_reduce_iv_function(*fptr);
 # 2. 重新编译，跑基准
 cmake --build build/release -j8

@@ -97,7 +97,7 @@ load.slot(IV 或已知复制槽)，且该 store 所在块支配所有读 T 的�
 
 ## 5. 回退与后续
 
-`src/opt_loop.cpp` 的改动已 `git checkout` 回退，工作区干净，
+`src/opt/loop.cpp` 的改动已 `git checkout` 回退，工作区干净，
 9/9 基准正确。`IrOp::IndexStoreUnchecked` 与其代码生成保留（0165148），
 它是这个优化必需的地基，单独看也是完整的。
 

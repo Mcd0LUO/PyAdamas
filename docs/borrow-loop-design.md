@@ -2,7 +2,7 @@
 
 门控 `PYADAMAS_BORROW_OPT=0/1`，**默认 0**。flag-off 不跑本遍，IR/asm 逐字节
 不变（38 热基准 cmp 全同）。manifest 缓存键加 `borrowopt`（切开关强制失效）。
-实现：`src/lower_borrow.cpp`（降级完成后、opt 之前，与 `finalize_param_borrows`
+实现：`src/lower/borrow.cpp`（降级完成后、opt 之前，与 `finalize_param_borrows`
 同位置）；诊断 `PYADAMAS_BORROW_OPT_STATS=1`。
 
 ## 1. 背景：R3 取证定位的真正通用 RC 杠杆
@@ -21,7 +21,7 @@ s2 被当成 owned（每轮 inc 新值 / dec 旧值），而它其实只作**借
 持有元素的那份引用贯穿循环。把这类槽识别为 borrow，整段去掉每轮 inc/dec 与
 出口 release，是压 RC 密集容器循环的通用杠杆（真实日常语料受益，非基准特化）。
 
-borrow 是历史 UAF/leak 重灾区（lower_impl_slots.cpp 注释记载 0.323 每轮漏一份、
+borrow 是历史 UAF/leak 重灾区（lower/impl_slots.cpp 注释记载 0.323 每轮漏一份、
 gc02_uaf_junk 等）。本轮极保守：**可证安全才做，任何一条不确定整槽跳过**。
 
 ## 2. 计数守恒论证（为什么不需要跨迭代值 identity）
@@ -107,7 +107,7 @@ FRESHLOCAL 的不逃逸检查同时排除了：传参、存别处（`ys = xs`）
 
 s 的每条 LoadSlot 结果只允许：纯运算（Bin/Un/Cmp/Convert/Len）、
 IndexLoad 容器、FieldLoad、分支、Return（own_return_value **先 inc 再
-清理**，lower_stmt.cpp:187）、存入别处（StoreSlot/StoreGlobal/IndexStore
+清理**，lower/stmt.cpp:187）、存入别处（StoreSlot/StoreGlobal/IndexStore
 值位/FieldStore 值位/MakeList/MakeTuple——降级都先 retain）、白名单
 CallRt（RcInc 是别处 store 的 retain；RcDec/RcTemp*/RcCleanup **显式
 禁止**）、用户调用实参（仅 FRESHLOCAL；被调方 inc_params 自留引用）。
@@ -174,7 +174,7 @@ fresh-local/异常/内联形态。
 - **CPython 对拍**：daily 23 案 flag-on 全同（a1/a3/a5 用 build+argv 对拍）。
 - **flag-off asm 逐字节不变**：38 热基准（realistic 6 + compare 9 +
   daily 23）对 lead 0.337 基线 cmp 38/38 IDENTICAL。
-- **check_size**：无新增超限（lower_borrow.cpp 738 行 < 1200；既有 5 个
+- **check_size**：无新增超限（lower/borrow.cpp 738 行 < 1200；既有 5 个
   超限文件与基线同一组，driver_build 1540→1551 本就超限）。
 - 回归用例 tests/run/304-310（expect 钉死，CPython 对拍过的 6 案）。
 

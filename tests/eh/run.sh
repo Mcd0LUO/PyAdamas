@@ -5,7 +5,7 @@
 #   退出码：0 = 全部通过；1 = 有失败
 #
 # 验证内容（全部用 gcc/g++ 直接编译，不碰仓库的 CMake 构建）：
-#   1. src/eh_emit.cpp 能通过 -std=c++20 -Wall -Wextra -Werror 严格编译；
+#   1. src/backend/eh_emit.cpp 能通过 -std=c++20 -Wall -Wextra -Werror 严格编译；
 #   2. 发射器为 6 个用例生成 .s（含 eh_plan_check 自检）；
 #   3. gcc -c 汇编后，用 objcopy 抽出 .gcc_except_table 原始字节，与
 #      tools/lsda_ref/FINDINGS.md §0.1 / §3 里 gcc 14.2 实测的基准逐字节比对；
@@ -37,12 +37,12 @@ echo
 
 # ── 1) 构建生成器（严格告警，与仓库构建口径一致） ─────────────────────
 if ! "$CXX" -std=c++20 -O1 -Wall -Wextra -Werror -I "$ROOT/src" \
-        "$ROOT/tests/eh/main.cpp" "$ROOT/src/eh_emit.cpp" -o "$BUILD/eh_gen"; then
-    bad "编译 src/eh_emit.cpp + tests/eh/main.cpp 失败"
+        "$ROOT/tests/eh/main.cpp" "$ROOT/src/backend/eh_emit.cpp" -o "$BUILD/eh_gen"; then
+    bad "编译 src/backend/eh_emit.cpp + tests/eh/main.cpp 失败"
     echo "==== 结果：FAIL ===="
     exit 1
 fi
-ok "编译 src/eh_emit.cpp + tests/eh/main.cpp（-std=c++20 -Wall -Wextra -Werror）"
+ok "编译 src/backend/eh_emit.cpp + tests/eh/main.cpp（-std=c++20 -Wall -Wextra -Werror）"
 
 mkdir -p "$BUILD/gen" || exit 1
 if ! "$BUILD/eh_gen" "$BUILD/gen" > "$BUILD/gen.log" 2>&1; then

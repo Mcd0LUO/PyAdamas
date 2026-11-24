@@ -509,7 +509,7 @@ done:
 ### 常数除数：魔数乘法
 
 上面的整数除法和取模走的是「除数是运行期值」的通用路径。除数是编译期常量时，`gen_bin` 先试
-`gen_div_const`（`src/codegen_ops.cpp`）：`operand_const_imm` 认出 `src_op` 给出的
+`gen_div_const`（`src/backend/ops.cpp`）：`operand_const_imm` 认出 `src_op` 给出的
 `$N` 形态立即数，`pow2_log2` 判断是不是 2 的幂，`udiv_magic` 求魔数，
 `gen_div_const_emit` 负责发指令。`/`、`//`、`%` 三个都走这套，不再发
 `cqto` + `idivq`。
@@ -740,7 +740,7 @@ RC 不新增 IR 指令，在 IR 里仍以 `call.rt` 的形式出现；不过 `Rc
 
 ### 记账调用的内联
 
-`gen_call_rt`（`src/codegen_call.cpp`）对 `RcMark` / `RcCleanup` / `RcInc` /
+`gen_call_rt`（`src/backend/call.cpp`）对 `RcMark` / `RcCleanup` / `RcInc` /
 `RcDec` 四个 RtFn 有专用发射：快路径就地展开，没走快路径时才落回运行时
 （`pa_rc_inc_slow` / `pa_rc_dec_slow`；`RcCleanup` 落回的是 `pa_rc_cleanup` 本体，
 它没有单独的 slow 变体；`RcMark` 干脆没有慢路径）。动因是 perf 采样：
@@ -798,7 +798,7 @@ caller-saved，慢路径会调运行时、可能一路走到析构函数，提�
 - **临时栈 push/take 内联（0.286）**：永生 push/take 仅 5 条指令；非永生 push 12 条，stats/diag/扩容守卫落回原函数；take 内联栈顶命中 + 从后往前扫描 + swap-remove，与运行时逐位一致。
 - **str 单字节相等快路径（0.288）**：指针不等后双方 len==1 直接比 data[0]，不等直接出结果（Eq→0 / Ne→1）；len!=1 才落回 `pa_str_eq`。
 - **Bin+StoreGlobal 融合（0.289）**：整数 Bin（Add/Sub/Mul/位运算/移位）+ StoreGlobal，结果块内只用一次且不跨块 → 结果留在 `%rax`，紧跟一条 `movq %rax, global`，省掉栈槽往返。
-- **守卫整数叶子虚方法内联（0.294，`src/codegen_vcall_inline.cpp`）**：O2 无额外实参、返回整数的普通 `VCall`，至多为本模块 4 个实际虚表生成守卫，比较实际虚表地址（继承同一方法的类共用内联体）；只接受整数常量返回、读 self 整数实例字段或两个此类字段加减乘的叶子方法；命不中、候选过多或带副作用时保留原间接调用。
+- **守卫整数叶子虚方法内联（0.294，`src/backend/vcall_inline.cpp`）**：O2 无额外实参、返回整数的普通 `VCall`，至多为本模块 4 个实际虚表生成守卫，比较实际虚表地址（继承同一方法的类共用内联体）；只接受整数常量返回、读 self 整数实例字段或两个此类字段加减乘的叶子方法；命不中、候选过多或带副作用时保留原间接调用。
 - **守卫 VCall→Add→StoreGlobal 融合（0.297）**：只融合相邻的守卫零参数整数链，调用与加法结果均须块内单用；命中体和间接回退都把返回值留在 `%rax`，合流后加上调用前已求值的 LHS 快照再写全局——回退可能改写全局或抛错，不重新读取左值。
 - **RcDec 条件全局转发（0.296）**：匹配同块「读旧全局、发布新值、RcDec、再读同一全局」；只有没有运行时调用的减计数快路才转发已发布值，一旦走慢调用，返回后重新读全局；不撤掉 0.295 的重入屏障。
 - **浮点 IndexStore 快路（0.298）**：O1+ 的 checked 浮点下标写入保留边界检查和负下标归一化，通过后仅在运行时 `elem_kind==0` 时直接写入，不读旧值也不释放；非零种类走原路径（不用静态 `list[float]` 代替所有权证明）。

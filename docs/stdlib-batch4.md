@@ -29,7 +29,7 @@
 | 文件 | 内容 |
 |---|---|
 | stdlib/tarfile.py | 常量/异常族；TarInfo（字段、类型谓词、get_info、frombuf/tobuf）；TarFile（r/w/a/x、:gz、fileobj 或路径、getmembers/getnames/getmember、extractfile、add/addfile/gettarinfo、extract/extractall、close、with、迭代）；open/is_tarfile；内部 `_oct/_itn/_nti/_stn/_nts/_calc_chksums/_posix_split_name/_parse_pax/_apply_pax` |
-| src/driver_build.cpp | 模块表加 `{"tarfile", Python, "tarfile.py", "gzip,_gzipio,os,os.path"}`（+1 行） |
+| src/driver/build.cpp | 模块表加 `{"tarfile", Python, "tarfile.py", "gzip,_gzipio,os,os.path"}`（+1 行） |
 | tests/run/360 | TarInfo 面 + ustar 头字节（base64 钉死） |
 | tests/run/361 | TarFile 内存面（fileobj=BytesIO）+ 路径面 + 归档字节对拍 |
 | tests/run/362 | 磁盘面（add 递归/gettarinfo/extract/extractall/软链接/硬链接回退） |
@@ -194,5 +194,5 @@ a(); c3()
 | 全套件 normal（`PYADAMAS_TEST_JOBS=1`） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
 | 全套件 ASan（`PYADAMAS_TEST_ASAN=1`，JOBS=1） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
 | 现有程序 asm 不变 | **489/489 cmp 全同**（tests/run + tests/*.py + tests/modules + bench 全量，对基线 7924474 的独立 worktree 构建） |
-| check_size | 无**新增**超限文件（5 个超限文件基线就有：codegen_regalloc 2581、driver_build 1604（本批 +1 行）、ir_ops.h 1398、lower_impl.h 1356、typecheck_types.h 1593）；stdlib/tarfile.py 1158 行 |
+| check_size | 无**新增**超限文件（5 个超限文件基线就有：codegen_regalloc 2581、driver_build 1604（本批 +1 行）、ir/ops.h 1398、lower/impl.h 1356、typecheck/types.h 1593）；stdlib/tarfile.py 1158 行 |
 | 新用例 ASan detect_leaks=1 | 360/361/362/364 全 0；363 见第六节（两站点 RC 环） |

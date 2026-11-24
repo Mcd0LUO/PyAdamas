@@ -43,7 +43,7 @@
 
 ## 2. 发射/传播
 
-- **产生点**：Name 降级（lower_expr_assign.cpp）门控开且名字是异常类
+- **产生点**：Name 降级（lower/expr_assign.cpp）门控开且名字是异常类
   （内建按 is_exception_type，自定义按 classes_）且无本地/全局遮蔽 →
   `ExcClassObj(const_str(name))`，push_temp 接管 +1。门控关时逐字旧样
   （内建落到 LoadGlobal 空槽=0，自定义走 local_class_object）。
@@ -90,7 +90,7 @@
   方法面的类实例（assignable 末尾放宽分支；门控经 lang_gaps_enabled()
   全局开关传入，因为 assignable 是自由函数）。静态类型仍是 file，
   方法检查（typecheck_call_method 的 File 分支）不变。print(file=...)
-  的降级检查同口径放宽（lower_print.cpp）。
+  的降级检查同口径放宽（lower/print.cpp）。
 - **运行期分派（零 codegen 改动）**：pa_file_* 入口前置
   `if (f && !pa_is_file(f)) return pa_fileinst_*(f, ...);`——非 file 值
   委托 rt_lang.c 的实例侧分派（方法名→槽登记表沿 MRO 查表，命中且槽
@@ -213,10 +213,10 @@
   （off rc=1，单独跑过，同上）。277 门控开 str 回归曾修（§4.4）。
 - **CPython 对拍**：340（53 行）/341（65 行）expect 由 CPython 3.14
   生成，O0/O1/O2 输出逐字节一致（341 含 NUL 字节按字节 cmp）。
-- **check_size**：无新增超限。typecheck_expr.cpp 1214→976（Attribute
-  case 逐字拆出 typecheck_expr_attr.cpp）；超限文件仍是基线那 5 个
+- **check_size**：无新增超限。typecheck/expr.cpp 1214→976（Attribute
+  case 逐字拆出 typecheck/expr_attr.cpp）；超限文件仍是基线那 5 个
   （codegen_regalloc/driver_build/ir_ops.h/lower_impl.h/
-  typecheck_types.h，后两者本轮行数微增但本已超限）。
+  typecheck/types.h，后两者本轮行数微增但本已超限）。
 - **缓存失效**：manifest 加 `langgaps` 行；切换开关必然重建。
 
 ## 7. 提交
@@ -280,14 +280,14 @@
   __pa_bound_m 绑定方法 / lru/partial 包装）捕获时跳过——CPython 没有
   对应帧（构造异常直接显示 __init__）。
 - **门控**：pa_lang_gaps_rt 运行期全局，入口模块体**首发** LangGapsEnable
-  （新 RtFn，lower.cpp run() 在 __name__ 存储前发射，仅 is_entry）。
+  （新 RtFn，lower/lower.cpp run() 在 __name__ 存储前发射，仅 is_entry）。
   关时捕获/提交第一行即返回，零分配零行为变化。
 - **O2 内联门控开时关**（lower_module 里 can_inline=false）：小函数内联
   把被内联帧并进调用者（调试表按调用者函数索引归因），帧链与 CPython
   对不上——实测 f→g→module 三层 raise 内联后只剩 <module> 一帧。
   直接化保留（call 仍是 call，帧不丢）。门控关逐字沿用基线。
 - **debug_name**：IRFunction 新字段，门控开时 lowerer 填（入口 <module>、
-  方法裸名 Cls.meth→meth、生成器 resume 同口径），codegen.cpp 调试表
+  方法裸名 Cls.meth→meth、生成器 resume 同口径），backend/codegen.cpp 调试表
   函数名处消费；空则旧 debug_display_name 口径（门控关恒空，asm 不变）。
 - **sys.exc_info()**：pa_exc_info（rt_lang.c）读 current_exc，返回
   (类值, 异常值, tb)：类值 pa_exc_class_obj 单例（块1 复用，+1）；异常值
@@ -315,7 +315,7 @@
   的 print_exc 子进程自执行在 CPython/pa 两运行时同一套分支。
 
 **块3 实测抓到的 bug**：
-1. 重查轮不传门控（块1 遗留）：typecheck_infer.cpp check() 的 replay
+1. 重查轮不传门控（块1 遗留）：typecheck/infer.cpp check() 的 replay
    TypeChecker 不复制 lang_gaps_，递归函数触发 result-hint 重查时异常类名
    退回 unknown，isinstance(e, ValueError) 降级报「第二参不是类」。
    修：next.set_lang_gaps(lang_gaps_)。
@@ -352,7 +352,7 @@
 
 ### 块4 dataclass 编译期展开（已落地）
 
-- **机制**：typecheck_dataclass.cpp expand_dataclass，classdef_impl 字段
+- **机制**：typecheck/dataclass.cpp expand_dataclass，classdef_impl 字段
   收集完后调用（门控开 + is_dataclass）。按字段注解合成 FunctionDef AST
   注入 ClassDef.body（StmtPtr 所有权归类体），之后的方法签名登记/槽分配/
   体检查/降级/跨模块接口编码**全部复用既有机制**。重查轮按名字判重不重复
@@ -379,7 +379,7 @@
   （[]/{}/set()）、非字面量默认、默认参序违规、未解析/不支持标注、
   字段名撞合成局部（self/other/__pa_dc_o）。
 - **unhashable**：合成 __eq__ 无 __hash__ → 既有规则
-  （lower_builtin_reflect.cpp hash()）编译期报 unhashable（CPython 是
+  （lower/builtin_reflect.cpp hash()）编译期报 unhashable（CPython 是
   运行期 TypeError，口径合理不逐字）。
 - **静态容器/bytes repr**（门控开）：repr(list/dict) 走 ReprAny 探针；
   set 专用 pa_repr_set（运行期表示是 dict 值恒 0，探针分不出 set 与

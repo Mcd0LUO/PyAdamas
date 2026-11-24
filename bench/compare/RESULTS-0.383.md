@@ -6,7 +6,7 @@
 
 每种实现 3 轮 × 每轮 9 次，取所有采样的最小值；PyAdamas 用 `/src/luo-proj/pyadamas/build/lead/pyadamas` 编译（生成码 `-O2`，每次 `--rebuild` 强制真编译），Go 用默认优化，C++ 用 `g++ -O2`。编译时间不计入；多租户机器上单轮绝对值能差 2 倍，所以这里按轮取最小值再合并。
 
-**默认管线里浮点循环的向量化是按 IR 形状模板做的**（reduction / int map / nbody pair，`src/codegen_simd*.cpp`，默认开），通用自动向量化（`src/codegen_vect.cpp`）默认关。关掉特化 SIMD 后 `matmul`/`spectral_norm`/`nbody` 慢 2–4×，其余用例在噪声内 —— 实测见 `bench/compare/SIMD-AB.md`。表里最漂亮的三行正是形状模板承包的；`sieve`/`wordfreq` 这种没被覆盖的写法才是可外推的水平。
+**默认管线里浮点循环的向量化是按 IR 形状模板做的**（reduction / int map / nbody pair，`src/codegen_simd*.cpp`，默认开），通用自动向量化（`src/backend/vect.cpp`）默认关。关掉特化 SIMD 后 `matmul`/`spectral_norm`/`nbody` 慢 2–4×，其余用例在噪声内 —— 实测见 `bench/compare/SIMD-AB.md`。表里最漂亮的三行正是形状模板承包的；`sieve`/`wordfreq` 这种没被覆盖的写法才是可外推的水平。
 
 | 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | PyAdamas/最快编译实现 | 输出一致 |
 |---|---|---|---|---|---|---|---|---|

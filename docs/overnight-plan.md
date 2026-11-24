@@ -10,7 +10,7 @@ regalloc 别名 / 递归展开（fib −29%）/ stdlib 7 模块 / borrow（dict_
 P2 unknown 类型标签（pprint/isinstance 解锁）/ P1 定宽整数（i8-i64/u8-u64）。
 
 在途：lang-gaps（P4 语言缺口，qwen，修 custom 异常类当值 bug）；cspeed（编译速度，deepseek，
-5 commit 位集系列，实测编译吞吐 ~11% 提速，但 codegen_impl.h 1221 超限待修）；
+5 commit 位集系列，实测编译吞吐 ~11% 提速，但 backend/impl.h 1221 超限待修）；
 simd-general（SIMD 通用化，qwen）。big-int（P3）已停。
 
 ## 今晚优先级队列（单槽位顺序）
@@ -18,7 +18,7 @@ simd-general（SIMD 通用化，qwen）。big-int（P3）已停。
 1. **P4 语言缺口（lang-gaps）**——当前优先。修 custom 异常类当值 raise/catch bug（test 340 崩溃）
    + repr 模块前缀；完成 suppress/closing（已工作）+ file 协议/io.StringIO + traceback + dataclass。
    交付→严审（异常钉子 92/93/94/119 + ASan leak + 语料 + CPython 对拍）→集成 0.342。
-2. **编译速度（cspeed 工作）**——位集系列已有 ~11% 吞吐收益。修 codegen_impl.h 超限→严审
+2. **编译速度（cspeed 工作）**——位集系列已有 ~11% 吞吐收益。修 backend/impl.h 超限→严审
    （asm 逐字节不变命门 + 套件 + 吞吐 A/B）→集成 0.343。若 deepseek 早夭频繁，qwen 接手收尾。
 3. **SIMD 通用化（simd-general）**——特化 matcher→通用自动向量化（回应通用性关切）。
    交付→严审（向量化==标量 + 非基准循环证据 + flag-off asm 不变）→集成 0.344。

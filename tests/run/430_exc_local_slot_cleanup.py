@@ -4,7 +4,7 @@
 # 也不触发帧展开（当前帧的槽留给函数自己退出时释放）。于是内联体局部槽里
 # 的最后一个值没人 dec。str/bytes 是索引叶子（不进 GC 堆链、退出清扫收不
 # 到），LSan 直接报 Direct leak；容器因退出清扫能兜住，所以只有叶子露出来。
-# 修法见 src/opt_inline.cpp 的 release_inlined_slots_at_returns。
+# 修法见 src/opt/inline.cpp 的 release_inlined_slots_at_returns。
 # 用 ASan 跑：
 #   build/pyadamas build --asan -O2 -o q x.py
 #   ASAN_OPTIONS=detect_leaks=1 ./q      # 退出码 0 且无 leak 报告

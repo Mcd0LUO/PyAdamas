@@ -27,8 +27,8 @@
   **第 ④ 步「辅助文件跟着搬 + 删转发」没做**：`vect_affine_*` / `vect_jvec2` /
   `vect_avx2_emit` / `vect_alloc_temps` 仍留 `AsmGen`（它们直接发指令、且被发射路径
   调用，按「三接口 + 反向引用」的边界留在原处更简单）。
-- A5 ✅ 已完成（实测）：改 `vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；
-  改 `codegen_core.h` 一行 = **31 个 TU / 55.16 s**（ccache 关、`-j4`）—— **1:7**。
+- A5 ✅ 已完成（实测）：改 `opt/vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；
+  改 `backend/core.h` 一行 = **31 个 TU / 55.16 s**（ccache 关、`-j4`）—— **1:7**。
 
 ## 阶段 B：通用优化（02:30 → 05:30）
 
@@ -74,8 +74,8 @@
 
 ### 超出预期
 
-- **VectPlanner 抽取完成且量到了兑现**：`codegen_vect.cpp` 1,178 → 59 行，新增 `vect_planner*` 三个文件合计 1,945 行，
-  `codegen_vect.cpp` 1,178 → 59 行；改向量化器一行从 30 个 TU / 约 55 s 降到
+- **VectPlanner 抽取完成且量到了兑现**：`backend/vect.cpp` 1,178 → 59 行，新增 `vect_planner*` 三个文件合计 1,945 行，
+  `backend/vect.cpp` 1,178 → 59 行；改向量化器一行从 30 个 TU / 约 55 s 降到
   **1 个 TU / 7.76 s**（1:7）。
 - **顺手逮到两个真 bug**（都不是计划内）：
   1. `Convert` 的 `j_src` 快速路径缺 disp32 上界 → `float(2^40 + j)` 直接汇编失败；

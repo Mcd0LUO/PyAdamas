@@ -40,7 +40,7 @@
 
 ## 2. 提升规则（§1.2，定死；实现只有一处）
 
-typecheck_types.h 的 int_promote(l, r) 是**唯一**实现：类型检查的
+typecheck/types.h 的 int_promote(l, r) 是**唯一**实现：类型检查的
 binop/compare、降级期两侧转换、常量折叠都调用它。规则：
 
 1. 任一 Float/F32 → float（F32 未实现，全 f64）。
@@ -53,7 +53,7 @@ binop/compare、降级期两侧转换、常量折叠都调用它。规则：
    u32 与 i32 混比按 unsigned：i32(-1) > u32(1) 为 True。
 7. 非数值域（unknown/Optional/None 混进来）→ int（旧行为，保守）。
 
-**降级期两侧必须转换到提升后的类型**（lower_expr_ops.cpp 的 binop 与
+**降级期两侧必须转换到提升后的类型**（lower/expr_ops.cpp 的 binop 与
 compare）：i32 −1 与 u32 1 若各按自己的机器字比，符号扩展后的 −1 会给出
 相反结论。这是本轮第一个静默算错风险点，已由 332/333 的混符号用例钉住。
 
@@ -68,7 +68,7 @@ compare）：i32 −1 与 u32 1 若各按自己的机器字比，符号扩展后
 | cast_* / 赋值 coerce | norm_int_rax：8 位 movsbq/movzbq、16 位 shl 48+sar/shr 48、32 位 movslq/movl |
 | 二元运算结果 | gen_bin_int_fixed 末尾 norm_int_rax（加减乘/位运算/除法/取模/幂） |
 | 一元 − / ~ | gen_un 按结果类型正常化（−(−128) → −128，~u8 200 → 55） |
-| 常量折叠（opt.cpp） | Bin/Un/Convert 折叠结果用 int_narrow_value 按结果类型回绕 |
+| 常量折叠（opt/opt.cpp） | Bin/Un/Convert 折叠结果用 int_narrow_value 按结果类型回绕 |
 | 函数实参/返回 | 调用点与返回点的 coerce 已发转换 |
 | 容器元素/字段 | 写入点 coerce（元素类型是定宽时，右侧必须是 cast 或字面量——见 §6.3） |
 
@@ -162,11 +162,11 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
     22 行一致**，唯一差异是 §6.1 的 u64 过 unknown → −1（预期边界）。
   - 333（回绕/混符号）**刻意不与 CPython 对拍**：pin 的是 pa 的 C 式
     回绕（127+1 → −128、u8 255+1 → 0、i8(−1)<u8(1) 为 False）。
-- **check_size**：新增文件 src/codegen_int_fixed.cpp（134 行）/
-  src/codegen_div.h（19 行）都在限内；把 codegen_ops.cpp 拆到 1184 行、
-  typecheck_expr.cpp 压回 1200 行、codegen_impl.h 压回 1200 行，
+- **check_size**：新增文件 src/backend/int_fixed.cpp（134 行）/
+  src/backend/div.h（19 行）都在限内；把 backend/ops.cpp 拆到 1184 行、
+  typecheck/expr.cpp 压回 1200 行、backend/impl.h 压回 1200 行，
   **没有新增超限文件**（基线本就超限的 codegen_regalloc/driver_build/
-  ir_ops.h/lower_impl.h/typecheck_types.h 维持原状；typecheck_types.h 因
+  ir/ops.h/lower_impl.h/typecheck_types.h 维持原状；typecheck/types.h 因
   本轮新增 ~244 行从 1337 涨到 1581，仍是既有的超限文件，拆文件留后续）。
 
 ## 8. 负面/残余
@@ -184,14 +184,14 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
   divq/shrq/jb-ja。
 - 常量折叠必须同步回绕，否则会出现「u8 的 250+10 折叠成 260 存进 u8
   槽」这类静默算错（本轮实测抓到：u += 10 在全局常量传播后被折成 260；
-  修复 = opt.cpp 的 Bin/Un/Convert/Cmp 折叠按类型回绕/无符号）。
+  修复 = opt/opt.cpp 的 Bin/Un/Convert/Cmp 折叠按类型回绕/无符号）。
 - 环境噪声：/tmp 下有 root 所有的旧日志文件，工作日志一律写 build/ 下。
 
 ## 9. 0.349 收尾（fixint2 分支，基线 e570f9d / 0.348）
 
 > 范围：§6 负面清单里 tractable 的三项 + 可选的 cimport 映射。**命门不变**：
 > 现有程序（无定宽标注）asm 逐字节不变（bench 全量 120 文件 cmp 全同）；
-> 提升规则（typecheck_promote.h 的 int_promote）与回绕语义一字未动。
+> 提升规则（typecheck/promote.h 的 int_promote）与回绕语义一字未动。
 > 逐块 commit：b166dc4（大字面量）→ 9fb56a5（容器 coerce）→ 2fed140
 > （u64 排序）→ ae62f52（cimport + codegen_cffi 拆分）。
 
@@ -276,8 +276,8 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
   要 cast（反例 f77/f78）。
 - **既有 int/int32/uint32 仍映射默认 int**——改它们会动既有程序的提升
   语义（uint32+uint32 会从 int 变 u32 回绕），不做。
-- codegen_call.cpp 新增编组后超 1200 行硬限：C 边界编组 5 函数纯移动拆入
-  **codegen_cffi.cpp**（735/516 行），check_size 清零状态保持。
+- backend/call.cpp 新增编组后超 1200 行硬限：C 边界编组 5 函数纯移动拆入
+  **backend/cffi.cpp**（735/516 行），check_size 清零状态保持。
 - **负面/边界**：cdecl（头文件→.cpya 生成器）未扩展新类型名；varargs 的
   定宽实参仍报 "varargs argument type not supported"（既有）；list[i8]→char*
   缓冲区编组（BufI8）未开；ptr[T] 元素写入要 cast（见 §9.2）。
@@ -297,5 +297,5 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
   （build/gate-final-*.log）。
 - **语料零差异**：tests/run 既有全量（按文件头 type-tags/lang-gaps 环境），
   基线 vs 当前输出与退出码全同（build/gate-corpus2.log，0 DIFF）。
-- **check_size**：通过（无新增超限；codegen_call.cpp 拆分后 735 行）。
+- **check_size**：通过（无新增超限；backend/call.cpp 拆分后 735 行）。
 

@@ -50,7 +50,7 @@ M=1 下把清扫做成原子（一次 gc_incr_step 调用内 release+free+finish
 | list setitem | rt_list.c `pa_list_set` 入口 | ✅ | 同上 |
 | list copy_range（批量 append） | 逐元素走 `pa_list_append`；kind1 快路径 memcpy+inc | ✅* | *kind1 快路径见 §2.3 备注 |
 | dict set（插入/覆盖） | rt_dict.c `pa_dict_set` 入口 shade(key)+shade(val) | ✅ | 标量键值 no-op |
-| 实例**静态字段**写 | IR `store_field`（lower_impl_slots.cpp）堆/unknown 分支 `gc_barrier(v)` | ✅ | 标量字段（!ir_is_heap && !unknown）不进 |
+| 实例**静态字段**写 | IR `store_field`（lower/impl_slots.cpp）堆/unknown 分支 `gc_barrier(v)` | ✅ | 标量字段（!ir_is_heap && !unknown）不进 |
 | 实例**动态属性**写 | rt_class.c `pa_attr_set` → `pa_dict_set` | ✅ | 经 dict 屏障 |
 | cell 写（闭包捕获槽=list） | cell 是 list，经 `pa_list_set`/`pa_list_append` | ✅ | — |
 | 生成器帧槽写 | 帧槽拥有引用经 store_slot→RC；堆值产生经 temp/容器屏障 | ✅* | *见 §2.3 备注 |
@@ -187,7 +187,7 @@ pa_list_append/set、pa_dict_set、pa_chan_send 少数原语，在此发射保�
 | CPython 对拍 run_diff.py --seeds 20 | ✅ flag-on 5600/0 + flag-off 5600/0，EXIT=0 |
 | abbench flag-on vs off（GC 重负载） | ✅ bench_rc_gen −0.1% / 13_gc +0.6% / queue_sim −0.4%（噪声级）；极端合成 278 约 +3.6%（标记期屏障开销，文档化代价） |
 | 标记停顿下降可测 | ✅ 174 同步 gc_drain 标记停顿 1.89/8.47/**32.09ms** → flag-on 根扫描 0.00ms + 64 对象分片（32ms 同步标记停顿消除） |
-| check_size 无新增超限 | ✅（5 个超限文件均基线既有，ir_ops.h/lower_impl.h 本已 >1200） |
+| check_size 无新增超限 | ✅（5 个超限文件均基线既有，ir/ops.h/lower_impl.h 本已 >1200） |
 | 新增测试 278-282（CPython 对拍 + O0/O1/O2 + ASan） | ✅ 全过 |
 
 ## 8. 剩余问题 / 阶段 2 接口

@@ -1,7 +1,7 @@
 # tests/eh —— LSDA 发射器（Z2-a）golden 字节测试
 
 这是 [docs/zero-cost-exceptions.md](../../docs/zero-cost-exceptions.md) 里 **Z2** 的第一步落地：
-只做「保护区计划 → GNU as 汇编文本」的发射器（`src/eh_emit.h` / `src/eh_emit.cpp`），
+只做「保护区计划 → GNU as 汇编文本」的发射器（`src/backend/eh_emit.h` / `src/backend/eh_emit.cpp`），
 **不接 codegen、不改任何现有行为**。字节布局的权威口径是
 [tools/lsda_ref/FINDINGS.md](../../tools/lsda_ref/FINDINGS.md) §0.1 / §6（gcc 14.2 实测标定）。
 
@@ -13,7 +13,7 @@ bash tests/eh/run.sh
 
 - 依赖：Linux x86-64、gcc/g++ 14.2、binutils（readelf / objcopy / od）。构建产物放 mktemp，退出即删。
 - **不碰仓库的 CMake/ninja 构建**：直接用 `g++ -std=c++20 -Wall -Wextra -Werror` 编
-  `src/eh_emit.cpp + tests/eh/main.cpp`。
+  `src/backend/eh_emit.cpp + tests/eh/main.cpp`。
 - 预期：`==== 结果：全部 PASS（33 项断言）====`，退出码 0。
 - 测试驱动 `main.cpp` 会先跑 `eh_plan_check` 自检（合法/非法计划、空计划、非法计划抛异常），
   再为 6 个用例各生成一份 `.s`；`run.sh` 逐份 `gcc -c` 汇编、
@@ -52,9 +52,9 @@ bash tests/eh/run.sh
 codegen 接入顺序（Z2-b）：
 
 ```cpp
-// 1) codegen_block.cpp：emit_function 里，紧跟 cfi(".cfi_startproc") 之后
+// 1) backend/block.cpp：emit_function 里，紧跟 cfi(".cfi_startproc") 之后
 emit_eh_func_directives(out_, plan);
-// 2) codegen.cpp：全部函数 emit 完之后（当前段不是 .text 的位置）
+// 2) backend/codegen.cpp：全部函数 emit 完之后（当前段不是 .text 的位置）
 for (每个带计划的函数) emit_eh_lsda(out_, plan);
 // 3) 每个 TU 一次
 emit_eh_dwref(out_);   // .data.rel.local 里的 8 字节 .quad pa_personality

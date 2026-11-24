@@ -14,23 +14,23 @@
 ### 1.1 管线（cimport / cdecl）
 
 ```
-cimport clib as c          parser_stmt.cpp: parse_cimport
-  → load_cpya("clib")      cimport.cpp: 手写 .cpya 文本声明（cmodule/link/
+cimport clib as c          syntax/stmt.cpp: parse_cimport
+  → load_cpya("clib")      cimport/cimport.cpp: 手写 .cpya 文本声明（cmodule/link/
                            const/struct/extern var/extern def），不是 C 头文件
-  → stmt_cimport           typecheck_stmt_forms.cpp: 建 FuncInfo(is_extern)，
+  → stmt_cimport           typecheck/stmt_forms.cpp: 建 FuncInfo(is_extern)，
                            CKind → TypePtr（ckind_type），struct 布局进 structs_
   → c.f(...)               call_attr 按 extern_fns_ 查签名 → check_args
-  → lower_cimport_call     lower_method.cpp: 逐实参 coerce + 选 CKind（ptr 接
+  → lower_cimport_call     lower/method.cpp: 逐实参 coerce + 选 CKind（ptr 接
                            list/bytes 时改 Buf*），登记 IRExtern（按 symbol 去重），
                            发 CallExtern（cargs 逐调用点记编组）
-  → gen_call_extern        codegen_call.cpp: SysV 分类（6 int / 8 xmm / 栈溢出 /
+  → gen_call_extern        backend/call.cpp: SysV 分类（6 int / 8 xmm / 栈溢出 /
                            结构体 chunk / 隐藏 sret / 回调跳板 / varargs %al），
                            call <symbol> —— **链接期绑定**
-  → link_program           driver_build.cpp: cc objs rt.o -lm + .cpya 的 link 行
+  → link_program           driver/build.cpp: cc objs rt.o -lm + .cpya 的 link 行
 ```
 
-`pyadamas cdecl header.h -o m.cpya --link ...` 是另一条入口：cdecl.cpp
-（词法/预处理）+ cdecl_parse.cpp（类型/struct/enum/声明）把 **C 头文件子集**
+`pyadamas cdecl header.h -o m.cpya --link ...` 是另一条入口：cimport/cdecl.cpp
+（词法/预处理）+ cimport/cdecl_parse.cpp（类型/struct/enum/声明）把 **C 头文件子集**
 转成 .cpya 文本，之后走同一条管线。
 
 ### 1.2 已支持（审计确认）
@@ -65,7 +65,7 @@ cimport clib as c          parser_stmt.cpp: parse_cimport
 | 回调签名含 C float | 本轮加显式 guard：cdecl 跳过并警告（跳板不做单精度提升） |
 
 另：Debug 构建下 `118_suspend_expr` / `154_nested_await` 触发
-`vreg_nonneg` 的 STL 越界断言（lower_impl.h def()，生成器路径）——
+`vreg_nonneg` 的 STL 越界断言（lower/impl.h def()，生成器路径）——
 **在 base f0a4af4 的独立 worktree 同样复现**，与本轮 FFI 改动无关，
 0.303 的 225 例套件应是 Release 跑的。单独开票，不在本轮范围。
 
@@ -101,7 +101,7 @@ print(sqrt(2.0))                  # 1.4142135623730951
   符号名集合编译期不可知，绑定在 stmt_import_from 特判：每个名字建
   FuncInfo{c_lazy, c_symbol}，declare 成 Func 类型。
 - 调用点（check_c_lazy）：拒绝关键字/`*`展开；求实参类型；推断返回 ABI。
-- 降级（lower_c_lazy.cpp）：逐实参推断 CKind + coerce，按
+- 降级（lower/c_lazy.cpp）：逐实参推断 CKind + coerce，按
   (符号, 绑定方式, 返回种类) 去重登记 IRExtern{lazy=1}，发 CallExtern。
 - 符号解析：首次调用 `dlsym(RTLD_DEFAULT, name)`（进程全局符号表，
   含已链接的 libc/libm 与所有 RTLD_GLOBAL 库），结果缓存到静态槽
@@ -136,7 +136,7 @@ print(dylib.close(lib))            # dlclose → 0
 
 ## 4. 类型规则与 ABI 契约
 
-### 4.1 实参推断（免写路径，lower_c_lazy.cpp lazy_arg_kind）
+### 4.1 实参推断（免写路径，lower/c_lazy.cpp lazy_arg_kind）
 
 | PyAdamas 静态类型 | C 编组 | 机器动作 |
 | --- | --- | --- |
@@ -197,15 +197,15 @@ fi>8（浮点实参溢出到栈）时 %al 原样塞 fi 会让 va_arg 寄存器�
 
 | 层 | 文件 | 内容 |
 | --- | --- | --- |
-| 类型 | typecheck_types.h | TyKind::DYLIB / t_dylib / FuncInfo.c_lazy+c_symbol / ckind_type(Float32) |
-| 类型检查 | typecheck_stmt_forms.cpp | from c import 绑定；标注覆盖（ann_assign/return） |
-| 类型检查 | typecheck_call.cpp / typecheck_call_forms.cpp | check_c_lazy；DYLIB 接收者属性调用 |
-| 模块 | driver_build.cpp / builtin_sigs.cpp / lower_import.cpp | c/dylib 伪模块登记；native_fn；-ldl |
-| 降级 | lower_c_lazy.cpp（新）/ lower_call.cpp / lower_method.cpp / lower_import_native.cpp | 调用点编组推断 + 分派 |
-| IR | ir_types.h / ir_ops.h / codegen_call_rt.cpp | IRExtern.lazy/sym_name；IRModule.c_lazy_syms；RtFn::DYLIBLoad/Close |
-| 发射 | codegen_call.cpp / codegen.cpp / codegen_block.cpp | dlsym 解析序列 + 间接 call；float32 编组；符号串/缓存槽；暂存上界 |
+| 类型 | typecheck/types.h | TyKind::DYLIB / t_dylib / FuncInfo.c_lazy+c_symbol / ckind_type(Float32) |
+| 类型检查 | typecheck/stmt_forms.cpp | from c import 绑定；标注覆盖（ann_assign/return） |
+| 类型检查 | typecheck/call.cpp / typecheck/call_forms.cpp | check_c_lazy；DYLIB 接收者属性调用 |
+| 模块 | driver/build.cpp / typecheck/builtin_sigs.cpp / lower/import.cpp | c/dylib 伪模块登记；native_fn；-ldl |
+| 降级 | lower/c_lazy.cpp（新）/ lower/call.cpp / lower/method.cpp / lower/import_native.cpp | 调用点编组推断 + 分派 |
+| IR | ir/types.h / ir/ops.h / backend/call_rt.cpp | IRExtern.lazy/sym_name；IRModule.c_lazy_syms；RtFn::DYLIBLoad/Close |
+| 发射 | backend/call.cpp / backend/codegen.cpp / backend/block.cpp | dlsym 解析序列 + 间接 call；float32 编组；符号串/缓存槽；暂存上界 |
 | 运行时 | rt_cffi.c（新）/ rt_internal.h / CMakeLists.txt | dlopen/dlsym 后端（Win32 给 NotImplementedError 桩） |
-| 序列化 | module.cpp | DYLIB 跨模块按 unknown |
+| 序列化 | ir/module.cpp | DYLIB 跨模块按 unknown |
 | 测试 | tests/run/212–215、tests/dylib/probe.c、tests/fail/f27、tests/strict/s04、tests/cdecl/sample.* | 见下 |
 
 ### 6.2 实测（Debug 编译器，生成程序 O0/O2 均验证）
@@ -230,7 +230,7 @@ fi>8（浮点实参溢出到栈）时 %al 原样塞 fi 会让 va_arg 寄存器�
   生成器路径，与 FFI 无关）。
 - **ASan**：212–215 与既有 FFI 用例（97/98/101/103/104/107/108/109/110/
   111/112/113）全部 ran ok。
-- 规模检查：仍只有原有 5 处超限文件，无新增；codegen_call.cpp 1132<1200。
+- 规模检查：仍只有原有 5 处超限文件，无新增；backend/call.cpp 1132<1200。
 
 ### 6.3 性能注记（原型未优化）
 
@@ -270,6 +270,6 @@ load+test+jne（缓存命中）与间接 call（vs 链接期直 call）——分
 - 与 CPython 桥（207–211）无冲突：c/dylib 是独立伪模块，测试编号 212+ 已避让；
   本轮未动 CHANGELOG（避免与主树集成冲突），合并时补 0.30x 条目。
 - 合并顺序建议：CPython 桥先落（主树在集成），cffi 分支 rebase 后跑全套件；
-  关注 driver_build.cpp（kModuleTable/link_program）与 builtin_sigs.cpp 的
+  关注 driver/build.cpp（kModuleTable/link_program）与 typecheck/builtin_sigs.cpp 的
   文本冲突面，语义上互不相交。
 - 提交只落 cffi 分支，未推送；主树与主树 build 目录零改动。

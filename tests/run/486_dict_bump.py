@@ -1,6 +1,6 @@
 # fuse_dict_bump 回归：`d[k] = d.get(k, def) + delta` 融合成一次 pa_dict_bump。
 #
-# 覆盖修过的判据放宽（opt_dict_bump.cpp）：
+# 覆盖修过的判据放宽（opt/dict_bump.cpp）：
 #   * 循环不变 key（LICM 把 key 装载外提到 preheader，body 里没有 key 装载）；
 #   * `+1` 常量在 get 之后才 materialize（get, const, add 顺序）；
 #   * 模块级 global dict（LoadGlobal）+ 字面量/变量 key（ConstStr / LoadSlot）；

@@ -1,7 +1,7 @@
 """dataclasses —— @dataclass 装饰器（P4 块4，PYADAMAS_LANG_GAPS）。
 
 pa 的 @dataclass 是**编译期展开**：类型检查阶段按字段注解合成
-__init__/__repr__/__eq__ 注入类体（src/typecheck_dataclass.cpp），运行期
+__init__/__repr__/__eq__ 注入类体（src/typecheck/dataclass.cpp），运行期
 这个装饰器只是恒等函数（门控开时降级器甚至跳过调用）。门控关时导入可用、
 装饰器恒等，但带参构造不合成 __init__（与基线 @dataclass 口径一致）。
 

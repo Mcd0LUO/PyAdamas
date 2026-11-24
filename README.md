@@ -88,15 +88,15 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ```
 src/
-  token.h  lexer.h        词法：记号定义、缩进敏感分析器
-  ast.h    parser.cpp     语法：AST 节点、递归下降解析器
-  desugar.cpp             lambda 脱糖成合成嵌套 def
+  common/token.h  syntax/lexer.h        词法：记号定义、缩进敏感分析器
+  common/ast.h    syntax/parser.cpp     语法：AST 节点、递归下降解析器
+  syntax/desugar.cpp             lambda 脱糖成合成嵌套 def
   typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用/内置拆分）
-  ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/内置/方法/打印/推导式/导入/匹配/生成器拆分）
+  ir/ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/内置/方法/打印/推导式/导入/匹配/生成器拆分）
   opt*.cpp                O2 优化：折叠/内联/LICM/下标版本化/循环旋转/跨块 CSE
   codegen*.cpp            x86-64：寄存器分配、基本块、指令选择、调用
   main.cpp                CLI 分派与前端入口
-  driver_build.cpp        多模块解析、增量缓存、汇编与链接
+  driver/build.cpp        多模块解析、增量缓存、汇编与链接
 runtime/
   rt_internal.h           运行时内部接口：类型、全局状态、内部函数声明
   rt_core.c rt_exc.c      引用计数/GC/闭包、异常与 handler 栈

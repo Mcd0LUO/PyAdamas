@@ -18,20 +18,20 @@
   （固定 -O2）+ 34 个 ASan 运行时 C 部件（固定 -O1+asan，`ALL` 默认构建）
   + 2 次 ld -r 合并 + 1 次可执行链接。
 - 预处理规模（compile_commands 逐 TU `-E` 计行）：**总计 10,535,456 行**，
-  中位 125,800 行/TU，最大 driver_build.cpp 145,572 行；~95% 是标准库头文本。
+  中位 125,800 行/TU，最大 driver/build.cpp 145,572 行；~95% 是标准库头文本。
   （docs/development.md 的「10 万行」是单 TU 口径。）
-- 相位分析（driver_build.cpp，dev flags，`-ftime-report -fsyntax-only`，10.25s）：
+- 相位分析（driver/build.cpp，dev flags，`-ftime-report -fsyntax-only`，10.25s）：
   parsing 66%（其中 **template instantiation 53%**、overload resolution 29%），
   preprocessing 仅 3%，deferred templates 34%。
   → 瓶颈是**每个 TU 重复实例化标准库模板**，不是预处理文本量。
 - 头文件包含分析（传递闭包，89 TU）：
-  - 项目头：token.h/ast.h 80 TU，parser.h/lexer.h 79，typecheck.h 74，
-    **typecheck_types.h 74 TU**（全部经 typecheck.h 间接包含，无直接包含），
-    ir_ops.h/ir_types.h 62，module.h 60，lower.h 41。
+  - 项目头：common/token.h/ast.h 80 TU，syntax/parser.h/lexer.h 79，typecheck/typecheck.h 74，
+    **typecheck/types.h 74 TU**（全部经 typecheck/typecheck.h 间接包含，无直接包含），
+    ir/ops.h/ir_types.h 62，ir/module.h 60，lower/lower.h 41。
   - 标准库头（按覆盖 TU 数）：vector 88、string 86、**format 85**、algorithm 82、
     memory 82、optional 82、unordered_map 81、variant 80、**ranges 74**、
     functional 74、map 63、**expected 61**。
-  - 重构方向（未做，太深）：typecheck_types.h 被 74/89 TU 拖着走；
+  - 重构方向（未做，太深）：typecheck/types.h 被 74/89 TU 拖着走；
     <format>/<ranges>/<expected> 是 libstdc++ 最重的模板头，
     项目头里「顺手 include」是主要扩散源。
 
@@ -58,16 +58,16 @@ docs/development.md 标称 idle 机器 dev 全量 ~4.7s；本测量窗口机器�
 
 | dev (-O0) | s | release (-O3) | s |
 |---|---|---|---|
-| driver_build.cpp | 45.4 | driver_build.cpp | 35.7 |
-| lower_class.cpp | 43.7 | typecheck_expr.cpp | 31.6 |
-| lower.cpp | 43.7 | builtin_sigs.cpp | 30.8 |
-| typecheck.cpp | 39.5 | typecheck.cpp | 27.0 |
-| typecheck_func.cpp | 39.3 | typecheck_func.cpp | 27.0 |
-| lower_import_native.cpp | 38.8 | lower_call.cpp | 26.9 |
-| lower_exc.cpp | 37.4 | typecheck_stmt.cpp | 26.8 |
-| main.cpp | 37.2 | lower_exc.cpp | 26.6 |
-| lower_import_stdlib.cpp | 35.9 | typecheck_stmt_forms.cpp | 26.3 |
-| typecheck_expr.cpp | 35.8 | main.cpp | 25.5 |
+| driver/build.cpp | 45.4 | driver/build.cpp | 35.7 |
+| lower/class.cpp | 43.7 | typecheck/expr.cpp | 31.6 |
+| lower/lower.cpp | 43.7 | typecheck/builtin_sigs.cpp | 30.8 |
+| typecheck/typecheck.cpp | 39.5 | typecheck/typecheck.cpp | 27.0 |
+| typecheck/func.cpp | 39.3 | typecheck/func.cpp | 27.0 |
+| lower/import_native.cpp | 38.8 | lower/call.cpp | 26.9 |
+| lower/exc.cpp | 37.4 | typecheck/stmt.cpp | 26.8 |
+| main.cpp | 37.2 | lower/exc.cpp | 26.6 |
+| lower/import_stdlib.cpp | 35.9 | typecheck/stmt_forms.cpp | 26.3 |
+| typecheck/expr.cpp | 35.8 | main.cpp | 25.5 |
 
 - 链接：dev 2.95s（-g 调试信息），release 0.29s；rt.o/rt_asan.o 合并 <0.1s。
   **链接不是瓶颈**（即使有 lld/mold，收益上限 dev ~3s / release ~0.3s）。
@@ -80,9 +80,9 @@ docs/development.md 标称 idle 机器 dev 全量 ~4.7s；本测量窗口机器�
 | 改动 | 中位 | 说明 |
 |---|---|---|
 | src/main.cpp | 10.21s | 单 TU + 链接 |
-| src/codegen.cpp | 9.24s | 单 TU + 链接 |
-| src/parser.cpp | 6.27s | 单 TU + 链接 |
-| src/typecheck.h | 44.02s | 触发 74 个 TU 重编 |
+| src/backend/codegen.cpp | 9.24s | 单 TU + 链接 |
+| src/syntax/parser.cpp | 6.27s | 单 TU + 链接 |
+| src/typecheck/typecheck.h | 44.02s | 触发 74 个 TU 重编 |
 
 ## 2. 逐项 A/B（每次只改一项；交替轮转抗噪）
 
@@ -127,18 +127,18 @@ add_custom_command 不继承 CMAKE_<LANG>_COMPILER_LAUNCHER，把 \${PYADAMAS_RT
 ### 2.5 CMake UNITY_BUILD —— ODR 冲突，记录放弃
 `-DCMAKE_UNITY_BUILD=ON`（默认 batch=8，noscan）：编译失败。
 典型错误（unity_8_cxx.cxx）：
-\`opt_dict_bump.cpp\` 与 \`opt_dict_fuse.cpp\` 在同一个
+\`opt/dict_bump.cpp\` 与 \`opt/dict_fuse.cpp\` 在同一个
 \`pyadamas::optdetail\` 的**匿名命名空间**里定义了同名 helper
 （is_rt / same_slot），合并进一个 TU 后匿名命名空间合一 →
 redefinition + -Werror=unused-function。全项目 ~30 个 cpp 有匿名命名空间，
-同名 helper 跨文件复用是普遍模式；cdecl.cpp 等还出现跨文件符号遮蔽。
+同名 helper 跨文件复用是普遍模式；cimport/cdecl.cpp 等还出现跨文件符号遮蔽。
 修复需要给几十个 helper 改名/加命名空间隔离，超出「便宜手段」范围。
 **放弃（冲突如实记录）。**
 
 ### 2.6 PCH 按配置匹配 -O 重试（PYADAMAS_PCH）
 上次失败归因是跨 -O 复用被 GCC 静默拒绝。这次用 CMake
 target_precompile_headers：每个 build 目录/配置生成独立 PCH，flags 自动匹配。
-PCH 内容 = 46 个高频标准库头（src/pch_std.h，不含项目头，避免增量频繁失效）。
+PCH 内容 = 46 个高频标准库头（src/common/pch_std.h，不含项目头，避免增量频繁失效）。
 验证确实生效：编译命令注入 \`-include …/cmake_pch.hxx\`，-Winvalid-pch 无告警，
 dev .gch 137.6MB / release .gch 126.5MB，各自独立。
 
@@ -154,7 +154,7 @@ dev .gch 137.6MB / release .gch 126.5MB，各自独立。
 | 改动 | 无 PCH | 有 PCH | 收益 |
 |---|---|---|---|
 | src/main.cpp | 10.21s | 8.83s | -14% |
-| src/typecheck.h（74 TU） | 44.02s | 36.09s | -18% |
+| src/typecheck/typecheck.h（74 TU） | 44.02s | 36.09s | -18% |
 
 解释：-ftime-report 显示 53% 时间是模板实例化，PCH 只省声明解析，
 实例化仍逐 TU 发生，再扣掉每 TU 加载 130MB+ PCH 的成本 → 全量净收益≈0。
@@ -247,7 +247,7 @@ cold 轮每次构建前 ccache -C 清空，保证公平。
 | dev 全量 **warm** | 无缓存机制，每次 ~48s | 3.44 / 3.47 / 3.47 → **3.47s** | **13.9×** |
 | release 全量 **cold** | 58.22 / 58.45 / 58.50 → **58.45s** | 41.10 / 41.29 / 40.94 → **41.10s** | **-29.7%** |
 | release 全量 **warm** | 无缓存机制，每次 ~58s | 0.45 / 0.44 / 0.45 → **0.45s** | **130×** |
-| dev 增量（真实内容改动） | main.cpp 10.21s / typecheck.h 44.02s | 同量级（miss 必然重编） | 不变 |
+| dev 增量（真实内容改动） | main.cpp 10.21s / typecheck/typecheck.h 44.02s | 同量级（miss 必然重编） | 不变 |
 | configure | 1.3-1.5s | 1.3-1.5s | 不变 |
 
 warm 的下限由链接决定：dev -g 链接 ~3s，release 链接 ~0.3s。
@@ -255,8 +255,8 @@ warm 的下限由链接决定：dev -g 链接 ~3s，release 链接 ~0.3s。
 增量（dev 最终配置，touch 单文件）：
 - src/main.cpp：首次 10.39s（真实重编+链接）；随后 3.06/3.07s ——
   **touch 不改内容时 ccache 直接命中**，只剩链接。真实内容改动仍会 miss（~10s）。
-- src/typecheck.h：首次 48.92s（74 TU 重编）；随后 3.70/3.52s（同上，ccache 命中）。
-- 对照基线增量：main.cpp 10.21s、typecheck.h 44.02s（无 ccache）。
+- src/typecheck/typecheck.h：首次 48.92s（74 TU 重编）；随后 3.70/3.52s（同上，ccache 命中）。
+- 对照基线增量：main.cpp 10.21s、typecheck/typecheck.h 44.02s（无 ccache）。
 
 ## 6. 推荐配置（已落 speed 分支）
 
@@ -266,7 +266,7 @@ warm 的下限由链接决定：dev -g 链接 ~3s，release 链接 ~0.3s。
 | ccache 自动探测（PYADAMAS_USE_CCACHE=ON） | 开 | **warm clean 重建 dev 13×（45→3.5s）**；cold 无惩罚 | 需要 ccache（没有则自动跳过）；真实改动的增量无收益；CI 建议持久化 CCACHE_DIR |
 | 运行时 custom command 接 launcher | 随 ccache | warm 重建 5.4→3.5s | 未设 launcher 时展开为空，零变化 |
 | release preset -O3→**-O1 -DNDEBUG** | -O1 | **release 全量 -32.5%（56.7→38.3s）** | 三层吞吐测量均中性（§3）；行为验证 234+216/0 通过；保守可选 -O2（-10.1%） |
-| PCH（PYADAMAS_PCH） | **关** | 全量中性；增量 -14%（单 TU）/-18%（typecheck.h） | 每配置 ~130MB .gch；按需开 |
+| PCH（PYADAMAS_PCH） | **关** | 全量中性；增量 -14%（单 TU）/-18%（typecheck/typecheck.h） | 每配置 ~130MB .gch；按需开 |
 
 日常开发建议：dev 用仓库 preset（-Og，已验证 234+216/0）；clean 重建/切分支
 自动享受 ccache；跑分用 release（-O1，编译器吞吐与 -O3 无实测差异）。
@@ -283,7 +283,7 @@ warm 的下限由链接决定：dev -g 链接 ~3s，release 链接 ~0.3s。
    但集成很深：CMake 4.2 的 CXX_MODULE 实验 API + Ninja dyndep、每配置独立 BMI、
    与 -Werror/现有 46 个 std include 的混用迁移、clangd/IDE 支持、Windows 移植
    （MSVC import std 路径不同）。本轮不做。
-4. **重模板头重构（只分析，不做）**：typecheck_types.h 经 typecheck.h 被 74/89 TU
+4. **重模板头重构（只分析，不做）**：typecheck/types.h 经 typecheck/typecheck.h 被 74/89 TU
    包含；<format>(85 TU)/<ranges>(74)/<expected>(61) 是最重的模板头，
    项目头顺手 include 是扩散源。拆分/前向声明/pimpl 收益可观但改动面大。
 5. **rt_asan 可选化**：34 个 ASan 运行时 C 文件默认 ALL 构建，耗 ~170 CPU·s

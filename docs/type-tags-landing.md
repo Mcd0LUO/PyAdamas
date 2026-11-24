@@ -63,7 +63,7 @@
 `pa_any_type(v, tag)` → PA_TYPE_NONE/BOOL/INT/FLOAT/STR/BYTES/LIST/DICT/
 TUPLE/SET/OBJECT/CLASS/OTHER。有精确 tag 用 tag；HEAP 读头 kind；UNK 先
 探针。`pa_any_type_is(v, tag, code)` 是 isinstance 谓词：object 匹配一切，
-int 接受 bool（CPython 口径），其余精确相等。类型码与 `src/tag_defs.h` 的
+int 接受 bool（CPython 口径），其余精确相等。类型码与 `src/backend/tag_defs.h` 的
 PaTypeCode 逐字对应。
 
 `pa_repr_any_t(v, tag)` / `pa_print_any_repr_t(v, tag)`：None→None、
@@ -143,8 +143,8 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
   **4/4 全 0**。
 - **CPython 对拍**：328-331 的 expect 逐行由 CPython 3.14 生成（含 pprint
   断行/缩进输出），O0/O1/O2 输出一致（difftest 0）。
-- **check_size**：**无新增超限**。新拆 `src/codegen_call_abi.cpp`（间接/
-  虚调用发射 + outgoing_bytes，194 行）；codegen_impl.h 1195、codegen_call
+- **check_size**：**无新增超限**。新拆 `src/backend/call_abi.cpp`（间接/
+  虚调用发射 + outgoing_bytes，194 行）；backend/impl.h 1195、codegen_call
   1169、codegen_block 1153 均 < 1200；超限文件仍是基线那 5 个
   （codegen_regalloc/driver_build/ir_ops.h/lower_impl.h/typecheck_types.h）。
 - **缓存失效**：manifest 加 `typetags` 行；切换开关必然重建（否则旧产物
@@ -156,5 +156,5 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
 - `295fe31` 运行期类型码 + tag 版 repr/isinstance
 - `b6ba920` 跨模块/间接 tag 侧信道 + per-param 布局 + stdlib/pprint.py
 - `c365a48` 回归 328-331 + 用例级 type-tags 指令 + indirect unknown 返回 tag
-- `2c9d7e9` 拆 codegen_call_abi.cpp（文件规模不新增超限）
+- `2c9d7e9` 拆 backend/call_abi.cpp（文件规模不新增超限）
 - （文档/CHANGELOG：另一次提交）
