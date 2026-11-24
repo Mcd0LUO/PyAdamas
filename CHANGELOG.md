@@ -4,6 +4,53 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.492] - 2026-11-24
+
+> perf(stdlib)：**标准库第二轮全量扫描**——54 个模块逐个过（`docs/stdlib-round2.md`），12 个文件改动，5 个可测收益。
+>
+> | 模块 | before → after | 手法 |
+> |---|---|---|
+> | fnmatch | 89.5 → 67.7 ms（−24%） | `translate` 缓冲 + `re.escape` 查表 + 锚定修正 |
+> | shlex | 20.9 → 17.6 ms（−16%） | `quote`/`join` 逐字符拼接改缓冲 |
+> | csv | 79.0 → 67.0 ms（−15%） | `writerow`/`_format` 提升循环不变量与 `len` |
+> | pprint | 493.5 → 439.8 ms（−11%） | 6 处 `out = out + …` 改 `list[str]` + `join` |
+> | urllib.parse | 152.2 → 136.5 ms（−10%） | scheme/safe/hex 三张 128 项查表、`_clean` 短路 |
+>
+> **修掉一个真 bug**：`fnmatch` 此前**不是整串匹配** —— `fnmatchcase(".hidden", "[a-z]*")` 返回 True
+> （CPython False）。根因在 `re` 引擎：**含元字符**模式的 `Pattern.match` 与 `search` 同义、`\Z` 不当锚点
+> （纯字面量模式走快速路径，反而是对的）。fnmatch 侧改为编译时前置 `^` + `search` + `end()` 补齐终点；
+> `translate()` 输出保持原样（539 个用例钉着它）。另外做了两轮差分：7082 个模式的 `translate` 等价性、
+> 14400 组 `fnmatchcase` 匹配矩阵，与 CPython 0 差异。
+>
+> **新增资产**：`tests/bench/cases` 17 → **38**（tarfile/zipfile/configparser/argparse/difflib/pprint/csv/
+> urllib.parse/glob/shlex/calendar/shutil/io/queue/struct/zlib/gzip/traceback/secrets/copy/fnmatch，全部 <1s、
+> 确定性、`--filter` 可单跑）；5 个 CPython 对拍用例（572–576）。
+>
+> **判负/跳过**（根因见文档 §2/§6）：`io.StringIO.write` 每次 O(n)（str 不可变，要可变缓冲）、
+> `functools.cmp_to_key` O(N³)（`sorted` 不支持 key 对象比较）、zlib 包装层已到顶（0.85–1.2×）、
+> struct 1.3×（缺静态 fmt 特化）、glob 由 syscall 主导；另 19 个模块是常量/薄封装/编译期占位。
+>
+> **编译器侧观察**（只记录未改 `src/`，`docs/stdlib-round2.md` §7）：`re` 缺 `\A`/`\Z` 锚；「先赋给局部变量」
+> 会丢类方法面（链式才行）；`unknown` 上的下标按机器语义解码；分支内重新赋值会丢 `list[T]` 注解。
+> 其中「queue 取元组下标 SIGSEGV」一条**未能稳定复现**，已在文档里标注为待独立复现，不作为结论引用。
+>
+> 闸门：套件 **485** / difftest **455** / check_size **PASS** / ctest 7/7。
+## [0.491] - 2026-11-24
+
+> docs(compat)：把 3.5 的三项语义缺口写进「尚未实现的构造」相邻段落，每条给 3 行以内的最小复现。
+>
+> - **`for` 与内置构造函数拆开写**：`for x in obj` 对装饰/未装饰 `__iter__` 都正确（不是缺口）；
+>   真正的缺口是 `list(obj)`/`tuple(obj)`/`set(obj)`/`sorted(obj)`/`sum(obj)` 对内建容器以外的对象报
+>   `cannot iterate over 'Box'`，附 `RtFn::AnyIterList` 只吃内建容器、喂生成器报 `object is not iterable`
+>   的实测证据与正确修法（复用 `stmt_for` 的 `dunder_call` 做「任意迭代器物化」新降级形状）。
+> - **未初始化变量读 0**：`def f(c): if c: x = 1; return x` 调 `f(False)` 打印 0（CPython `UnboundLocalError`），
+>   槽位零初始化、没有「已初始化」位；两条实现路径的代价都写清了。
+> - **异常 traceback**：`e.__traceback__` 维持显式「未实现」错误；未捕获回溯只有单帧且行号 0（`.loc` 只在
+>   `in.line > 0` 登记，异常边的合成指令没有行号）；列号缺失。行号可修（补异常边 `in.line` + 两帧回归），
+>   其余判负。
+>
+> 另记录一条边界：**联合类型不跨模块序列化**（`enc_type` 对带成员表的 Unknown 仍走 unknown 码），
+> 所以 `from lib import take; take(1.5)` 仍会放行——方向是「check 比 build 宽」，符合「宁可漏报」。
 ## [0.490] - 2026-11-24
 
 > 取证（§3.5）：**三项已知语义缺口的结论都是负的**，逐条给最小复现、根因、要动的层。
