@@ -166,3 +166,38 @@ MI C base=B layout=B base_fields=1
 **结论**：这一轮没有落地（布局实体化 + thunk + 守卫同步是成套改动，半成品会静默错值）。
 护栏保持现状（明确报错），三个文件（xmlrpc/server、urllib/request、xml/dom/expatbuilder）继续被拒。
 下一步按上面四步走，先做布局实体化（单独一轮、可用 `field_index` 单测钉住），再做 thunk。
+## 9. 布局实体化已落地（0.507，分支 layout）
+
+**做了什么**（只做布局，不动 vtable/调用点/护栏）：
+
+- `ClassInfo::base_field_offsets`：基类 → 该基类字段块在子类布局里的**起始下标**；
+- 布局顺序 = `[layout_base 前缀] + [各非 layout base 的字段块（MRO 顺序追加）] + [本类声明]`；
+- `field()` / `field_index()` 解析进这些块（own-first：子类声明仍遮蔽基类同名，Python 语义），
+  `add_implicit_field` 不再为「基类已有的字段」造遮蔽槽；
+- 调试探针 `PYADAMAS_DUMP_LAYOUT=1`：类定义处打印 class/base/layout_base/base_fields、块起点、
+  每个字段的全局下标（默认关闭、零开销）。
+
+**阶段证据**（`class C(B, A)`，A.x / B.y；护栏临时短路）：
+
+```
+layout C base=B layout_base=B base_fields=1
+  block A -> start 1
+  field x -> 1 (block/implicit)
+cb.x = 1        # 属性访问仍正确
+cb.get() = 2    # CPython 是 1；本步不修 thunk，预期如此
+```
+
+即 `A.x` 在 C 里的下标从 **-1 变成 1**（= B 的字段数 + 0），块真的进了布局。
+
+**护栏仍是拒绝**：方法体里 `self.x` 仍按声明类布局算偏移，没有 delta/thunk 就必然读错，
+所以两个状态基类的类定义继续报错（不是静默错值）。
+
+**下一轮**（按依赖顺序）：
+1. 直接调用点 delta：目标方法所属类 ≠ 接收者静态类且是带字段的非 layout base 时，
+   插 `self += 8 * base_field_offsets[归属基类]`；
+2. vtable thunk：thunk 作为额外函数（`add self, delta` + 尾调实现）拿自己的 fidx，槽位填它；
+3. 同批改 `src/backend/vcall_inline.cpp` 的 `gen_guarded_vcall`（约 153 行起；`movq {imm*8}(%r11), %r11`
+   在 206 行、`leaq entry_ref(fn)` 在 229 行）与 `gen_guarded_vcall_direct`（267 行起、`movq {imm*8}`
+   在 299 行），按实现指针去重的分组逻辑在 208 行附近：thunk 是另一个入口，要么按 (class, base)
+   分组，要么守卫里比较 thunk 指针；
+4. `super()` 协作路径按目标实现所在基类加 delta。
