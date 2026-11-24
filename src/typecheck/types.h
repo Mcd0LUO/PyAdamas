@@ -336,6 +336,11 @@ struct MethodInfo {
     FuncInfoPtr sig;          // 含 self 的完整签名（方法体内 self 的类型来自它）
     FuncInfoPtr call_sig;     // 去掉 self 的调用签名（外部 obj.m(...) 按它查）
     FunctionDef* def = nullptr;  // 供降级阶段编译方法体
+    // 声明这个方法的类（0.508）。多继承下调用点要知道 delta 该按哪个基类的
+    // 字段块算：`recv_ty->cls->base_field_offsets[owner]`。裸指针，生命周期由
+    // TypeChecker::all_classes_ 保证（与 Type::cls 同一契约，用 shared_ptr 会成环）。
+    // 别名条目填**声明者**，不是别名所在的类。
+    const ClassInfo* owner = nullptr;
     int slot = -1;
     // 同一 (name, kind) 在不同模块里可能占了不同槽；导入类的接口
     // 会带完整别名表，vtable 填充时所有槽写同一个实现。

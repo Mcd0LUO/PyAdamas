@@ -932,7 +932,7 @@ void TypeChecker::classdef(ClassDef& c) {
             // 方法体检查复用这份签名，返回类型才会回填到同一个对象上
             func_infos_[&f] = m.sig;
             signature_defs_[m.sig.get()] = &f;
-            cls->methods.push_back(std::move(m));
+            m.owner = cls.get(), cls->methods.push_back(std::move(m));  // owner=声明类
         }
         cls->has_init = cls->method("__init__") != nullptr;
 
