@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.506] - 2026-11-25
+
+> feat(typecheck)：**布局实体化**——非 layout 基类的字段块真正进入子类布局（adjustor thunk 的第一步）。
+>
+> 0.505 的中期结论暴露了前提问题：`class C(B, A)`（B 有 `y`、A 有 `x`）里，**C 的布局根本没有 A 的字段块**
+>（`in_C = -1`），`self.x = 1` 反而走 `add_implicit_field` 新建了一个**遮蔽**的 C 字段——所以「调用点 `self += delta`」无从谈起。
+>
+> 本版把布局补上：
+> - `ClassInfo::base_field_offsets`（基类 → 该基类字段块在子类布局里的**起始下标**）；
+> - 布局顺序统一为 `[layout_base 前缀] + [各非 layout base 的字段块（MRO 顺序追加）] + [本类声明]`；
+> - `field()/field_index()` own-first：本类声明先查，再 base 链、再 layout_base 链；**同名遮蔽保留**（子类声明遮蔽基类，Python 语义）；
+> - `add_implicit_field` 能在 `field()` 里找到基类块里的字段 → 不再造遮蔽的隐式槽。
+>
+> **探针**（`PYADAMAS_DUMP_LAYOUT=1`）：`block A -> start 1`、`field x -> 1 (block/implicit)`——
+> `A.x` 在 C 里的下标从 **-1 变成 1**（B 的字段数 + 0）。
+> 护栏**保持生效**：两个状态基类的类定义继续明确拒绝（本步不修 thunk，方法体读基类字段仍会错，不能放行）。
+>
+> 阶段证据（临时短路护栏时）：`cb.x` = **1**（属性访问正确，写进 A 的块槽）、`cb.get()` = **2**（CPython 1 1）——
+> 后半正是下一步 thunk 要修的。
+>
+> 语料：628 标准库默认口径 **496/623 不降**；本仓库 **899 个 `.py`：781 通过**（780 + 新增的 `mi_layout_base.py`），零新拒绝；
+> 六形态与 CPython 逐字节一致；12 基准 asm 与 master 逐字节相同。
+>
+> 闸门：套件 **498** / difftest **468** / check_size **PASS**（`func.cpp` 正好 1200 行，后续改动要放 `mi_guard.cpp` 或 backend） / ctest 9/9。
 ## [0.505] - 2026-11-25
 
 > feat(typecheck)：**多继承的布局前缀选择**——「mixin 在前、状态基类在后」的写法现在正确且被允许。
