@@ -480,7 +480,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                         // 先挪到那个基类的字段块起点（调用点 delta，thunk 的直调形态）。
                         if (m->kind == MethodKind::Normal) {
                             VReg self = recv;
-                            if (m->owner && m->owner != recv_ty->cls) {
+                            if (m->owner && m->owner != recv_ty->cls && !callee->mi_thunk) {
                                 auto bo = recv_ty->cls->base_field_offsets.find(m->owner);
                                 if (bo != recv_ty->cls->base_field_offsets.end() && bo->second > 0) {
                                     Inst ad;

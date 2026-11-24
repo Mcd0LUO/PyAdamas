@@ -394,6 +394,9 @@ void Lowerer::lower_classdef(ClassDef& c) {
             if (need_class_obj) break;
         }
     }
+    // 多继承 adjustor thunk（0.509）：vtable 的继承槽已填好，把「带字段的非 layout
+    // 基类」的方法槽换成 thunk（self 先挪到该基类的字段块）。护栏与守卫都不动。
+    install_mi_thunks(ci, cid);
     if ((!opts_.module_symbol.empty() && !opts_.is_entry) || need_class_obj)
         compile_ctor_wrapper(c, ci, cid);
 

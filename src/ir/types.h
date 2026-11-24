@@ -210,6 +210,9 @@ struct IRFunction {
     std::string debug_name;
     std::vector<IRParam> params;
     TypePtr ret;
+    // 多继承 adjustor thunk（0.509）：self 已由 thunk 自己调整过，直调点不要再
+    // 加一次 delta（否则双重偏移）。
+    bool mi_thunk = false;
     // 局部槽位（含形参），下标即槽号。参数槽排在最前面，后端按这个
     // 顺序把寄存器 / 栈上的实参搬进来。
     std::vector<TypePtr> slot_ty;
