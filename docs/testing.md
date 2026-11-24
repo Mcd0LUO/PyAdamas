@@ -56,6 +56,7 @@ difftest 是提速主力（172s → 19s，9 倍）；套件只有 1.4 倍（单�
 ## 并发安全（多人同时跑时必读）
 
 1. difftest 必须独占：它用共享的 /tmp/pyadamas-diff-cases 和 modcache。两个 difftest 并发会互相污染，出假 timeout。checkall.sh 已内置 flock /tmp/pyadamas-difftest.lock，不需要手动加。
+   0.471 起脚本自身也兜了一层：首轮 DIFF/BUILDFAIL 的用例会单路复跑一次（20s → 90s 超时），复跑一致的记为「抖动」单独列出、不算失败；任一侧编不过则直接报 BUILDFAIL（旧版两侧都编不过会被判成一致，即「假绿」）。
 2. 套件用独立构建目录：checkall.sh 默认用 build/gfix；多人同时跑时给每个人传不同的 SUITE_BUILD_DIR（例如 SUITE_BUILD_DIR=build/gfix-gates）。
 3. 整个闸门串行化：如果多个人要跑完整闸门，用 flock 包住整条命令：
    ```bash

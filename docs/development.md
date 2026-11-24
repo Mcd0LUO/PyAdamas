@@ -128,7 +128,7 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
-`tests/run` 的 -O0/-O2 输出自差分由 `tools/difftest.sh` 负责：默认按 CPU 核数并行（`PYADAMAS_TEST_JOBS` 调并行度），`PYADAMAS_TEST_FILTER` 只跑匹配的用例，自动跳过 `*_perf`（打印计时的用例）；当前 440 个用例 / 0 不一致（0.470 闸门记录，8 路并行）。
+`tests/run` 的 -O0/-O2 输出自差分由 `tools/difftest.sh` 负责：默认按 CPU 核数并行（`PYADAMAS_TEST_JOBS` 调并行度），`PYADAMAS_TEST_FILTER` 只跑匹配的用例，自动跳过 `*_perf`（打印计时的用例）；当前 440 个用例 / 0 不一致（0.471 记录；默认并行，首轮不一致的用例会自动单路复跑并单独列出）。
 
 ### 性能 bench
 

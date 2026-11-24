@@ -34,7 +34,7 @@
 | 1 | **文档漂移收口**（并行：hy4flash-free 子代理，只改 `.md`） | 0.470 的文档改动还躺在工作区；`index.md` 的「当前状态 0.446 / 420 ran ok」、`testing.md` 的闸门表（仍算 LSP 冒烟）、`roadmap.md` 的「当前状态 0.300」与 5 文件超限清单、README 的验证表与「异常用 setjmp」、`compatibility.md`/`development.md` 的用例计数、`codegen.md` 的异常展开一节，全部落后 | 每个数字都能用页内给出的命令复现；`docs/index.md` 文档地图补齐（`big-landing.md`、`testing.md`、本页）；不新增未验证数字 |
 | 2 | **0.470 文档提交** | 与 #1 同批 `git add`，一次提交，避免版本号与文档分叉 | `CHANGELOG` 顶格版本 = `git log` 最新版本 = 0.470；提交后工作区干净 |
 | 3 | **pya-lsp 0.3.x 落地**（并行：LSP 子代理，独立仓库） | 该仓库有 791 行未提交改动（0.3.0 作用域感知补全 + 0.3.1 prepareRename/documentChanges），冒烟声称 276 条 | 本地构建 + 冒烟 ≥276 全过；CHANGELOG/README 同步；本地提交，不 push |
-| 4 | **difftest 假绿治理** | 默认 nproc 并行时 tarfile 组偶发超时假 DIFF，只能靠「8 路」口头纪律（HANDOFF §6.5） | 默认并行度下连续 3 次 440/0，或脚本自动降级并在失败时打印「疑似资源竞争」判据 |
+| 4 | ~~**difftest 假绿治理**~~ **已完成（0.471）** | 默认 nproc 并行时 tarfile 组偶发超时假 DIFF；两侧都编不过时还会被判「一致」（假绿） | 编译/运行分开记退出码 → BUILDFAIL；首轮不一致自动单路复跑（20s→90s），抖动单独列出不计失败。48 路连续 2 次 440/0 |
 
 ## 2. P1 —— 0.472–0.474：性能，一版一件事
 

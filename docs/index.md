@@ -103,7 +103,7 @@
 |---|---|---|
 | **一键闸门** | `bash tools/checkall.sh --full` | **全部 PASS**（8 项闸门，见 [testing.md](testing.md)） |
 | 运行用例 | `PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **469 ran ok，0 失败**（普通 + ASan 各一遍） |
-| 差分对拍 | `flock /tmp/pyadamas-difftest.lock env PYADAMAS_TEST_JOBS=8 bash tools/difftest.sh build/lead/pyadamas` | **440 个用例，0 个不一致**（8 路并行） |
+| 差分对拍 | `flock /tmp/pyadamas-difftest.lock bash tools/difftest.sh build/lead/pyadamas` | **440 个用例，0 个不一致**（0.471 起默认并行 + 首轮不一致自动单路复跑） |
 | 体积 | `bash tests/check_size.sh` | **仍失败**：`src/typecheck/typecheck.cpp` 1227、`src/cimport/cdecl_parse.cpp` 1271（>1200） |
 | 内存（**默认不跑**） | 见 [semantics-audit-playbook.md §13](semantics-audit-playbook.md) | 仅当改动触及 `runtime/` 内存路径或 lowering 所有权时**定点**跑，且用过滤器 + `JOBS=16` |
 

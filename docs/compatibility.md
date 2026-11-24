@@ -251,7 +251,7 @@ double 位模式，靠堆探针/RC kind 识别）；而 `list[float]` 的元素�
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 展开 / CFI | `tests/eh`、`tests/cfi/`、`tools/lsda_ref/` | z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42 | LSDA 字节布局、personality 判据、生成代码的栈展开 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
-| O0/O2 自差分 | `bash tools/difftest.sh` | 440 个用例（0.470 记录，8 路并行） | 优化遍引入静默算错（野指针、越界、丢实参）；0.210 的间接调用 bug 就是它抓到的 |
+| O0/O2 自差分 | `bash tools/difftest.sh` | 440 个用例（0.471 记录；默认并行，首轮不一致自动单路复跑） | 优化遍引入静默算错（野指针、越界、丢实参）；0.210 的间接调用 bug 就是它抓到的 |
 | ASan 全量 | `PYADAMAS_TEST_ASAN=1 bash tests/run_tests.sh` | 469 ran ok（0.470 记录） | 运行时内部的越界 / UAF / 双重释放（0.218 起 `rt_asan.o` 也插桩） |
 | 泄漏扫描 | `ASAN_OPTIONS=detect_leaks=1` + `PYADAMAS_RC_TRACE` / `PYADAMAS_EXC_TRACE` | **0 处 / 188 用例**（0.233 口径，当前 HEAD 未重跑） | 所有权转移断链；0.217 首次扫描 23 处，0.233 清零，0.234–0.242 保持 0 |
 | 随机程序差分 | `pyadamas build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 默认 840 个程序 | 语义漂移、边界错误 |
