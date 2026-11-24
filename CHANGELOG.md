@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.511] - 2026-11-25
+
+> feat(runtime)：`sys.getrecursionlimit()` / `sys.setrecursionlimit(n)`（接口表小件）；其余六项**判负**。
+>
+> - 声明式签名进 `stdlib/sigs/sys.pysig`；运行期两个小函数（`rt_math.c` + `RtFn` 零参/单参两组）；
+>   pyadamas 没有运行期递归限制，只保存/查询一个值（默认 1000，`set` 校验 `n >= 1`）——
+>   这样依赖它的代码行为与 CPython 一致；对拍 **1000 / 5000** 逐字节相同。
+>
+> **判负（逐项理由，避免下轮重试）**：
+> - `sys.getsizeof`：标量域分不清 int/float（CPython 28/24），容器尺寸是 CPython 实现细节（`str` 41+len、`list` 56+8n…），
+>   而我们的布局与 CPython 不同——**返回「CPython 尺寸」等于撒谎**，给假数字比不提供更糟；
+> - `re.subn`：现有 `pa_re_sub` 只返回结果串、没有匹配计数，要改引擎并新建 `tuple[str,int]` 的 RC 所有权；
+> - `operator.index/length_hint/setitem/delitem/methodcaller`：需要按静态类型分派的入口 / 新的通用下标写面 / 闭包工厂；
+> - `random.normalvariate`/`betavariate`：要逐位复刻 CPython 的算法链（Kinderman-Monahan 比值法、Marsaglia-Tsang 伽马），
+>   停了「分布对但值不同」的版本——那会让同种子对拍永远红；**逐字节复刻要单独立项**；
+> - `json.dump`/`json.load`：`dump` 要文件对象 write 协议；`load` 没有 sample 参数、返回类型在语义上无法静态定；
+> - `functools.total_ordering`：要编译期合成 `__le__/__gt__/__ge__`（FunctionDef 合成、槽位、与 dunder 校验交互），弄错就是静默错比较。
+>
+> 语料：628 默认口径 **499/623 不降**；本仓库 **900 个 `.py`：783 通过**、零新拒绝；12 基准 asm 与 master 逐字节相同。
+>
+> 闸门：套件 **500** / difftest **470** / check_size **PASS** / ctest 9/9。
 ## [0.510] - 2026-11-25
 
 > feat(lower)：**`super()` 进入非 layout 基类时的 self 调整**——多继承的四条路径（属性 / 直调 / 虚调用 / `super()`）现在全部正确。
