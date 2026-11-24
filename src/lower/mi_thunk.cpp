@@ -64,12 +64,35 @@ int Lowerer::build_mi_thunk(int target_fidx, int delta_bytes) {
 }
 
 void Lowerer::install_mi_thunks(const ClassInfoPtr& ci, int cid) {
-    if (ci->base_field_offsets.empty()) return;
     auto& vt = mod_.classes[static_cast<size_t>(cid)].vtable;
-    for (auto& entry : ci->base_field_offsets) {
+    // 沿 layout 链收集「带字段的非 layout 基类」→ 块起始下标：子类（单继承
+    // layout base）没有自己的 block 表，但它的前缀就是 layout base 的布局。
+    std::vector<std::pair<const ClassInfo*, int>> blocks;
+    for (const ClassInfo* k = ci.get(); k; k = k->layout_base) {
+        if (k != ci.get()) {
+            // 祖先已经给它自己的槽装过 thunk：直接复用那个 fidx。
+        }
+        for (auto& e : k->base_field_offsets)
+            if (e.second > 0) blocks.push_back({e.first, e.second});
+    }
+    if (blocks.empty()) return;
+    // layout 链上每个类已装的 thunk（槽 → fidx），给子类复用，避免重复生成。
+    std::unordered_map<int, int> reuse;
+    for (const ClassInfo* k = ci.get(); k; k = k->layout_base) {
+        auto kcid = class_ids_.find(k);
+        if (kcid == class_ids_.end()) continue;
+        const auto& kvt = mod_.classes[static_cast<size_t>(kcid->second)].vtable;
+        for (size_t s = 0; s < kvt.size() && s < vt.size(); ++s) {
+            int f = kvt[s];
+            if (f >= 0 && f < static_cast<int>(mod_.funcs.size()) &&
+                mod_.funcs[static_cast<size_t>(f)]->mi_thunk)
+                reuse[static_cast<int>(s)] = f;
+        }
+    }
+    for (auto& entry : blocks) {
         const ClassInfo* base = entry.first;
         int start = entry.second;
-        if (!base || start <= 0) continue;
+        if (!base) continue;
         auto bcid = class_ids_.find(base);
         if (bcid == class_ids_.end()) continue;
         const auto& bvt = mod_.classes[static_cast<size_t>(bcid->second)].vtable;
@@ -77,15 +100,30 @@ void Lowerer::install_mi_thunks(const ClassInfoPtr& ci, int cid) {
             if (m.kind != MethodKind::Normal || m.decorated || m.slot < 0) continue;
             if (m.slot >= static_cast<int>(vt.size())) continue;
             if (m.slot >= static_cast<int>(bvt.size())) continue;
+            int cur_f = vt[static_cast<size_t>(m.slot)];
+            if (cur_f >= 0 && cur_f < static_cast<int>(mod_.funcs.size()) &&
+                mod_.funcs[static_cast<size_t>(cur_f)]->mi_thunk)
+                continue;  // 已经是 thunk（本类或继承来的）
             int fidx = bvt[static_cast<size_t>(m.slot)];
             if (fidx < 0 || fidx >= static_cast<int>(mod_.funcs.size())) continue;
-            // 被更靠前的类覆盖过就跳过：这时槽里不是该基类的实现。
-            if (vt[static_cast<size_t>(m.slot)] != fidx) continue;
+            // 槽里必须是该基类的真实实现（没被更靠前的类覆盖）。祖先布局里
+            // 已经装过 thunk 的，先看 cur_f 是不是那个真实实现。
+            auto rit = reuse.find(m.slot);
+            if (rit != reuse.end()) {
+                vt[static_cast<size_t>(m.slot)] = rit->second;
+                continue;
+            }
+            if (std::getenv("PYADAMAS_SUPER_DEBUG"))
+                std::fprintf(stderr, "  inst %s.%s slot=%d cur=%d base=%d env=%d\n",
+                             base->name.c_str(), m.name.c_str(), m.slot, cur_f, fidx,
+                             fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size())
+                                 ? mod_.funcs[static_cast<size_t>(fidx)]->env_slot
+                                 : -99);
+            if (cur_f != fidx) continue;
             const IRFunction* callee = mod_.funcs[static_cast<size_t>(fidx)].get();
             if (!callee || callee->env_slot >= 0) continue;
             vt[static_cast<size_t>(m.slot)] = build_mi_thunk(fidx, 8 * start);
         }
     }
 }
-
 }  // namespace pyadamas
