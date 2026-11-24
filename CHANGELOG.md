@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.502] - 2026-11-25
+
+> fix(typecheck)：**修掉 `check --imports` 的 heap-use-after-free**（3.13）。根因不是栈溢出——是 `TypeChecker::check()` 的**重查轮**。
+>
+> **根因（ASan 实证）**：重查轮里 `*this = std::move(next)` 会析构旧的 `classes_`/`all_classes_`，释放**上一代 `ClassInfo`**；
+> 而 `Type::cls` 是裸指针，跨轮缓存 / 接口快照 / result-hint 重放仍可能引用它。随后编码接口时读已释放对象的 `std::string` 长度 →
+> `memcpy` 越界 → SIGSEGV。循环 import 只是把这条路径的触发概率放到最大（深 import 图 × 多轮重查）。
+> 实测 import 栈最深只有 19 层、`ctx.loading` 早有环检测——所以**「加 visited 集合」治不了这个崩溃**。
+>
+> **修法**（循环依赖保持合法，不靠拒绝）：
+> 1. `TypeChecker` 加 `retired_classes_`：重查轮结束前把上一代 `classes_`/`all_classes_` 转移进去，随 checker 析构——悬空裸指针变成有效对象；
+>    编码只读 `cls->name`/`qualname`，语义不变（asm 不变可证）。
+> 2. `enc_sig`/`enc_type` 加防御性递归保护：签名展开栈上重复 `FuncInfo` → 按 unknown 签名编码；类型编码深度上限 64，超出按 unknown 收口。
+>
+> **证据**：`sched.py`/`random.py`/`threading.py` 等 16 个原崩溃文件 rc 全部 ≤1（**0 个 139**）；
+> **628 文件 `--imports` 全量 623/623 全部正常完成**（通过或报类型错，无一崩溃）；`--imports` 通过数 **155 → 164/623（26.3%）**，
+> 之前那个「下界」注记已作废；`deps --json` 对同样文件明确报错（`cannot find module '_heapq'`）而不是崩。
+> 同一个 UAF 位于共享的 `TypeChecker::check()`，`build`/`deps` 走同一条路——这次修复对它们同样生效（只是 build 对这批文件先因类型错返回，没走到崩点）。
+> 12 基准 asm 抽查（`04_containers`/`09_class`/`19_comprehension`）与 master 逐字节相同。
+>
+> 闸门：套件 **496** / difftest **466** / check_size **PASS** / ctest 8/8（`pyadamas_check_imports` 新增「循环 import 必须终止（rc ≤ 1）」）。
 ## [0.501] - 2026-11-25
 
 > feat(typecheck)：**窄化的三类假阳性修掉**（walrus / `isinstance` / 模块全局条件 None）；`if xs:` 空容器的 -O0 崩溃**三档都不可复现**（判负）。
