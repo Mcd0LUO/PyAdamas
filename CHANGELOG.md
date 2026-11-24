@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.499] - 2026-11-25
+
+> feat(typecheck)：**`T | None` 真窄化** + 未判空使用的编译期诊断。
+>
+> 之前 `def f(x: int | None) -> int: return x + 1` 能过 check、运行时崩——`None` 在联合里被降解。
+> 现在支持：
+> 1. `if x is not None:` / `if x is None: ... else:` 两个分支；
+> 2. **提前返回**（`if x is None: return` 之后余下部分 x 非 None）；
+> 3. 真值判断 `if xs:`（可选容器）；
+> 4. `assert x is not None`；
+> 5. 短路 `x is not None and x.foo()`（`narrow_all` 收全部合取项）；
+> 6. 多层联合 `int | str | None`（只去掉 None）；
+> 7. 窄化后重新赋值能重新合并；附加：`while cur is not None` 循环体、`if self.x is not None` 属性窄化。
+>
+> **未判空即使用**（算术/排序比较/属性/下标）报：
+> `error: 'x' may be None here; check it first (if x is not None:) or use assert`；3 条 fail 用例钉住。
+>
+> **628 文件基线**（本机 CPython 3.14.4，本次实测 626 个 `.py`）：
+>
+> | 口径 | 通过 |
+> |---|---|
+> | 语法 | 621/626（99.2%） |
+> | 默认（本版） | **495/626（79.1%）** |
+> | 旧范式（`--no-imports --lenient-names`） | 500/626 |
+>
+> 相对 0.498 的默认口径（500/623 = 80.3%）**少 6 个文件**，全部是「未判空」诊断，根因分三类、逐例记录在
+> [docs/type-narrowing.md](type-narrowing.md)：① walrus `(n := x) is None` 后的窄化未做；② `isinstance` 窄化未做；
+> ③ 模块全局「先定义后初始化」的假阳性。**这是本版明确接受的代价**：诊断本身要抓的就是「可能为 None」，「宁可漏报」在这一条上让位于「别把 None 崩带进生产」。
+> 仓库内 552 个 `.py` 相对同版本基线**零新拒绝**（3 例是新增 fail 用例本身）；为了通过新诊断改了 1 个既有用例
+> （`tests/run/70_dict_get.py` 里 `d.get()` 之后补 `assert v is not None`）。
+>
+> **已知边界**：跨模块联合仍退化 unknown（接口不序列化成员表）；`isinstance`/walrus 窄化未做；
+> `unknown` 上的下标/方法不动；C 结构体指针的 `T | None` 不报（裸指针本来就可为 NULL，否则三例误杀）。
+>
+> 闸门：套件 **492** / difftest **462** / check_size **PASS** / ctest 8/8 / `--perf` warn=0。
 ## [0.498] - 2026-11-25
 
 > fix(frontend) + fix(runtime)：**类体里的方法别名**、**`unknown` 下标按运行期种类分派**；「局部变量丢类方法面」复核后**判负**。
