@@ -194,3 +194,36 @@ GUARD OK：抓到越界写
 | `runtime/rt_core.c` 的 `rc_alloc_core` / `pa_rc_dec_slow` / `rc_leaf_free` / `gc_free_body` / 5 个 `*_pool_put` | 分配与**所有**释放路径接钩子；调试版不复用池块 |
 | `CMakeLists.txt` 的 `pyadamas_rt_debug` | 用 `-DPYADAMAS_ALLOC_DEBUG=1 -O2 -g` 重编 runtime，合成 `rt_allocdbg.o` |
 | `src/driver/build.cpp` | 环境变量选择链接 `rt_allocdbg.o`；缺失时报错；工具链指纹并入调试版摘要 |
+
+## 9. 案例：保守 GC 模式的 heap-use-after-free（3.10，未修）
+
+`PYADAMAS_GC_CONSERVATIVE=1` 下 `tests/run/161_gc_conservative_equiv.py` 段错误。ASan 给出精确栈：
+
+```
+READ of size 8 at ... (heap-use-after-free)
+  #0 pa_rc_inc_fast            runtime/rt_internal.h:872
+  #1 pa_any_from_f64           runtime/rt_any.c:158
+  #2 pyadamas_fn_4churn_4      161_gc_conservative_equiv.py:38
+
+freed by:
+  #0 free
+  #1 gc_free_body              runtime/rt_core.c:3261
+  #2 gc_collect                runtime/rt_core.c:3431
+  #3 rc_alloc_core             runtime/rt_core.c:1852
+  #4 pa_list_new               runtime/rt_list.c:177
+```
+
+即：**分配触发的 gc_collect 回收了一个随后立刻被 `pa_any_from_f64` 增加 RC 的对象**。
+
+已排查：运行时**有**寄存器扫描（`gc_scan_registers` 用 `_setjmp` 扫 `jmp_buf`，见 `rt_core.c:2782`），
+保守模式也会退化成整帧扫描（`f->scan_mask && !gc_conservative` 为假时走全帧）。
+所以不是「没扫寄存器」这么简单，更可能是：
+
+- 保守扫描的**根集合**与实际存活引用不一致（例如某个中间对象只被「正在构造的容器」持有，而构造顺序让它在扫描点不可见）；
+- 或 `gc_collect` 在 `rc_alloc_core` 内部触发时，**当前分配中的对象**尚未挂上堆链/索引，却被当成不可达。
+
+下一步建议：在 `gc_free_body` 里打印被释放对象的 kind/地址，与 `pa_any_from_f64` 里那个指针比对，确认是不是「同一个对象的 RC 头被当成 float 盒」；
+再把 `gc_collect` 的触发点从 `rc_alloc_core` 内部挪到「分配完成、对象已挂链之后」，看崩溃是否消失（这是最小可疑点）。
+
+现状：**模式是 opt-in，默认关闭**；在修好前不要用它做等价性验证（`161_gc_conservative_equiv` 现在是已知红）。
+
