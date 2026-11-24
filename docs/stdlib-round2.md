@@ -201,11 +201,11 @@ re.compile("abc\\Z").match("xabc")         # True（CPython False）
 
 | 用例 | 覆盖 | 结果 |
 |------|------|------|
-| 570_fnmatch_anchor.py | 15 个模式 × 9 个名字的 `filter` + `fnmatchcase` 矩阵 | 逐字节一致 |
-| 571_urllib_quote_edges.py | `quote`/`quote_plus` 14 组输入、`unquote`/`unquote_plus` 往返、`quote_from_bytes`（含 0x00/0x80/0xff）、`unquote_to_bytes`（截断 `%4`、孤立 `%`） | 逐字节一致 |
-| 572_shlex_quote_roundtrip.py | 12 个词的 `quote` → `split` 往返、`join`、3 个未闭合引号/结尾反斜杠的错误文本 | 逐字节一致 |
-| 573_csv_quoting.py | 默认 dialect、自定义 `delimiter`/`quotechar`/`lineterminator`、`QUOTE_ALL`、`\r\n` 与空行解析、`delimiter="\|"` | 逐字节一致 |
-| 574_glob_match_escape.py | 固定目录树上的 12 个模式 + `**` 递归 + `escape` | 逐字节一致（比集合前先 `sorted()`，见下） |
+| fnmatch_anchor.py | 15 个模式 × 9 个名字的 `filter` + `fnmatchcase` 矩阵 | 逐字节一致 |
+| urllib_quote_edges.py | `quote`/`quote_plus` 14 组输入、`unquote`/`unquote_plus` 往返、`quote_from_bytes`（含 0x00/0x80/0xff）、`unquote_to_bytes`（截断 `%4`、孤立 `%`） | 逐字节一致 |
+| shlex_quote_roundtrip.py | 12 个词的 `quote` → `split` 往返、`join`、3 个未闭合引号/结尾反斜杠的错误文本 | 逐字节一致 |
+| csv_quoting.py | 默认 dialect、自定义 `delimiter`/`quotechar`/`lineterminator`、`QUOTE_ALL`、`\r\n` 与空行解析、`delimiter="\|"` | 逐字节一致 |
+| glob_match_escape.py | 固定目录树上的 12 个模式 + `**` 递归 + `escape` | 逐字节一致（比集合前先 `sorted()`，见下） |
 
 ### 4.2 fnmatch 穷举/随机差分（证明改写是保语义的）
 
