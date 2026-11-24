@@ -149,19 +149,37 @@ def _sqrtprod(x: float, y: float) -> float:
 
 
 def _rank(data: list[float], start: float) -> list[float]:
-    """平均并列秩（CPython _rank 的 ties='average' 口径）。"""
+    """平均并列秩（CPython _rank 的 ties='average' 口径）。
+
+    原实现逐对比较是 O(n^2)；这里对有序副本做两次二分，O(n log n)。
+    比较口径不变（< 与 == 都保持原序），并列平均秩公式不变。
+    """
     n = len(data)
+    s = sorted(data)
     out: list[float] = []
     for i in range(n):
         v = data[i]
-        less = 0
-        equal = 0
-        for j in range(n):
-            if data[j] < v:
-                less += 1
-            elif data[j] == v:
-                equal += 1
-        rank = start - 1.0 + less + (equal + 1.0) / 2.0
+        # 第一个 >= v 的位置：小于 v 的元素数
+        lo: int = 0
+        hi: int = n
+        while lo < hi:
+            mid: int = (lo + hi) // 2
+            if s[mid] < v:
+                lo = mid + 1
+            else:
+                hi = mid
+        less: int = lo
+        # 第一个 > v 的位置：less + equal
+        lo = less
+        hi = n
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if v < s[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        equal: int = lo - less
+        rank: float = start - 1.0 + less + (equal + 1.0) / 2.0
         out.append(rank)
     return out
 
