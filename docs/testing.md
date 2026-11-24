@@ -38,8 +38,17 @@ bash tools/checkall.sh --write-baseline  # !! 人工确认后才用：覆盖基�
 
 ## 并行度
 
-机器 48 核，但默认并行度是 16（上限 16），避免把机器打满影响别人。
-用 --jobs N 或 PYADAMAS_TEST_JOBS=N 覆盖（脚本会把 >16 的值压到 16）。
+机器 48 核。**三个入口的默认值并不相同**：
+
+| 入口 | 默认并行度 | 上限 |
+|---|---|---|
+| `tools/checkall.sh` | **16**（`--jobs N` 或 `PYADAMAS_TEST_JOBS` 覆盖） | 16（超出会被压回 16 并警告） |
+| 它内部的 cmake 构建 | `BUILD_JOBS=4` | 无 |
+| `tests/run_tests.sh`（直接跑） | **nproc**（本机 48） | 无 |
+| `tools/difftest.sh`（直接跑） | **nproc**（本机 48） | 无 |
+
+checkall 会把 `PYADAMAS_TEST_JOBS=$JOBS` 注入两个子脚本，所以走 checkall 时三者统一是 16。
+想在所有入口都用一个值，就导出 `PYADAMAS_TEST_JOBS`——三个脚本都认它。
 
 实测（2026-11-23；当时套件 420 例、difftest 392 例，当前为 469 / 440，耗时同量级、未在当前 HEAD 复测）：
 
