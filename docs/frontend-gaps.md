@@ -235,3 +235,23 @@ sample)` 的 sample 决定返回类型，`json.load`/`dump` 涉及文件流，�
 新通过——本轮的补表只影响 `--imports`/build 模式，默认 `check` 不解析模块成员）。
 
 装饰器保留签名的两次尝试**都**会让标准库 500 → 496（4 个文件），证据见 §8.3。
+### 3.1 0.506 复测：装饰器建模 / 协议标注 / 可变参数
+
+**可变参数（已满足，无改动）**：`types` 显示未标注的是 `func(*unknown)`、标注的是 `func(*int)`，
+函数体里 `*a` 声明为 `tuple[元素, ...]`（`len(a)`、`a[0]` 有边界），`**kw` 声明为
+`dict[str, 元素]`。三条要求都已成立。
+
+**协议标注（判负，已回退）**：试过「签名保持 unknown（任何可迭代实参都放行）+ 函数体参数按
+`list[T]` 声明（`for x in seq` / `seq[i]` 拿到 T）」。类型检查层是成功的（`s: str = v` 会报
+`annotated as 'str' but assigned 'int'`），但**降级层跟着变了**：`sum_iter({6, 7})` 与生成器
+实参走 list 快速路径，实测输出 `0 0`（CPython `13 6`）——静默错值，比 unknown 更糟。
+结论：函数体内参数类型不是纯类型检查层的量，它会改变 IR/降级。要做需要独立的「协议类型」
+（typecheck 侧有元素类型、lowering 侧按 unknown 处理），或只给 `for`/下标提供元素类型而不改
+容器表示。已在 0.506 回退，接口/语料均无改动。
+
+**装饰器建模（未做）**：0.505 上这 4 个文件（`asyncio/tasks.py`、`importlib/resources/_common.py`、
+`pkgutil.py`、`test/support/import_helper.py`）`check` **已经全部通过** —— 未知装饰器 → 符号
+unknown，全程放宽。0.500 的判负结论仍成立（保留签名会误杀 `@contextmanager`/`@singledispatch`/
+`@types.coroutine`）。要真正建模需要三个合成包装类：CM（`__enter__` 返回原生成器的 yield 类型、
+`__exit__`）、singledispatch 包装（`register` + `__call__`）、`types.coroutine`（awaitable），
+本轮没有落地。
