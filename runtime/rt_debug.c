@@ -98,7 +98,21 @@ void pa_print_traceback(void) {
     for (int i = w.n - 1; i >= 0; --i) {
         const char *file, *func;
         int32_t line;
-        if (pa_debug_lookup_pc(w.pcs[i], &file, &func, &line))
+        // 0.494: 返回地址归因用 ip-1（与抛出点捕获同口径）。LdbgEnd 哨兵紧跟
+        // call 指令时，ip 正好落在哨兵上（func == NULL → 查不到），旧写法只能
+        // 回落到函数起点项，traceback 就显示 line 0。
+        // 先试 ip（内联后 ip 正好命中内联点的 .Ldbg，函数名与行号都准），
+        // 再退回 ip-1（LdbgEnd 哨兵紧跟 call 时 ip 落在哨兵上）。
+        const char *file2, *func2;
+        int32_t line2 = 0;
+        if (pa_debug_lookup_pc(w.pcs[i], &file2, &func2, &line2) && line2 > 0) {
+            file = file2;
+            func = func2;
+            line = line2;
+            fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, (int)line, func);
+            continue;
+        }
+        if (pa_debug_lookup_pc(w.pcs[i] - 1, &file, &func, &line))
             fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, (int)line, func);
     }
 }

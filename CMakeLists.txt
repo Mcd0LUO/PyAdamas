@@ -506,6 +506,18 @@ set_tests_properties(pyadamas_check_imports PROPERTIES
   TIMEOUT 300
 )
 
+# traceback 行号（0.494）：未捕获异常的回溯必须给真实行号（以前是 line 0）。
+# 回溯打在 stderr，tests/run 的 expect 只比 stdout，所以单独成一个脚本用例。
+add_test(
+  NAME pyadamas_traceback_lines
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/traceback_lines.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_traceback_lines PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  TIMEOUT 300
+)
+
 add_custom_target(clean-modcache
   COMMAND ${CMAKE_COMMAND} -E remove_directory "${PYADAMAS_MODCACHE_DIR}"
   COMMENT "Removing pyadamas module cache"

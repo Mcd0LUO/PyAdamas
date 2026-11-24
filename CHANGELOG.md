@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.494] - 2026-11-24
+
+> fix(runtime)：**未捕获异常的 traceback 行号**（以前一律 `line 0`）。
+>
+> 根因不是「合成指令没行号」（0.490 的判断），而是**返回地址归因**：`.LdbgEnd` 哨兵紧跟在
+> `raise` 的调用指令之后，回溯用 `ip` 查表时正好落在哨兵上（`func == NULL` → 查不到），
+> 于是回落到函数起点项（行 0）。
+>
+> 修法（只动 `runtime/rt_debug.c` 的查表，不改 codegen、不增指令）：先按 `ip` 查
+> （内联点的 `.Ldbg`，函数名与行号都准），再退回 `ip-1`（call 恰好是某行最后一条指令的口径）。
+>
+> 效果：`raise` 在 `inner` 第 8 行 → 回溯显示 `line 8`（内联后函数名是 `__pa_main`）；
+> 以前是 `line 0`。回归 `tests/traceback_lines.sh`（ctest `pyadamas_traceback_lines`，断言
+> `line 8` 且**不**出现 `line 0`；回溯打 stderr，`tests/run` 的 expect 只比 stdout，所以单独成脚本）。
+>
+> **边界（不修，写进 [docs/compatibility.md](docs/compatibility.md)）**：回溯帧数 = 物理调用栈。
+> `-O2` 把小函数内联（实测带循环的 `inner`/`outer` 也被内联），物理栈只剩一帧 → 默认只显示一帧；
+> `-O0` 下是完整链（实测 3 帧）。要 CPython 的逻辑帧，得「不内联会抛的函数」或「抛点记录 IR 调用链」，
+> 都是独立决策。列号与 `__traceback__` 维持现状（后者仍是显式「未实现」错误）。
 ## [0.493] - 2026-11-24
 
 > fix(runtime)：**`re.match` 不锚定**（语义 bug：含元字符的模式下 `match` 等价于 `search`）。
@@ -13,14 +32,14 @@
 > `memcmp` 快路径，所以 `re.match("abc", "xabc")` 碰巧是对的，掩盖了这个 bug。
 > 修法：`mode != 0` 时只判断起点首字节是否命中集合，**不推进**（不命中直接返回 0）。
 >
-> 复核对拍（`tests/run/573_re_anchors.py`，16 个模式 × 14 个主语 × match/search/fullmatch
+> 复核对拍（`tests/run/re_anchors.py`，16 个模式 × 14 个主语 × match/search/fullmatch
 > = 224 行）：与 CPython **3.14.4 逐字节相同**，覆盖 `.`/`[]`/`*`/`+`/`{m,n}`/`\A`/`\Z`/`\z`/
 > `^`/`$`/`|`/分组。`\A`/`\Z`/`\z` 本来就是锚点（`parse_escape` 已实现，本轮复核确认，没有代码改动）；
 > `search` 语义不变。
 >
 > 边界：`Pattern.match(s, pos[, endpos])` 的 `pos`/`endpos` **仍不支持**（`Pattern.*` 只收 1 个参数，
 > 编译期报错），写进 [docs/compatibility.md](docs/compatibility.md)。`fnmatch` 编译期前置 `^` + `end()`
-> 的绕法仍然正确，未改动（`tests/run/572_fnmatch_anchor.py`、`539_fnmatch_accept.py` 全过）。
+> 的绕法仍然正确，未改动（`tests/run/fnmatch_anchor.py`、`539_fnmatch_accept.py` 全过）。
 ## [0.492] - 2026-11-24
 
 > perf(stdlib)：**标准库第二轮全量扫描**——54 个模块逐个过（`docs/stdlib-round2.md`），12 个文件改动，5 个可测收益。
@@ -41,7 +60,7 @@
 >
 > **新增资产**：`tests/bench/cases` 17 → **38**（tarfile/zipfile/configparser/argparse/difflib/pprint/csv/
 > urllib.parse/glob/shlex/calendar/shutil/io/queue/struct/zlib/gzip/traceback/secrets/copy/fnmatch，全部 <1s、
-> 确定性、`--filter` 可单跑）；5 个 CPython 对拍用例（572–576）。
+> 确定性、`--filter` 可单跑）；5 个 CPython 对拍用例（`fnmatch_anchor` / `urllib_quote_edges` / `shlex_quote_roundtrip` / `csv_quoting` / `glob_match_escape`）。
 >
 > **判负/跳过**（根因见文档 §2/§6）：`io.StringIO.write` 每次 O(n)（str 不可变，要可变缓冲）、
 > `functools.cmp_to_key` O(N³)（`sorted` 不支持 key 对象比较）、zlib 包装层已到顶（0.85–1.2×）、

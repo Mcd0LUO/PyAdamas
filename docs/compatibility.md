@@ -346,10 +346,14 @@ Traceback (most recent call last):
 pyadamas: uncaught ValueError: boom
 ```
 
-- **可修、本轮未做（下一步）**：行号。codegen 已有「行变化处放 `.Ldbg` 标签 + `.loc 1 <line>`」的
-  机制（`backend/ops.cpp::set_loc`，只在 `in.line > 0` 时登记），但异常边/清理路径上的**合成指令
-  没带行号**，回溯只能命中函数起点项（line 0），调用者帧也因此查不到。下一步：给异常边/raise 点
-  的合成指令补 `in.line = cur_line_`，再加一条「未捕获异常打印 2 帧且行号正确」的回归。
+- **行号已修（0.494）**：未捕获回溯现在给出**抛出点的真实行号**（以前一律 `line 0`）。根因不是
+  合成指令没行号，而是**返回地址归因**：`.LdbgEnd` 哨兵紧跟 `raise` 的调用指令，回溯用 `ip` 查表
+  时正好落在哨兵上（`func == NULL` → 查不到），只能回落到函数起点项（行 0）。改成先试 `ip`
+  （内联点的 `.Ldbg`，函数名与行号都准）、再退回 `ip-1`。回归：`tests/traceback_lines.sh`
+  （ctest `pyadamas_traceback_lines`，断言 `line 8` 且**不**出现 `line 0`）。
+- **帧数仍受限（不修的边界）**：回溯的帧数等于**物理**调用栈。`-O2` 会把小函数内联（实测连带循环的
+  `inner`/`outer` 都被内联），物理栈只剩一帧，所以默认只显示一帧；`-O0` 下能显示完整链（实测 3 帧）。
+  要 CPython 那样的逻辑帧，得「不内联会抛的函数」或「抛点记录 IR 层调用链」，都是独立决策，本轮不做。
 - **本轮不修**：列号（`.loc` 只写行号，要扩成 `.loc file line column` 并给出 DWARF 语句程序）；
   `__traceback__`（要把 `PyAdamasTraceFrame` 链暴露成 Python 对象；维持显式「未实现」错误，
   比静默返回 None 好）。
