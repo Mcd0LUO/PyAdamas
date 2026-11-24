@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.515] - 2026-11-25
+
+> feat(runtime)：**`random` 的六个分布函数，与 CPython 3.14.4 逐字节一致**（120/120）。
+>
+> 之前判负的理由是「要复刻算法链」，但前提条件其实已经具备：**`random()` 序列本身逐位相同**（`seed(12345)` 前 5 个值与 CPython 全同，
+>`randbytes` 早前已验证）。所以只要公式逐行照抄，结果就逐位相同——不需要任何近似。
+>
+> | 函数 | 要点 |
+> |---|---|
+> | `normalvariate(mu, sigma)` | Kinderman-Monahan；注意新版是 `zz = z*z/4.0`（旧版没有 `/4.0`） |
+> | `gammavariate(alpha, beta)` | 三分支逐行照抄：`alpha>1` 的 Cheng（含 `1e-7<u1<0.9999999` 拒绝采样、`r+SG-4.5z>=0 \|\| r>=log z` 接受条件）、`alpha==1`、`alpha<1` 的 Kennedy-Gentle |
+> | `betavariate` / `lognormvariate` / `paretovariate` / `weibullvariate` | 照抄（`if y:` 才除、`exp(normalvariate(...))`、单抽/幂运算） |
+>
+> 常数用 CPython import 期算出的 double 字面值：`NV_MAGICCONST = 1.7155277699214135`、`SG_MAGICCONST = 2.504077396776274`、
+>`LOG4 = 1.3862943611198906`、`e = 2.718281828459045`。
+>
+> 对拍（`tests/run/random_distributions.py`）：6 组 × 20 个值、每组各自 `seed(12345)`，**120/120 逐字节相同**；
+>边界 `gammavariate(0, 1)`/`gammavariate(1, 0)` 的 `ValueError: gammavariate: alpha and beta must be > 0.0` 消息逐字一致。
+>
+> 接线：`RtFn::RandG*` 六个 + `rtfn_names` + `call_rt` 编组（两个 f64 实参组、单 f64 实参组）+ `stdlib/sigs/random.pysig`（`@native`）。
+>
+> ASan 套件 **504 ran ok / 0 失败**；628 默认口径 **501/623 不降**；本仓库 **905 个 `.py`：787 通过**、零新拒绝；
+>12 基准 asm 与 master 逐字节相同。闸门：套件 **504** / difftest **474** / check_size **PASS** / ctest 9/9。
 ## [0.514] - 2026-11-25
 
 > fix(typecheck)：**全 None 列表字面量按 `list[unknown]` 推断**——消掉窄化剩下的两个假阳性。
