@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.479] - 2026-11-24
+
+> 收尾（§8.2-1）：**向量化缺口定论 —— 剩余 7 个 0 触发基准不再做，负结论归档**。
+> 本版无代码改动；`docs/vectorization-coverage.md` 增加「当前状态」块与 §10 定论。
+>
+> **先修正事实**：路线图写的「8 个基准 0 触发」是 0.423 的口径。当前实测（VECT=0 → VECT=1
+> 的 `instructions:u`，`build/lead/pyadamas build -O2 --rebuild`）：
+>
+> | 基准 | 指令数 off → on | 变化 | 路径 |
+> |---|---|---|---|
+> | matmul | 76,381,175 → 10,291,764 | -86.5% | 通用（AVX2 4-lane） |
+> | spectral_norm | 234,860,891 → 94,916,852 | -59.6% | 通用 2-lane |
+> | sieve | 33,044,332 → 15,910,760 | -51.9% | 通用 2-lane |
+> | nbody | 199,420,323 → 109,319,750 | -45.2% | 通用 2-lane |
+> | mandelbrot | 69,589,634 → 44,359,636 | **-36.3%** | **masked**（asm 里 10 条 masked 标记） |
+> | collatz/fannkuch/fasta/nqueens/wordfreq/binary_trees/fib | 0.0% | 0 标记 | — |
+>
+> 即 **5/12 已向量化、7/12 仍 0**：mandelbrot 已被 `backend/masked.cpp`（masked divergence：
+> 外层独立迭代 + 内层数据依赖早退）覆盖，题目三条候选里的「masked」**早已兑现**。
+>
+> 定论（逐条对账，详见 vectorization-coverage.md §10）：
+> 1. **masked**：已落地并拿到 mandelbrot -36.3%；剩下唯一的 masked 候选 collatz 需要的是
+>    「先把 `steps` 内联进外层循环 + 新的 masked **int** 发射器」，不是放宽判据。发散实测
+>    （N=100k）：`steps` 均值 107.5 / 最大 350、相邻配对 max/mean = 0.61 → 掩码后迭代数 0.30×，
+>    天花板约 2×，但代价是 mask 框架的第二个特化，与「删特化」方向相反。
+> 2. **嵌套循环**：唯一名副其实的嵌套（mandelbrot 外层 `for x` + 内层 `while`）已由 masked
+>    整块向量化；matmul/spectral_norm/nbody 的收益本来就在内层 → 无增量。
+> 3. **调用屏障**：fasta（bb8 一条块 10 处调用/存储）、wordfreq（bb22 11 处）、nqueens（递归）、
+>    sieve 初始化（append）的调用**就是工作量本身** → 零收益。fannkuch trip≤8、binary_trees/fib
+>    0 个循环块，早已判死。
+>
+> 所以「实现收益最大的一个」= 实现 masked int + 内联，估计只覆盖 collatz 一个基准（≤2×，
+> 占 12 基准的 1/12），而风险是静默算错（0.314/0.383 的教训）。**判负，不立项**；
+> 未来若要重启，前置清单写在 §10.3（先做泛化内联，再谈 masked int，且必须有发散守卫）。
 ## [0.478] - 2026-11-24
 
 > perf(build)：**整程序产物缓存**——同源码 + 同开关 + 同工具链的重复 `build`/`run` 不再跑 `as`/`ld`。

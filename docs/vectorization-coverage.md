@@ -1,3 +1,32 @@
+# 2026-11-24 收尾更新（0.479）：8 个 0 触发 → **7 个**，masked 已落地
+
+> 本文 §1–§9 是 0.418/0.423 的诊断存档（结论按当时口径有效）。**当前状态以本节为准**：
+>
+> | 基准 | 向量化 | VECT=0 → VECT=1 指令数 | 路径 |
+> |---|---|---|---|
+> | matmul | ✅ | 76,381,175 → 10,291,764（**−86.5%**） | 通用（AVX2 4-lane） |
+> | spectral_norm | ✅ | 234,860,891 → 94,916,852（**−59.6%**） | 通用 2-lane |
+> | sieve | ✅ | 33,044,332 → 15,910,760（**−51.9%**） | 通用 2-lane |
+> | nbody | ✅ | 199,420,323 → 109,319,750（**−45.2%**） | 通用 2-lane |
+> | mandelbrot | ✅（**0.4xx 新增**） | 69,589,634 → 44,359,636（**−36.3%**） | **masked**（10 条标记） |
+> | collatz / fannkuch / fasta / nqueens / wordfreq / binary_trees / fib | ❌ 0 标记 | 0.0% | — |
+>
+> 即 **5/12 已向量化、7/12 仍 0 触发**（0.423 时是 4/12、8/12）。mandelbrot 由
+> `backend/masked.cpp`（masked divergence 向量化：外层独立迭代 + 内层数据依赖早退）覆盖，
+> 本文 §2/§4/§6 里「mandelbrot 需要 masked」那条已经**兑现**。
+>
+> 复现：
+>
+> ```bash
+> for c in mandelbrot matmul spectral_norm; do
+>   PYADAMAS_VECT=0 build/lead/pyadamas build -O2 --rebuild -o /tmp/v0 bench/compare/$c.py
+>   build/lead/pyadamas build -O2 --rebuild -o /tmp/v1 bench/compare/$c.py
+>   perf stat -e instructions:u /tmp/v1 2>&1 | grep instructions   # 与 /tmp/v0 比
+>   build/lead/pyadamas asm -O2 bench/compare/$c.py | grep -c 'masked\|VECT generic loop'
+> done
+> ```
+>
+> 收尾结论（本轮不做新能力）见 §10。
 # 向量化覆盖率：0 触发基准的阻塞点清单
 
 > 2026-11-23（0.418 归档；**0.423 更新**）。实测环境：默认管线（`PYADAMAS_VECT=1`、`PYADAMAS_SIMD` 关）。
@@ -270,3 +299,42 @@ build/lead/pyadamas ir -O2 bench/compare/<c>.py
   同文档 §2、§4 P0–P5；
 - 特化模板与通用的关系：同文档 §4 P4、[simd-vectorization-design.md](simd-vectorization-design.md)；
 - 通用浮点路径的长远方向（nbody 为什么还慢 2×）：见 [optimization-roadmap.md](optimization-roadmap.md)。
+
+## 10. 收尾定论（0.479）：剩余 7 个不再做，负结论归档
+
+题目给的三条候选（masked / 嵌套 / 调用屏障）逐条对账：
+
+| 候选 | 当前状态 | 结论 |
+|---|---|---|
+| **masked / early-exit** | **已落地**（`backend/masked.cpp`），覆盖 mandelbrot（−36.3%） | 兑现；不再算待办 |
+| **嵌套循环** | mandelbrot 的外层正是被 masked 路径整块向量化的（`masked.cpp` 的「外层独立迭代 + 内层早退」）；matmul/spectral_norm/nbody 的内层已由通用路径覆盖 | 无剩余收益（外层向量化需要内层可向量，内层已是数据依赖或已覆盖） |
+| **调用屏障 / 部分向量化** | fasta/wordfreq/nqueens/sieve-init 的体内调用**就是 work 本身** | 零收益 |
+
+### 10.1 剩余 7 个的当前阻塞与「要动哪一层」
+
+| 基准 | 体内实测（`ir` 块内 call/index.set 计数） | 还缺的能力 | 为什么不做 |
+|---|---|---|---|
+| collatz | 外层次调用 + `steps` 内 `while n != 1` 与 if/else | ①把 `steps` 内联进外层循环；②新的 **masked int** 发射器（逐 lane `n` + 条件选择 + 掩码计数），现有 masked 只认 float 状态 | 发散分析（N=100k，`steps` 1..N）：均值 107.5、最大 350，**相邻配对 max/mean = 0.61**，即 2-lane 掩码后迭代数降到标量的 0.30 —— 天花板存在（~2×），但要跨「内联 + 新发射器 + 逐 lane 状态」三层，属于 mask 框架的**第二个特化**，与「删特化」方向相反 |
+| nqueens | `place` 体内 `call.direct`（自身递归）+ 6×`index.set` | 递归不可向量化（自我调用） | 结构上不可能 |
+| fasta | `bb8` 一条块里 10 处调用/存储（RNG + `str` 拼接 + append） | 调用屏障 | 调用即工作 |
+| wordfreq | `bb22` 11 处调用（`pa_dict_contains`/`str` 拼接） | 调用屏障 | 调用即工作 |
+| fannkuch | trip count ≤ 8，翻转循环数据依赖 + 双归纳变量 | — | 2-lane 守卫+标量尾固定开销就吃掉收益（§4 已判） |
+| binary_trees / fib | **0 个循环块**（纯递归） | — | 永远不会有触发 |
+
+### 10.2 为什么不实现「收益最大的一个」
+
+1. **masked 已经是「收益最大的一个」，而且已经做了**：它把 mandelbrot 从 0 触发变成 −36.3%。
+   剩下唯一的 masked 候选是 collatz，而它需要的是「masked int + 先把被调函数内联」，不是放宽判据。
+2. **嵌套循环没有独立收益**：唯一名副其实的嵌套是 mandelbrot（外层 `for x` + 内层 `while`），
+   已被 masked 整块向量化；其它三个已向量化基准的收益本来就在内层。
+3. **调用屏障对剩余 4 个是零**：fasta/wordfreq 的 append/dict、nqueens 的递归，调用就是工作量。
+4. **代价**：masked int 发射器要动 `backend/masked.cpp` 的整块形状匹配 + 新 packed 整数序列 +
+   逐 lane 计数归约；历史教训是「静默算错」比慢更贵（0.314/0.383 多次栽在这里）。
+   按 §10.1 的天花板（collatz ~2×，占 12 基准的 1/12），**投入产出不成立**。
+
+### 10.3 如果将来还要继续（前置条件清单）
+
+- 内联：`steps`/`energy` 这类「外层计数循环里调纯函数」的形态先由 opt 内联掉（不是向量化的工作）；
+- masked int：逐 lane 整数状态 + `pcmpeqd` 掩码 + `psubq` 掩码计数 + `movmskpd` 全收敛退出；
+- **发散守卫**：进入 masked 前用「相邻配对 max/mean」不可得，只能保守限「内层迭代上界小且体短」；
+- 落地顺序建议：先做泛化内联（对 collatz/fannkuch 都有益且与向量化解耦），再谈 masked int。
