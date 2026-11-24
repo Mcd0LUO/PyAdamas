@@ -514,6 +514,11 @@ private:
     // 选出 layout base（MRO 顺序第一个有字段的基类）并设置 base_fields。
     void set_layout_base(ClassInfo& cls, ClassInfo* base,
                          const std::vector<ClassInfo*>& extra_bases);
+    // 把非 layout base 的字段块追加进子类布局，并记 base_field_offsets（0.506）。
+    void materialize_base_fields(ClassInfo& cls, ClassInfo* base,
+                                 const std::vector<ClassInfo*>& extra_bases);
+    // PYADAMAS_DUMP_LAYOUT=1 时打印类布局（阶段验证用，默认关闭、零开销）。
+    void dump_layout(const ClassDef& c, const ClassInfo& cls);
     // 接收者是不是类本身（`C.x` / @classmethod 里的 `cls.x`），而不是实例
     bool is_class_receiver(const Attribute& a);
     // 裸名字是不是类本身（构造）而不是装着实例的变量

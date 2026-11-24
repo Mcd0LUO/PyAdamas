@@ -417,7 +417,12 @@ struct ClassInfo {
     // 偏移是对的 —— 「mixin 在前、状态基类在后」因此不需要 adjustor thunk。
     // null = 没有任何基类带字段（无前缀）。
     ClassInfo* layout_base = nullptr;
-    std::vector<FieldInfo> fields;    // 只含本类声明的字段
+    // 多继承「布局实体化」（0.506）：非 layout base 的字段块被**追加**进
+    // 子类布局，这里记「基类 → 该块在子类布局里的起始下标」。有了它，
+    // `field()/field_index()` 能解析进基类块，方法体读 self.x 才不会落到
+    // 遮蔽的隐式字段上（thunk 的 delta 也从这里取，见 docs/mi-layout.md §8）。
+    std::unordered_map<const ClassInfo*, int> base_field_offsets;
+    std::vector<FieldInfo> fields;    // 本类声明的字段 + 追加进布局的基类块
     std::vector<MethodInfo> methods;  // 只含本类声明的方法（含属性访问器）
     std::vector<ClassAttrInfo> class_attrs;  // 只含本类声明的类属性
     // 通过本类给「继承来的」类属性赋过值的名字。Python 里这会让本类从

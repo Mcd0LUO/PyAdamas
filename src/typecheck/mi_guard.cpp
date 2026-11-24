@@ -81,4 +81,48 @@ void TypeChecker::check_mi_layout(const ClassDef& c, const ClassInfo* self, Clas
     }
 }
 
+// 布局实体化（0.506）：把每个带字段的非 layout base 的字段块按 MRO 顺序追加进
+// 子类布局。布局布局 = [layout_base 的前缀] + [各非 layout base 的块] + [本类声明]。
+// 记录每个块在子类布局里的起始下标（thunk 的 delta 与 field_index 都靠它）。
+void TypeChecker::materialize_base_fields(ClassInfo& cls, ClassInfo* base,
+                                          const std::vector<ClassInfo*>& extra_bases) {
+    cls.base_field_offsets.clear();
+    std::vector<ClassInfo*> cand;
+    if (base) cand.push_back(base);
+    for (ClassInfo* e : extra_bases) cand.push_back(e);
+    for (ClassInfo* b : cand) {
+        if (!b || b == cls.layout_base) continue;
+        if (b->n_fields() == 0) continue;
+        // 该基类链上的字段按「根 → 派生」顺序追加（与它自己的布局顺序一致）。
+        std::vector<const ClassInfo*> chain;
+        for (const ClassInfo* k = b; k; k = k->base) chain.push_back(k);
+        int start = cls.n_fields();
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            for (const FieldInfo& f : (*it)->fields) {
+                // 同名遮蔽：子类已声明 / 已追加过的名字不再追加（Python 里
+                // 子类字段遮蔽基类字段，这里保持「先到先得」）。
+                if (cls.field_index(f.name) >= 0) continue;
+                FieldInfo copy;
+                copy.name = f.name;
+                copy.ty = f.ty;
+                copy.implicit = true;
+                cls.fields.push_back(std::move(copy));
+            }
+        }
+        cls.base_field_offsets[b] = start;
+    }
+}
+
+void TypeChecker::dump_layout(const ClassDef& c, const ClassInfo& cls) {
+    if (!std::getenv("PYADAMAS_DUMP_LAYOUT")) return;
+    std::fprintf(stderr, "layout %s base=%s layout_base=%s base_fields=%d\n", c.name.c_str(),
+                 cls.base ? cls.base->name.c_str() : "-",
+                 cls.layout_base ? cls.layout_base->name.c_str() : "-", cls.base_fields);
+    for (auto& [b, off] : cls.base_field_offsets)
+        std::fprintf(stderr, "  block %s -> start %d\n", b ? b->name.c_str() : "-", off);
+    for (auto& f : cls.fields)
+        std::fprintf(stderr, "  field %s -> %d%s\n", f.name.c_str(), cls.field_index(f.name),
+                     f.implicit ? " (block/implicit)" : "");
+}
+
 }  // namespace pyadamas
