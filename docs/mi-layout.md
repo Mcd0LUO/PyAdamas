@@ -135,3 +135,34 @@ error: base 'A' of 'C' is not the primary base and its methods access instance f
 | `xml/dom/expatbuilder.py` | 仍拒：`Namespaces` 与 `ExpatBuilder` 都带字段（`self._parser` 等） |
 
 即：前缀选择解决了「mixin 在前、状态在后」这一类，**不能**解决「两个状态基类」——那确实要 thunk。
+## 8. 0.506 中期结论：thunk 的前提是「布局里要有那块字段」
+
+**实测**（`class C(B, A)`，B 有 `y`、A 有 `x`、A.get 读 `self.x`）：
+- 护栏生效：编译期拒绝（`base 'A' of 'C' is not the primary base ...`），不再静默错值；
+- 把护栏临时短路后运行：**`cb.x, cb.get()` = `1 2`**（CPython `1 1`）——A 的方法读到 B 的 y。
+
+**布局探针**（临时打印，已还原）：
+
+```
+MI C base=B layout=B base_fields=1
+  extra A.x -> in_A 0, in_C -1
+```
+
+即 **C 的布局里根本没有 A 的字段块**：`layout_base` 是 B（y 占 0），C 的 `self.x = 1` 走
+`add_implicit_field` 又新建了一个**遮蔽**的 C 字段。所以：
+
+- **只做调用点 `self += delta` 不行**：`in_C = -1`，没有可指向的 A 块，delta 无从谈起；
+- 第一步必须先改布局：把每个带字段的非 layout base 的字段块**实体化**进子类布局（按 MRO 顺序
+  追加），记 `ClassInfo::base_field_offsets[base] = 块起始下标`，并让 `field()/field_index()`
+  解析进对应块（不再产生遮蔽的隐式字段）；
+- 之后才有 thunk：直接调用点插 `self += 8 * base_field_offsets[A]`；虚调用因为 vtable 是「每个类
+  一份 function 下标表」（`mod_.classes[cid].vtable`），thunk 要作为**额外函数**（先 `add self, delta`
+  再尾调基类实现）拿到自己的下标，槽位填 thunk 的下标；
+- 与 0.496 的实现指针守卫的相互作用：守卫依赖「槽里的实现下标 == 已知实现」，thunk 是另一个入口，
+  「同一实现合并候选」会失效 —— 要么按 thunk 分组（(class, base) → thunk 下标一一对应），
+  要么守卫里改成比较 thunk 指针，两者语义都对，取简单的那个但要同步改守卫。
+- `super()` 协作式路径同样要按目标实现所在基类加 delta（`super().get()` 解析到 A.get 时）。
+
+**结论**：这一轮没有落地（布局实体化 + thunk + 守卫同步是成套改动，半成品会静默错值）。
+护栏保持现状（明确报错），三个文件（xmlrpc/server、urllib/request、xml/dom/expatbuilder）继续被拒。
+下一步按上面四步走，先做布局实体化（单独一轮、可用 `field_index` 单测钉住），再做 thunk。
