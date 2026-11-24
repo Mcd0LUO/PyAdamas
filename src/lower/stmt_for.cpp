@@ -837,6 +837,17 @@ void Lowerer::lower_for_seq(For& f) {
     }
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
+    // 循环期间必须自己持有一份序列引用。序列表达式若是从变量/属性/下标
+    // 读来的借用，循环体内重绑该名字（`for x in a: a = ...`）会把最后一
+    // 份引用 dec 掉，后续迭代读到已释放对象（UAF：a=[1,2,3] 只迭代出 2
+    // 个元素）。新分配的堆值已由临时栈持有一份引用；借用在这里补一份，
+    // 随语句边界的 rc_cleanup 释放，生命周期与 CPython 的迭代器一致。
+    // 已在临时栈上的值再补一份也不会多算：inc 与这次 push_temp 成对，
+    // 只有净值时才会影响 rc_pushes（保守方向）。
+    if (ir_is_heap(seq_ty) && !st_->fresh_vregs.count(seq)) {
+        rc_inc(seq);
+        push_temp(seq);
+    }
     // deque 没有按下标直取的迭代路径：先转成列表再走普通 list 迭代。
     // enum 类对象（for c in Color）：物化成员表后按 list 迭代。
     if (seq_ty && seq_ty->kind == TyKind::ClassObj && !seq_ty->sub.empty() &&
