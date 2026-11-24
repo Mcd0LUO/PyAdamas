@@ -338,6 +338,15 @@ PyAdamasStr* pa_sys_executable(void) {
 
 void pa_sys_exit(int64_t code) { exit((int)code); }
 
+static int64_t pa_recursion_limit = 1000;
+int64_t pa_sys_getrecursionlimit(void) { return pa_recursion_limit; }
+int64_t pa_sys_setrecursionlimit(int64_t n) {
+    if (n < 1) panic_c("recursion limit must be >= 1");
+    int64_t old = pa_recursion_limit;
+    pa_recursion_limit = n;
+    return old;
+}
+
 /* ── 输出 ─────────────────────────────────────────────────────── */
 
 /* print() 每次调用都走这里：printf 的格式解析 + 可变参数 + 锁在

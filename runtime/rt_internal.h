@@ -1594,6 +1594,10 @@ PyAdamasList* pa_sys_argv(void);
 PyAdamasStr* pa_sys_intern(PyAdamasStr* s);
 PyAdamasStr* pa_sys_executable(void);
 void pa_sys_exit(int64_t code);
+/* sys.getrecursionlimit()/setrecursionlimit()：pyadamas 没有运行期递归限制，
+   这里只保存一个值供查询（默认 1000，与 CPython 一致），set 校验 n >= 1。 */
+int64_t pa_sys_getrecursionlimit(void);
+int64_t pa_sys_setrecursionlimit(int64_t n);
 void pa_print_i64(int64_t v);
 void pa_print_u64(uint64_t v);
 void pa_print_any(int64_t v);

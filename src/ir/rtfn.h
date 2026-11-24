@@ -266,6 +266,8 @@ enum class RtFn : uint16_t {
     SysArgv,      // () -> list*
     SysIntern,    // (str*) -> str*  sys.intern：驻留表命中返回同一份（+1）
     SysExit,      // (i64 code) -> noreturn
+    SysGetRecursionLimit,  // () -> i64   sys.getrecursionlimit()
+    SysSetRecursionLimit,  // (i64 n) -> i64   sys.setrecursionlimit(n)，返回旧值
     GenNext,      // (gen*) -> i64  取下一个值；结束抛 StopIteration
     GenNextOpt,   // (gen*, i64* ok) -> i64  结束时不抛，写 ok=0
     GenSend,      // (gen*, i64 sent) -> i64
