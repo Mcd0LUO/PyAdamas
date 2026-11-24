@@ -358,7 +358,58 @@ unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增�
 
 拿 CPython 标准库当输入，看 `check` 的通过率。这不是功能测试，是「别把真实代码判错」的护栏。
 
-> 下列 501 / 596 是 0.171（2026-11-15）的记录；当前 HEAD（0.470）未重测，重测任务见 [next-round-plan.md](next-round-plan.md) P2（3.4）。
+> **0.484 重测（本机 CPython 3.14.4）**：628 个 `.py`（去 `test/` 560 个）。
+> 语法通过 **623/628（99.2%）**；类型通过（旧口径 `check --no-imports --lenient-names`，
+> 与 0.171 可比）**505/623 = 81.1%**（去 `test/` 452/556 = 81.3%）。
+> 0.484 起 `check` 默认加载 import 图 + 报模块级未定义名，同一批文件是 **153/623 = 24.6%** ——
+> 那不是变差，是新口径把 stdlib 里大量动态写法（`X | None` 之后直接调方法、条件导入、
+> `@property` 与字段同名）如实报了出来，见下面的失败簇。
+>
+> **与 0.171（CPython 3.13.5：596 语法通过、501/596 = 84.1%）不可直接比较**：Python 版本、
+> 文件集都不同（628 vs 598、3.14.4 vs 3.13.5）。同口径下趋势是持平（81.1% vs 84.1%），
+> 差额主要来自 3.14 新引入的 `annotationlib`/`_colorize`/`compression.zstd` 等文件与新语法。
+>
+> 失败簇 top-10（旧口径 123 个失败文件，含 5 个语法失败；按首条错误归类）：
+>
+> | # | 簇 | 数量 | 代表文件 | 根因 |
+> |---|---|---|---|---|
+> | 1 | `cannot assign ... (annotated at line N)` | 14 | `fnmatch.py:163` | 生成器表达式被推成 `func(unknown)->None`，与标注的 `generator[...]` 不兼容 |
+> | 2 | `X object has no method Y` | 11 | `concurrent/futures/process.py:892` | `X \| None` 在 `if x is not None:` 之后没有**类型窄化** |
+> | 3 | `X takes no arguments (no __init__)` | 9 | `_colorize.py`、`uuid.SafeUUID` | enum/`__new__`/运行期构造的类，静态看不到构造器 |
+> | 4 | `undefined name X` | 9 | `http/client.py:337`（`CONTINUE`） | 条件导入 / 平台分支里定义的名字（功能体内照样严格） |
+> | 5 | `X object has no attribute Y` | 7 | `xmlrpc/client.py` | 同上（动态属性 / 条件定义） |
+> | 6 | `decorating dunder method X is not supported yet` | 4 | `numbers.py:71`（`__complex__`） | 已知表示限制（装饰后的协议 dunder 不回填） |
+> | 7 | `X is not sliceable` | 4 | `email/_parseaddr.py:187` | `tuple[...] \| None` 切片，同簇 2 的窄化缺失 |
+> | 8 | `property X conflicts with a field` | 4 | `urllib/error.py` | 字段注解与 `@property` 同名（pyadamas 的注解会落成布局字段） |
+> | 9 | `unsupported operand type(s) for +: X and Y` | 4 | `inspect.py` | unknown 参与算术、静态推不出结果 |
+> | 10 | `super() has no method X after class Y` | 3 | `socketserver.py`（`ForkingMixIn`） | 协作式多继承：方法在运行期 MRO 的**兄弟类**里，静态基类链里没有 |
+>
+> **top-3 判负（要动的层与代价）**：
+>
+> 1. **类型窄化（簇 2+7，≈15 个文件）**：需要在 `if`/`while`/`assert` 条件上做 refinement
+>    （`is None` / `is not None` / 真假判断），把窄化环境沿分支传下去、在汇合点做 join。
+>    当前 typecheck 没有 refinement 状态（只有作用域与 `cur_class_`），这是**新增一层**；
+>    汇合点 join 写错会变成静默漏报，风险高于收益。层：`typecheck/stmt.cpp` + `expr.cpp`。
+> 2. **生成器表达式类型（簇 1，14 个文件）**：`(f(x) for x in xs)` 现在被当成 `func(...)->None`，
+>    需要从 yield 元素推 `generator[E]` 并让标注兼容。层：`typecheck/expr.cpp`（生成器表达式）
+>    + `assignable` 的 Func↔Generator 规则；中等改动、影响所有推导式。
+> 3. **协作式多继承的 `super()`（簇 10，3 个文件）**：要整模块的子类图 + 运行期 MRO 才能知道
+>    「下一个类」是谁；现有逃生口只覆盖 open/导入基类。层：typecheck 的类表（整模块遍）。
+>    只值 3 个文件，不做。
+>
+> 另两个**故意的表示限制**（不修，见 [language.md](language.md)）：簇 6（装饰后的协议 dunder）
+> 与簇 8（注解与 `@property` 同名）——前者是回填机制缺失，后者是「注解即布局」的取舍。
+>
+> 复现命令（本页口径，`$PYADAMAS` 指编译器）：
+>
+> ```bash
+> STD=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])'); cd "$STD"
+> find . -name '*.py' -print0 > /tmp/f.lst
+> xargs -0 -P 8 -n 1 sh -c '$0 check --syntax "$1" >/dev/null 2>&1 && echo "$1"' "$PYADAMAS" < /tmp/f.lst | wc -l   # 语法通过
+> xargs -0 -P 8 -n 1 sh -c '$0 check --no-imports --lenient-names "$1" >/dev/null 2>&1 || echo "$1"' "$PYADAMAS" < /tmp/f.lst > /tmp/fail.txt   # 旧口径失败
+> python3 -c 'import sys; print(sys.version)'   # 记版本：本机 3.14.4
+> ```
+> 下列 501 / 596 是 0.171（2026-11-15，CPython 3.13.5）的历史记录，保留作对照。
 
 ```bash
 cmake --preset dev && cmake --build --preset dev   # 先构建 build/dev/pyadamas

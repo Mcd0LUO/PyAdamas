@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.485] - 2026-11-24
+
+> 取证（§3.4）：**前端鲁棒性基线在 0.484 上重测**（CPython **3.14.4**，机器上的版本；
+> 0.171 那次是 3.13.5，两段不可直接比较）。
+>
+> 口径照 [docs/compatibility.md](docs/compatibility.md)「前端鲁棒性基线」（命令已写进该页）：
+> `check --syntax` 看语法；类型通过率 = 语法通过者里 `check` 也通过的比例。
+>
+> | 范围 | 文件数 | 语法通过 | 类型通过（旧口径） | 类型通过（0.484 默认口径） |
+> |---|---|---|---|---|
+> | 标准库本体 | 628 | **623（99.2%）** | **505/623 = 81.1%** | 153/623 = 24.6% |
+> | 去掉 `test/` | 560 | 556（99.3%） | 452/556 = 81.3% | 128/556 = 23.0% |
+>
+> 「旧口径」= `check --no-imports --lenient-names`（与 0.171 可比）；默认口径是 0.484 起
+> 加载 import 图 + 报模块级未定义名的严格版 —— 24.6% 不是变差，是把 stdlib 里大量动态写法
+> 如实报了出来。同口径对比 0.171 的 84.1%：**趋势持平**，差额来自 3.14 新增文件与新语法
+> （`annotationlib`/`_colorize`/`compression.zstd` 等）。
+>
+> 失败簇 top-10（123 个失败文件，含 5 个语法失败）与代表文件：生成器/标注不兼容 14
+>（`fnmatch.py`）、`X | None` 缺窄化 11（`concurrent/futures/process.py`）、`takes no arguments` 9
+>（`_colorize.py`、`uuid.SafeUUID`）、条件导入的 `undefined name` 9（`http/client.py` 的 `CONTINUE`）、
+> 动态属性 7、装饰后的协议 dunder 4（`numbers.__complex__`）、`tuple|None` 不可切片 4、
+> `property` 与字段同名 4（`urllib/error.py`）、unknown 算术 4、协作式多继承 `super()` 3
+>（`socketserver.ForkingMixIn`）。完整表在 compatibility.md。
+>
+> **top-3 判负**（要动的层与代价写进文档）：① 类型窄化（`is None` 分支 refinement，
+> 需在 typecheck 新增一层环境并在汇合点 join，≈15 文件）；② 生成器表达式类型（从 yield 推
+> `generator[E]` 并让标注兼容，14 文件，影响所有推导式）；③ 协作式多继承的 `super()`
+> （需整模块子类图 + 运行期 MRO，只值 3 文件）。三者都是「新增一层分析」，不是补丁。
+> 另两簇（装饰后 dunder、注解与 `@property` 同名）是**故意的表示限制**，已在 language.md 记录。
 ## [0.484] - 2026-11-24
 
 > feat(frontend)：**pya-lsp 反馈的四条编译器缺口**（3.3）。三条落地、一条判负。
