@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.509] - 2026-11-25
+
+> feat(typecheck)：**默认放宽多继承护栏**——两个状态基类的形态现在**默认就能编译且正确**（不再需要 `PYADAMAS_MI_UNSAFE`）。
+>
+> 护栏判据：非 layout 基类的方法碰字段时，只要它的字段块**确实进了子类布局**（`base_field_offsets` 里有该基类且偏移 > 0）就放行；
+> 没有 block 的（导入类、静态判不准、字段没进布局）继续拒绝；菱形（字段已在前缀里、`moved == false`）照旧放行。
+> `PYADAMAS_MI_UNSAFE` 保留为调试开关（注释写清）。删掉钉旧拒绝行为的 `tests/strict/mi_non_primary_base_fields.py`，
+> 新增 `tests/run/mi_two_state_bases.py`（属性 / 直调 / 虚调用三条路径，CPython 对拍）。
+>
+> **验收（默认配置、不带任何开关）**：
+>
+> ```
+> cb.x, cb.get()  →  1 1      （CPython 1 1）✓
+> f(cb)           →  1        （CPython 1）✓
+> ```
+>
+> **三个长期被拒的 stdlib 文件转绿**（628 默认口径 **496 → 499/623**）：`xmlrpc/server.py`、`urllib/request.py`、`xml/dom/expatbuilder.py`，
+>本仓库 **900 个 `.py`：783 通过**、零新拒绝；12 基准 asm 与 master 逐字节相同。
+>
+> **唯一遗留缺口（已定位、已回退）**：`super()` 进入「非 layout 基类的方法」时 self 没有调整（`class D(C): super().get()` 得 102，CPython 101）。
+> 根因：`SuperVCall` 的运行期分派 `pa_super_lookup` **用 self 指针查对象所属类**（读 vtable），先挪 self 再调用就查不到类
+>（实测直接抛 `'super' object has no attribute`）。正确修法二选一：①给运行期分派加 adjust 参数（lookup 用原指针、调用用调整后的）；
+> ②在 lowering 里算出目标槽、按 vtable 跳 thunk。两条都要动运行期 ABI 或后端，留作下一轮；代码里已留注释。
+>
+> 闸门：套件 **499** / difftest **469** / check_size **PASS** / ctest 9/9。
 ## [0.508] - 2026-11-25
 
 > feat(lower)：**vtable thunk 落地**——多继承的虚调用也正确了（`f(a: A)` 传 `C(B, A)` 实例现在返回 1）。
