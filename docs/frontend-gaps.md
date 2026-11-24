@@ -183,6 +183,21 @@ class/可调用模型；收益是「被装饰函数仍有类型」，但不是�
 现状（master 行为）保留：装饰后的符号是 unknown；`@lru_cache` 仍是恒等。
 
 
+### 8.4 `except E as e`：本来就绑定了 E
+
+复核：`except ValueError as e` 的 `e` 静态类型是 `Exception[ValueError]`（富异常类是
+真实例），所以 `need_int(e)` 会报 `got 'ValueError'`（`tests/strict/
+except_e_is_exception_type.py`）；富异常类的方法面**已经**是严格的
+（`e.bogus()` 报 `'MyErr' object has no method 'bogus'`）；`e.args` / `str(e)` 可用
+（内置异常的 args 是 `tuple[str]`）。0.499 观察到的「e 是 unknown」来自**成员访问
+宽松**：`call_method.cpp` 对 `TyKind::Exception` 的方法调用一律放行成 unknown。
+**不收紧**（负结论）：CPython 允许给异常实例挂任意属性（`e.user_id = 1` 是常见写法），
+把内置异常值的成员表做成封闭集会拒绝合法代码 —— 与「不许新增拒绝」红线冲突。
+
+本轮只补了 `except (A, B) as e` 的类型解析：所有分支解析成同一个类型时用那个类型
+（含富异常类），否则退到 `Exception` 基类（多类型的方法面是交集，静态上不硬造 union）。
+
+
 ### 8.5 仍然缺的（没有运行期实现，补类型会变成静默 0/None，所以不补）
 
 remaining 97 个成员按性质分类（都不在本轮）：
