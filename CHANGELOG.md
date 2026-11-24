@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.514] - 2026-11-25
+
+> fix(typecheck)：**全 None 列表字面量按 `list[unknown]` 推断**——消掉窄化剩下的两个假阳性。
+>
+> 0.499 的「可能为 None」诊断在 628 语料上留下 4 个文件，本版逐个判定后修掉 2 个假阳性：
+>
+> | 文件 | 判定 | 处理 |
+> |---|---|---|
+> | `base64.py:482`（`_b85dec = [None]*256`，import 期填满） | **假阳性** | 已修，转绿 |
+> | `xml/dom/pulldom.py:110`（`self.firstEvent = [None, None]` 占位） | **假阳性** | 已修，转绿 |
+> | `modulefinder.py:442`（`determine_parent()` 未标注 + `return None` 分支） | **正确诊断** | 不放宽 |
+> | `multiprocessing/util.py:182`（`_SUN_PATH_MAX` 条件定义） | **正确诊断** | 不放宽 |
+>
+> 修法（窄规则，只动字面量推断）：`typecheck/expr.cpp` 的 `case ExprKind::List` —— 元素合起来是 `None` 时按 `list[unknown]` 推断，
+>而不是 `list[None]`；`[None] * 256` 先经过这个字面量分支，所以乘出来也是 `list[unknown]`。**标注成 `list[int]` 的完全不受影响**（标注路径不走字面量推断）。
+>
+> **影响面先量过**：628 stdlib 里 `[None] * N` / `[None, None]` 共 **13 处**，本仓库 **0 处**；
+>代价只是这类列表的 `xs[0] + 1` 不再报错（本来也是对 None 的误报）。
+> **没削弱检查的证据**：`def f(x: int | None) -> int: return x + 1` 仍然报 `'x' may be None here`，已固化成 `tests/strict/narrow_optional_still_errors.py`；
+>占位惯用法固化成 `tests/run/narrow_none_placeholder.py`。
+>
+> 628 默认口径：**499 → 501/623**；本仓库 **902 个 `.py`：785 通过**、零新拒绝；12 基准 asm 与 master 逐字节相同。
+> 闸门：套件 **503** / difftest **473** / check_size **PASS** / ctest 9/9。
 ## [0.513] - 2026-11-25
 
 > feat(lower)：**`operator.index(x)` / `operator.length_hint(x, default=0)`**——静态分派，**零运行期改动**。
