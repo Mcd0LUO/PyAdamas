@@ -6,7 +6,7 @@
 
 **后续实验已经把这条路走到头（2026-11）**，结论记在本文
 [已否决的方案](#已否决的方案)一节：块级 live-range 分裂 + SpillPlacement
-（`PYADAMAS_RA_SPLIT=1`）默认关闭、实测 +27~28%；池容量扫描
+（`PYADAMAS_RA_SPLIT=1`）实测 +27~28%、代码已删除；池容量扫描
 （`PYADAMAS_RA_POOLCAP`）证明 6→3 只掉 0–8%，**容量不是瓶颈**；循环内全局
 寄存器化在真实基准上收益为零。**寄存器分配不再作为性能方向投入**，
 瓶颈已改判为 RC/GC 机制与生成代码本身。
@@ -80,7 +80,7 @@
 
 | 开关 | 作用 | 现状 |
 |---|---|---|
-| `PYADAMAS_RA_SPLIT=1` | 块级 live-range 分裂 + `SpillPlacement` 块边界决策（`slot_loc_` 按块查表） | **默认关**，实测 +27~28%，已放弃 |
+| ~~`PYADAMAS_RA_SPLIT=1`~~ | 块级 live-range 分裂 + `SpillPlacement` 块边界决策（`slot_loc_` 按块查表） | **已删除**：三轮实测 +27~28%，代码整段删除，设了即 rc=2 报错 |
 | `PYADAMAS_RA_POOLCAP=N` | 把槽寄存器池限制到 N 个（只影响槽分配，`n_saved_regs_` 跟着变，vreg 路径不变） | 实验用，默认不设 = 行为完全不变 |
 | `PYADAMAS_LI_STATS` | 精确区间（带洞）诊断，打印精确峰值 vs 包络峰值压力 | 诊断用，只读不写，不影响生成结果 |
 
@@ -244,7 +244,7 @@ python3 bench/compare/run_compare.py --repeat 5 matmul nbody spectral_norm
 - **全局提升（真实代码上）**（0.269，pass 保留但不算收益）：见上文
   [两条候选路线](#两条候选路线结论) —— 微基准 −84%，真实基准 −0.5%（噪声内）、
   pass 零触发。真实热循环体里都有调用，靠「循环体无 call」的前提绕不过去。
-- **块级 live-range 分裂 + SpillPlacement**（`PYADAMAS_RA_SPLIT=1`，默认关闭）：
+- **块级 live-range 分裂 + SpillPlacement**（`PYADAMAS_RA_SPLIT=1`，代码已删除）：
   三轮实现都试过 —— 0.262 逐块切分 + `store.slot` 双写（nbody +31%、spectral_norm
   +20%，四个基准全部变慢）；9688c60 接入 Hopfield `SpillPlacement` 决定块边界
   （正确性达成，总耗时 167 → 214 ms，**+28.1%**）；8ab1262 改成精确区间边界插
@@ -253,6 +253,11 @@ python3 bench/compare/run_compare.py --repeat 5 matmul nbody spectral_norm
   准」，而是**没有空闲寄存器可借**：精确峰值 6–8 而池只有 6。默认关闭，不要重试；
   要真拿收益必须先有区间级所有权（LLVM 第三层），而那已被池容量实验否决。
   实验数据见 [regalloc-architecture.md](regalloc-architecture.md) §8。
+  **代码已删除**（`assign_slot_regs_split`、`slot_loc_`/`slot_reload_in_`/
+  `slot_spill_out_` 按块位置表、`spill_placement.{cpp,h}`、`Program.rc_split`
+  与 manifest 的 `rcsplit` 行）；默认路径 12 基准 asm 逐字节不变。
+  `PYADAMAS_RA_SPLIT` / `PYADAMAS_SPLIT_MAXREG` 仍保留一条 rc=2 报错，
+  防止 A/B 脚本误以为在跑另一条分配路径。
 - **寄存器池扩容 / 第三层（区间级所有权，SplitKit + InlineSpiller）**（9e7ade7）：
   `PYADAMAS_RA_POOLCAP=3` 把槽寄存器池从 6 砍到 3，8 个基准总耗时只掉 0–8%
   （平均约 3%）—— **容量不是瓶颈**。第三层能带来的只是「更好的共享」（有效容量

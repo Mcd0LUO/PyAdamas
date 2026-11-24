@@ -144,7 +144,7 @@ bool parse_unit(ModuleUnit& u) {
 
 // AVX2 4-lane 的编译期开关（PYADAMAS_AVX2=0 只发 SSE2）。它直接改代码生成
 // 结果但不在 Program 里，所以必须进清单 —— 否则「切了开关仍命中旧产物」，
-// A/B 两条路径拿到同一个 mod.s（与 rc_split 那条注释同一类坑，实测踩到）。
+// A/B 两条路径拿到同一个 mod.s（与已删除的 rc_split 同一类坑，实测踩到）。
 int avx2_emit_tag() {
     const char* v = std::getenv("PYADAMAS_AVX2");
     return (v != nullptr && v[0] == '0' && v[1] == '\0') ? 0 : 1;
@@ -236,13 +236,6 @@ struct Manifest {
     int zero_cost_exc = -1;
     // 旧清单没有这一行：保守按「需要索引」处理。
     bool unknown_index = true;
-    // live range splitting 开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
-    //
-    // **这是缓存正确性的必要部分**：环境变量会改变代码生成结果，但
-    // 缓存键只有「模块名 + 源文件路径」，不含任何编译选项。不把它写进
-    // 清单就会出现「切了开关仍命中旧产物」—— 实测导致连续几轮 A/B
-    // 测试拿到完全相同的二进制，性能结论全错。
-    int rc_split = -1;
     // callee-saved 提升增强开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int ra_opt = -1;
     // 通用循环向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
@@ -324,12 +317,6 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.unknown_index = *o != 0;
-        } else if (tag == "rcsplit") {
-            std::string v;
-            ss >> v;
-            auto o = parse_u64(v);
-            if (!o) return std::nullopt;
-            m.rc_split = static_cast<int>(*o);
         } else if (tag == "raopt") {
             std::string v;
             ss >> v;
@@ -420,7 +407,6 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "fastmath " << (p.fast_math ? 1 : 0) << "\n";
     out << "zerocostexc " << (p.zero_cost_exc ? 1 : 0) << "\n";
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
-    out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
     out << "raopt " << (p.ra_opt ? 1 : 0) << "\n";
     out << "vect " << (p.vect ? 1 : 0) << "\n";
     out << "avx2 " << avx2_emit_tag() << "\n";
@@ -681,7 +667,6 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->opt != p.opt) return false;
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
-    if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
     if (m->ra_opt != (p.ra_opt ? 1 : 0)) return false;
     if (m->vect != (p.vect ? 1 : 0)) return false;
     if (m->avx2 != avx2_emit_tag()) return false;
@@ -984,7 +969,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     // needs=1，但关闭索引维护后输出完全正确、快 22ms。
     bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
-                                        p.zero_cost_exc, skip_idx, p.rc_split,
+                                        p.zero_cost_exc, skip_idx,
                                         p.ra_opt, p.inline_opt,
                                         p.type_tags, p.vect, p.needs_dynamic_big);
     auto t3 = now();

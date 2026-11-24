@@ -63,9 +63,6 @@ struct Program {
     // 零开销异常（--zero-cost-exc）：编译选项，写进模块缓存清单参与失效。
     // Z5：表驱动展开默认开启；--no-zero-cost-exc 可回退。
     bool zero_cost_exc = true;
-    // live range splitting（PYADAMAS_RA_SPLIT）：会改变代码生成结果，
-    // 必须写进模块缓存清单参与失效 —— 否则切换开关后仍命中旧产物。
-    bool rc_split = false;
     // callee-saved 提升增强（PYADAMAS_RA_OPT，默认关）：改变代码生成结果，
     // 必须写进模块缓存清单参与失效。
     bool ra_opt = false;

@@ -123,8 +123,6 @@ bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
     } else {
         // 与 Bin+StoreSlot 融合同一套判据（GC 根槽 / tag / 寄存器类 / 单使用）。
         if (!can_fuse(add, store)) return false;
-        // split 模式的槽位置按块查表，融合会绕过块出口写回，保守跳过。
-        if (!slot_loc_.empty()) return false;
         if (store.idx < 0 || store.idx >= static_cast<int>(ra_.slot_reg.size()))
             return false;
     }
@@ -194,15 +192,41 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
     if (keep_int_result) comment(in.text() + " -> guarded return in %rax");
     const std::string self = arg_reg_i(0);
     move_to(self, src_op(in.a));
+    // 静态类型只用来找候选。守卫比较**实际实现指针**（vtable 槽里存的值）：
+    // 慢路径的 `call *slot(%r11)` 目标就是它，所以指针相同 ⇒ 慢路径会调用
+    // 同一个函数 ⇒ 内联体（由该函数的 IR 生成）与慢路径逐条等价。
+    //
+    // 按实现指针去重是安全的关键：Square 继承 Rect.area 时两个类的 vtable 槽
+    // 指向同一个入口（.Lvt1 / .Lvt2 的第一个字都是 .Lf5），内联体也完全一样
+    // （字段偏移来自函数自身的 IR，与接收者的具体类无关；子类布局以基类字段
+    // 打头，偏移不变）——所以一次比较就够，不必再比 vtable 地址。
+    // 覆写方法在槽里是另一个入口，自然落到慢路径；多继承的每个基方法仍是
+    // 各自入口，按指针分组后每组比较一次，命中任一指针对应的类都走同一份内联体。
     line(std::format("movq ({}), %r11", self));
+    line(std::format("movq {}(%r11), %r11", in.imm * 8));
     const std::string done = fresh_label("vleafdone");
-    std::unordered_map<int, std::string> targets;
-    // 静态类型只用来找候选。必须比较实际虚表地址，不按类名或静态类型断言；
-    // 同一局部方法被多个类继承时，共用内联代码但每个虚表仍要单独匹配。
+    // 比较顺序：按「该实现指针覆盖几个候选类」降序。没有 profile 数据时，
+    // 覆盖 k 个类的实现被命中的先验是 k 倍（候选类等概率），先比它能让
+    // 期望比较次数最少。对 Square 继承 Rect.area 的形态就是「先比合并组」。
+    std::vector<std::pair<int, int>> groups;  // {-覆盖类数, 实现函数}
+    std::vector<int> gidx;                    // 首次出现顺序的去重表
     for (const auto& c : candidates) {
-        auto [it, inserted] = targets.try_emplace(c.function);
+        auto it = std::find(gidx.begin(), gidx.end(), c.function);
+        if (it == gidx.end()) {
+            gidx.push_back(c.function);
+            groups.push_back({-1, c.function});
+        } else {
+            groups[static_cast<size_t>(it - gidx.begin())].first -= 1;
+        }
+    }
+    std::stable_sort(groups.begin(), groups.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::unordered_map<int, std::string> targets;
+    for (const auto& g : groups) {
+        const int fn = g.second;
+        auto [it, inserted] = targets.try_emplace(fn);
         if (inserted) it->second = fresh_label("vleafhit");
-        line(std::format("leaq .Lvt{}(%rip), %r10", c.cls));
+        line(std::format("leaq {}(%rip), %r10", entry_ref(fn)));
         line("cmpq %r10, %r11");
         emit_jmp("je", it->second);
     }
@@ -269,14 +293,17 @@ bool AsmGen::gen_guarded_vcall_direct(const Inst& in, bool keep_int_result, int 
     comment(in.text() + " -> guarded direct call");
     const std::string self = arg_reg_i(0);
     move_to(self, src_op(in.a));
+    // 与叶子路径同构：比较 vtable 槽里的实现指针，同一函数被多个类继承时
+    // 只比较一次（内联/直调体按实现指针分组，命中任一指针走同一份代码）。
     line(std::format("movq ({}), %r11", self));
+    line(std::format("movq {}(%r11), %r11", in.imm * 8));
     const std::string done = fresh_label("vdcallend");
-    // 同一函数被多个类继承时共享命中标签，但每个虚表仍单独比较。
     std::unordered_map<int, std::string> targets;
     for (const auto& c : cands) {
         auto [it, inserted] = targets.try_emplace(c.fn);
         if (inserted) it->second = fresh_label("vdcallhit");
-        line(std::format("leaq .Lvt{}(%rip), %r10", c.cls));
+        if (!inserted) continue;
+        line(std::format("leaq {}(%rip), %r10", entry_ref(c.fn)));
         line("cmpq %r10, %r11");
         emit_jmp("je", it->second);
     }

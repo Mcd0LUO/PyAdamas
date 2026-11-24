@@ -514,29 +514,12 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             cur_block_ = static_cast<int>(bi);
-            split_block_ = static_cast<int>(bi);
             // 32 字节（DSB uop 缓存的窗口粒度）：16 字节对齐只稳定取指，
             // 上游代码尺寸变化仍会把热循环的 uop 挤出 DSB（obj_dispatch
             // 实测 MITE uops +176M、cycles +9%）；32 字节对齐后大部分恢复。
             // 64 字节无进一步收益（DSB 组冲突不由入口对齐 alone 解决）。
             if (loop_header[bi]) line(".p2align 5");
             label(block_label(static_cast<int>(bi)));
-            // live range splitting 的块入口：本块要用寄存器的槽，从栈装进去。
-            //
-            // 无条件 reload 是对的 —— StoreSlot 双写保证栈永远是最新值，
-            // 即使前驱把值放在寄存器里也一样（它同时写了栈）。
-            if (bi < slot_reload_in_.size()) {
-                for (int s : slot_reload_in_[bi]) {
-                    const MOperand& rg = slot_loc_[bi][static_cast<size_t>(s)];
-                    if (rg.empty()) continue;
-                    const MOperand& st = smem_mop(s);
-                    if (rg.text == st.text) continue;
-                    if (ir_is_float(f.slot_ty[static_cast<size_t>(s)]))
-                        emit2(MOp::kMovsd, st, rg);
-                    else
-                        emit2(MOp::kMovq, st, rg);
-                }
-            }
             gen_block(f.blocks[bi]);
         }
 
@@ -612,32 +595,30 @@ void AsmGen::gen_block(const Block& b) {
             const size_t kf = ra_.fp_promoted_slots.size();
             fp_after.assign(b.insts.size() * kf, 0);
             std::vector<uint8_t> fp_alias_use(b.insts.size() * kf, 0);
-            if (slot_loc_.empty()) {
-                for (int k = 0; k < static_cast<int>(b.insts.size()); ++k) {
-                    const Inst& x = b.insts[static_cast<size_t>(k)];
-                    if (x.op != IrOp::LoadSlot || x.dst == kNoReg) continue;
-                    if (x.idx < 0 || x.idx >= static_cast<int>(ra_.slot_fpidx.size()))
-                        continue;
-                    const int fi = ra_.slot_fpidx[static_cast<size_t>(x.idx)];
-                    if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
-                    // 别名只发生在单次使用上；跨块值/多次使用的值，load
-                    // 会真的写寄存器或内存，寄存器此后无人读。
-                    if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
-                        cross_block_[x.dst])
-                        continue;
-                    const int us = block_use_.first_use(x.dst);
-                    if (us < 0 || us <= k) continue;
-                    // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
-                    // 不会别名（真的发了一次 mov），寄存器此后无人读。
-                    auto stv = block_stores_.find(x.idx);
-                    if (stv != block_stores_.end()) {
-                        auto it = std::upper_bound(stv->second.begin(),
-                                                   stv->second.end(), k);
-                        if (it != stv->second.end() && *it < us) continue;
-                    }
-                    fp_alias_use[static_cast<size_t>(us) * kf +
-                                 static_cast<size_t>(fi)] = 1;
+            for (int k = 0; k < static_cast<int>(b.insts.size()); ++k) {
+                const Inst& x = b.insts[static_cast<size_t>(k)];
+                if (x.op != IrOp::LoadSlot || x.dst == kNoReg) continue;
+                if (x.idx < 0 || x.idx >= static_cast<int>(ra_.slot_fpidx.size()))
+                    continue;
+                const int fi = ra_.slot_fpidx[static_cast<size_t>(x.idx)];
+                if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
+                // 别名只发生在单次使用上；跨块值/多次使用的值，load
+                // 会真的写寄存器或内存，寄存器此后无人读。
+                if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
+                    cross_block_[x.dst])
+                    continue;
+                const int us = block_use_.first_use(x.dst);
+                if (us < 0 || us <= k) continue;
+                // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
+                // 不会别名（真的发了一次 mov），寄存器此后无人读。
+                auto stv = block_stores_.find(x.idx);
+                if (stv != block_stores_.end()) {
+                    auto it = std::upper_bound(stv->second.begin(),
+                                               stv->second.end(), k);
+                    if (it != stv->second.end() && *it < us) continue;
                 }
+                fp_alias_use[static_cast<size_t>(us) * kf +
+                             static_cast<size_t>(fi)] = 1;
             }
             std::vector<uint8_t> cur = ra_.fp_live_out[static_cast<size_t>(cur_block_)];
             for (int k = static_cast<int>(b.insts.size()) - 1; k >= 0; --k) {
@@ -740,31 +721,6 @@ void AsmGen::gen_block(const Block& b) {
                     ra_.fp_spill_mask[j] = static_cast<char>(fp_after[row + j]);
                 ra_.fp_mask_valid = true;
             }
-            // **split 模式的块出口 spill（必须插在终止指令之前）。**
-            //
-            // 终止指令（jump/branch/return）之后的代码永远不会执行，所以
-            // 不能放在循环外面。这里检测到「当前是最后一条指令」时先写回，
-            // 再生成终止指令。
-            //
-            // 写回哪些槽由 slot_spill_out_ 精确给出（见 assign_slot_regs_split）：
-            // 只有「存在后继要从栈读」的块才写回。不再双写，所以这是栈副本
-            // 唯一的更新点。
-            if (!slot_spill_out_.empty() && cur_block_ >= 0 &&
-                cur_block_ < static_cast<int>(slot_spill_out_.size()) &&
-                i + 1 >= b.insts.size()) {
-                for (int sl : slot_spill_out_[static_cast<size_t>(cur_block_)]) {
-                    if (sl < 0 || sl >= static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size()))
-                        continue;
-                    const MOperand& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
-                    if (rg.empty()) continue;
-                    const MOperand& st = smem_mop(sl);
-                    if (rg.text == st.text) continue;
-                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(sl)]))
-                        emit2(MOp::kMovsd, rg, st);
-                    else
-                        emit2(MOp::kMovq, rg, st);
-                }
-            }
             const bool fused_vcall_add = try_fuse_guarded_vcall_add(b, i);
             if (!fused_vcall_add &&
                 !try_forward_global_across_rc(b, i, forwarded_load, forward_to_receiver))
@@ -791,25 +747,6 @@ void AsmGen::gen_block(const Block& b) {
             }
 
             if (fused_slot >= 0) {
-                // **融合路径也必须双写栈。**
-                //
-                // 融合把 `%22 = load.slot s7` + `store.slot s5, %22` 合成
-                // 一条 `movq %r12, %rbx`，直接写 dst_loc_，绕过了
-                // gen_inst(StoreSlot) 的双写逻辑。
-                //
-                // split 模式的块入口无条件 reload，前提是栈永远最新。
-                // 融合漏掉双写 -> 栈里是旧值 -> 后继块 reload 到旧值。
-                // 实测 nqueens：bb4 的 `s5 = s7` 没写栈，bb10 入口 reload
-                // s5 读到上一轮的旧值，index.set 越界。
-                if (!slot_loc_.empty() && fused_slot < static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size())) {
-                    const MOperand& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
-                    if (!fl.empty() && fl.kind == MOperandKind::Reg) {
-                        if (ir_is_float(f_->slot_ty[static_cast<size_t>(fused_slot)]))
-                            emit2(MOp::kMovsd, fl, smem_mop(fused_slot));
-                        else
-                            emit2(MOp::kMovq, fl, smem_mop(fused_slot));
-                    }
-                }
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效
                 invalidate_slot(fused_slot);
                 ++i;

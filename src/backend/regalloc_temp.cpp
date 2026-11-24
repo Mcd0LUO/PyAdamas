@@ -413,37 +413,13 @@ void AsmGen::assign_global_vreg_regs() {
             });
             cands.insert(cands.end(), ra_extra.begin(), ra_extra.end());
         }
-        // **split 模式下 vreg 不得使用 kSlotRegs() 池。**
+        // **vreg 从 n_saved_regs_ 开始用，正好是槽占完之后剩下的那部分。**
         //
-        // split 已经把这些寄存器独占分配给变量槽（slot_loc_），而且
-        // ra_.slot_reg 是空的（split 独占整型分配）—— 所以下面这段
-        // 「从 n_saved_regs_ 继续往 kSlotRegs() 分配」会把同一个物理
-        // 寄存器同时分给「槽」和「跨块 vreg」，两边互相覆盖。
-        //
-        // 实测 nqueens：循环上界槽拿到 %rbp，同一函数的跨块 vreg 又
-        // 拿到 %rbp，循环条件被写坏 -> IndexError。
-        //
-        // 正确做法：split 模式下跳过这一段，vreg 只走下面的
-        // %r8-%r11（block_temps，调用点会保存）等不与槽冲突的路径。
-        // split 模式下跳过 kSlotRegs() 分配（那些寄存器归槽所有），
-        // 但**不能直接 return** —— 后面还有 block_temps（%r8-%r11）
-        // 的分配路径，跨块 vreg 需要它。
-        //
-        // 曾经在这里 return，结果跨块 vreg（如 LICM 提升的循环上界）
-        // 拿不到任何寄存器，只能留在栈上被反复重载；更糟的是
-        // %r8-%r11 在调用点会被破坏，而那些 vreg 的栈副本没人维护 ——
-        // 实测 nqueens N=1 就抛 IndexError。
+        // 槽占 kSlotRegs()[0 .. n_saved_regs_)，从 n_saved_regs_ 起分配
+        // 不会与槽冲突。剩下的 kSlotRegs() 不够时，跨块 vreg 还有后面的
+        // %r8-%r11（block_temps，调用点会保存）路径。
         int next = n_saved_regs_;
         size_t ci = 0;
-        // **vreg 从 n_saved_regs_ 开始用，正好是 split 之后剩下的那部分。**
-        //
-        // split 的槽占 kSlotRegs()[base .. base+k)，而 n_saved_regs_ 已被
-        // 设成 base+k（见 assign_slot_regs_split 末尾的 max 逻辑）。所以从
-        // n_saved_regs_ 起分配不会与槽冲突。
-        //
-        // 曾经在 split 模式下整段跳过，结果跨块 vreg（LICM 提升的循环上界、
-        // 函数返回值等）只能落栈，每次使用要「load 到临时 + 再 store 临时」
-        // 两条指令 —— 这才是 split 慢 27% 的主因，不是双写。
         for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
             vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
         n_saved_regs_ = next;

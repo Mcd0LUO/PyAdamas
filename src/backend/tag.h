@@ -95,7 +95,6 @@
     bool eh_plan_active_ = false;
     // 总开关（--zero-cost-exc）：关闭时 prepare_eh_plan 直接返回，老路径 asm 不变。
     bool zero_cost_exc_ = true;
-    bool rc_split_ = false;
     bool ra_opt_ = false;    // RA_OPT：P1 跨调用提升 + P2 只读别名（backend/ra_opt.cpp），默认关
     bool inline_opt_ = false;  // INLINE_OPT：内联/devirt 深化 + 入口对齐修复，默认关
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);  // 预扫描 EH 标记

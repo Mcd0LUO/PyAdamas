@@ -11,7 +11,7 @@
 | 开关 | 默认 | 读取位置 | 结论 | 证据 / 理由 |
 |---|---|---|---|---|
 | `PYADAMAS_RA_OPT` | **关** | `main.cpp`（`prog.ra_opt`；manifest 行 `raopt`） | **保持 opt-in** | 0.475 两窗各 15 轮：realistic 合计 −0.2%（逐例 \|Δ\|<0.7%，obj_dispatch +0.2%）、classic 合计 +1.8%（**反号**）。asm 真正变化的只有 3 例：nqueens **+8.5%**（p25 +7.0%，回退方向）、fasta +4.8%（p25 +20.9%）、dict_wordfreq −0.7%；其余 15 例 asm 逐字节相同。0.470 的入口私有全局提升之后 obj_dispatch 上收益已归零。**触发条件**：出现「同块跨调用、活跃区间长」的新热循环，或 call graph 分析落地后重测；`docs/ra-opt-design.md` §6 |
-| `PYADAMAS_RA_SPLIT` | **已废弃** | `main.cpp`：设了非 0 值直接 `error` 退出（rc=2）；`prog.rc_split` 恒 false | **保持「已废弃 + 拒绝入口」**（不是 opt-in，也暂不删代码） | `docs/regalloc.md` §已否决：三轮实现均 +27~28%。**不现在删的原因**：`rc_split_` 虽恒 false，但 `assign_slot_regs_split` 与 `slot_loc_` 系列发射代码和默认路径的块内槽 reload/融合存储共用同一段 `gen_block`，删除要重排默认发射，必须独立一版 + 12 基准 asm 对照。**删除清单**：`assign_slot_regs_split`（regalloc_scan.cpp ~200 行）、`slot_loc_/slot_reload_in_/slot_spill_out_` 及其在 `block.cpp` 的 5 处使用、`spill_placement.{cpp,h}`、`Program.rc_split` 与 manifest 行 `rcsplit` |
+| ~~`PYADAMAS_RA_SPLIT`~~ | **已删除** | `main.cpp`：设了非 0 值直接 `error` 退出（rc=2） | **删代码（已完成）** | `docs/regalloc.md` §已否决：三轮实现均 +27~28%。已按清单删除 `assign_slot_regs_split`、`slot_loc_/slot_reload_in_/slot_spill_out_` 及其在 `block.cpp` 的 5 处使用、`spill_placement.{cpp,h}`、`Program.rc_split` 与 manifest 行 `rcsplit`。**验收**：默认路径 12 基准 asm 逐字节不变（删前/删后 `cmp` 全同）；只剩一条 rc=2 报错文案，防止 A/B 脚本误以为在跑另一条分配路径 |
 | `PYADAMAS_RA_GRAPH` | **已删除** | `main.cpp`：残留一条报错（rc=2） | **删代码（已完成）** | 图着色分配器整段删除（0.3xx）。只剩报错文案，防止 A/B 脚本误以为在跑另一条分配路径；无死代码。`docs/regalloc.md` |
 | `PYADAMAS_LOOP_OPT` | **3**（默认开：bit0 跳转线程化 + bit1 仿射 BCE） | `main.cpp`；`1`→3、`0`→0、数字掩码 4–7 开发期 A/B | **默认开（现状）** | bit0 纯 CFG 等价变换（nqueens −2.9%，其余中性；含单块直线循环体的函数由 pass 内部跳过，避免破坏向量化）；bit1 仿射 BCE。**bit2（同块 load 去重）实测负收益**，只能显式掩码开。`docs/intloop-design.md` §2 |
 | `PYADAMAS_BORROW_OPT` | **关** | `main.cpp`（`prog.borrow_opt`；manifest 行 `borrowopt`） | **保持 opt-in** | 命中即纯赢、不命中 asm 逐字节不变：12 基准里 obj_dispatch 300.59→202.24 ms（**−32.7%**，指令数 −43.2%）、dict_wordfreq −6.5%、sort_struct −2.6%，其余 15 例产物不变。**但日常语料没有可测收益**：`bench/daily` 23 例（其中 5 例命中借用）BURST=20 × 15 轮聚合 **−0.1%**（全在 ±1% 噪声带内；`bench/daily` 的命中用例都 <30ms）。命中 5 例：a5_todo_cli / b1_log_parse / b2_normalize / b3_template / b5_re_extract。**缺的证据**：①一个 ≥100ms、借用能命中的真实语料用例，测得 ≥2% 且 p25 同向；②或 3 倍长的日常语料集上聚合越过 ±1% 噪声带。在此之前默认化 = 用所有权正确性风险换一个量不出来的收益。`docs/borrow-loop-design.md` §8/§9 |
@@ -20,7 +20,7 @@
 | `PYADAMAS_GC_INCR_MARK` | **关** | 运行时 `runtime/rt_core.c`（`pa_gc_init` 读一次缓存） | **保持 opt-in** | GC 并发化阶段1 原型：major 走分片标记 + Yuasa 删除屏障 + 门控插入屏障。默认关时行为/asm/leak **逐字不变**；0.444 修过它开启后的 shutdown UAF。没有性能数字（原型不追性能）。**触发**：GC 阶段2（并发标记）立项时整体评估 |
 | ~~`PYADAMAS_SIMD`~~ | **已删除（0.480）** | `main.cpp`：残留报错（rc=2） | **删代码（已完成）** | 特化模板对当前 IR 全部失配（12 基准 asm 零 `SIMD` 标记、指令数与关掉向量化逐位相同）→ 1304 → 149 行，默认产物逐字节不变。`docs/simd-vectorization-design.md` 顶部 |
 
-同一注册表里还有（不在本次清单，登记备查）：`PYADAMAS_INLINE_OPT`（默认关，内联/devirt 深化）、`PYADAMAS_LANG_GAPS`（默认关，P4 语言缺口）、`PYADAMAS_AVX2`（默认开，通用向量化的 4-lane 路径）、`PYADAMAS_SPLIT_MAXREG`（已随 RA_SPLIT 废弃、设了即报错）。
+同一注册表里还有（不在本次清单，登记备查）：`PYADAMAS_INLINE_OPT`（默认关，内联/devirt 深化）、`PYADAMAS_LANG_GAPS`（默认关，P4 语言缺口）、`PYADAMAS_AVX2`（默认开，通用向量化的 4-lane 路径）、`PYADAMAS_SPLIT_MAXREG`（已随 RA_SPLIT 删除、设了即报错）。
 
 ## 2. 复现
 

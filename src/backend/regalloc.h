@@ -81,19 +81,5 @@
     std::vector<std::string> func_labels_;
     void build_operand_caches();
 
-    // ── live range splitting ───────────────────────────────────
-    //
-    // `slot_loc_[b][s]` 非空表示「槽 s 在块 b 里住在那个寄存器」。
-    // 与 `ra_.slot_reg[s]`（整函数固定位置）互斥：split 模式用这张表，
-    // 默认模式用 ra_.slot_reg。两者都为空时走栈（smem）。
-    //
-    // slot_op 里加了一个分支：slot_loc_ 非空时按块查表，否则走 ra_.slot_reg
-    // （默认路径行为完全不变）。split 模式只在 PYADAMAS_RA_SPLIT=1 时启用。
-    std::vector<std::vector<MOperand>> slot_loc_;
-    // 块 b 入口需要从栈装进寄存器的槽（前驱可能在栈上）。
-    std::vector<std::vector<int>> slot_reload_in_;
-    // 块 b 出口要写回栈的槽（存在后继要从栈读）。
-    // split 模式不再双写 store，这里是栈副本唯一的更新点。
-    std::vector<std::vector<int>> slot_spill_out_;
-    // 当前生成到哪个块（split 模式用）。
-    int split_block_ = -1;
+    // live range splitting（slot_loc_/slot_reload_in_/slot_spill_out_/
+    // split_block_）已删除，槽位置只有「整函数固定寄存器或栈槽」两种。
