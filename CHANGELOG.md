@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.512] - 2026-11-25
+
+> feat(runtime)：**`re.subn(pattern, repl, string, count=0)` → `tuple[str, int]`**（接口表小件，一次一件推进）。
+>
+> 实现原则是「不写第二套匹配逻辑」：`pa_re_subn_str`/`pa_re_subn` 与 `sub` **共用同一条替换循环**
+>（同样的空匹配推进 `pos = caps[1] + 1`、`count` 截断、无匹配时 `done = 0`），循环里本来就有 `done` 计数，
+>直接拿它当返回值 —— 语义不会与 `sub` 分叉。
+>
+> 返回值：`pa_tuple_new_filled(2, 2, out, done, 0, 0)`（`elem_kind=2`：str 是堆引用、次数是标量），
+>新建的结果串**所有权直接转给 tuple**（不额外 retain；销毁走注册表 dec，不会多 dec 标量）。
+>
+> 接线：`RtFn::RegexSubnStr`/`RegexSubn`（与 `sub` 同调用组）+ `rtfn_names` + `call_rt` 编组；
+>`builtin_sigs` 的 `re_fn` 表加 `subn`（`ret = tuple[str,int]`）；`stdlib/sigs/re.pysig` 加 `Pattern.subn`（`@native`）；
+>`lower/import.cpp` 原生名表加 `subn → RegexSubnStr`；`lower/method_misc.cpp` 加 `Pattern.subn` 发射（与 `sub` 同形）。
+>
+> **对拍**（`tests/run/re_subn.py`，与 CPython 3.14.4 逐字节一致）：
+>
+> ```
+> re.subn('a','X','banana')            → ('bXnXnX', 3)
+> re.subn('a','X','banana',1)          → ('bXnana', 1)
+> re.subn('zz','X','banana')           → ('banana', 0)
+> re.subn('','-','abc')                → ('-a-b-c-', 4)      # 空匹配
+> re.subn('(?P<x>a)', r'[\g<x>]', …)   → ('b[a]n[a]n[a]', 3)  # 命名组
+> type(r).__name__, len(r), r[0], r[1] → tuple 2 bXnXnX 3
+> ```
+>
+> ASan 套件 **501 ran ok / 0 失败**；628 默认口径 **499/623 不降**；本仓库 **901 个 `.py`：784 通过**、零新拒绝；
+> 12 基准 asm 与 master 逐字节相同。
+>
+> 闸门：套件 **501** / difftest **471** / check_size **PASS** / ctest 9/9。
 ## [0.511] - 2026-11-25
 
 > feat(runtime)：`sys.getrecursionlimit()` / `sys.setrecursionlimit(n)`（接口表小件）；其余六项**判负**。
