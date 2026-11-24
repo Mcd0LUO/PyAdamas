@@ -865,6 +865,207 @@ static int cmp_desc_lt(int64_t a, int64_t b) {
 #define LESS_CMP(a, b) cmp_desc_lt(a, b)
 PYADAMAS_TIMSORT(cmp, LESS_CMP)
 
+/* ── 0.470：定长元组（记录）排序平坦化 ───────────────────────────
+   描述符的根是定长元组、且每个位置都是标量时，比较本来不需要递归：
+   旧路径每次比较都重新解析一遍 't' + arity + 子描述符（每个位置一次
+   递归调用）。排序开始前解析一次，把逐位置操作码拷到栈上，比较循环
+   直接按下标读元组体。语义与 sort_desc_cmp 的 't' 分支逐条对齐：
+   先比 min(运行期长度, arity) 个位置，超出 arity 的位置按机器字比，
+   前缀相等时短者小。嵌套元组/列表仍走原路径。 */
+#define SORT_FLAT_MAX 8
+
+typedef struct {
+    uint8_t op[SORT_FLAT_MAX];
+    int n;
+    int all_word;  /* 全是 i/x：走纯整数比较循环，连操作码都不用读 */
+} SortFlatPlan;
+
+static const uint8_t* g_flat_ops = 0;  /* 同 g_cmp_desc：单线程静态传递 */
+static int g_flat_n = 0;
+static int g_flat_all_word = 0;
+
+/* 解析 desc[0,len)：只接受 t + arity + arity 个标量子描述符。
+   成功返回 1；嵌套/超长/长度对不上一律退回通用路径。 */
+static int sort_flat_plan(const uint8_t* d, int64_t len, SortFlatPlan* p) {
+    if (!d || len < 2 || d[0] != 't') return 0;
+    int n = d[1];
+    if (n < 1 || n > SORT_FLAT_MAX) return 0;
+    const uint8_t* q = d + 2;
+    const uint8_t* end = d + len;
+    int all_word = 1;
+    for (int i = 0; i < n; ++i) {
+        if (q >= end) return 0;
+        uint8_t c = *q;
+        if (c == 'l' || c == 't') return 0;
+        p->op[i] = c;
+        if (c != 'i' && c != 'x') all_word = 0;
+        ++q;
+    }
+    if (q != end) return 0;
+    p->n = n;
+    p->all_word = all_word;
+    return 1;
+}
+
+/* 单位置标量比较：与 sort_desc_cmp 的标量分支同口径。 */
+static inline __attribute__((always_inline)) int sort_scalar_cmp(uint8_t op, int64_t a, int64_t b) {
+    if (op == 'u') {  /* u64：无符号 */
+        uint64_t x = (uint64_t)a, y = (uint64_t)b;
+        return (x > y) - (x < y);
+    }
+    if (op == 'f') {
+        double x = f64_of(a), y = f64_of(b);
+        return (x > y) - (x < y);
+    }
+    if (op == 's') {
+        int64_t r = pa_str_cmp((PyAdamasStr*)(uintptr_t)a, (PyAdamasStr*)(uintptr_t)b);
+        return r < 0 ? -1 : r > 0 ? 1 : 0;
+    }
+    if (op == 'b') {
+        int64_t r = pa_big_cmp((PyAdamasBig*)(uintptr_t)a, (PyAdamasBig*)(uintptr_t)b);
+        return r < 0 ? -1 : r > 0 ? 1 : 0;
+    }
+    return sort_word_cmp(a, b);  /* i / x / 防御 */
+}
+
+static int sort_flat_cmp(int64_t a, int64_t b) {
+    if (a == b) return 0;
+    if (!a || !b) return sort_word_cmp(a, b);
+    PyAdamasList* A = (PyAdamasList*)(uintptr_t)a;
+    PyAdamasList* B = (PyAdamasList*)(uintptr_t)b;
+    int64_t la = A->len, lb = B->len;
+    int64_t m = la < lb ? la : lb;
+    int64_t n = g_flat_n;
+    int64_t k = m < n ? m : n;
+    const int64_t* da = A->data;
+    const int64_t* db = B->data;
+    if (g_flat_all_word) {
+        /* 全整数：防御位置（超出 arity）也是同一口径，直接循环到 m。 */
+        for (int64_t i = 0; i < m; ++i) {
+            int64_t x = da[i], y = db[i];
+            if (x != y) return (x > y) - (x < y);
+        }
+    } else {
+        const uint8_t* ops = g_flat_ops;
+        for (int64_t i = 0; i < k; ++i) {
+            int r = sort_scalar_cmp(ops[i], da[i], db[i]);
+            if (r) return r;
+        }
+        /* 防御：运行期长度超出静态 arity 时多余位置按机器字比。 */
+        for (int64_t i = k; i < m; ++i) {
+            int r = sort_word_cmp(da[i], db[i]);
+            if (r) return r;
+        }
+    }
+    return (la > lb) - (la < lb);  /* 前缀相等：短者小（CPython 口径） */
+}
+#define LESS_FLAT(a, b) (sort_flat_cmp((a), (b)) < 0)
+PYADAMAS_TIMSORT(flat, LESS_FLAT)
+
+/* 定长记录排序的键抽取（decorate-sort-undecorate）：逐对比较的瓶颈不在
+   算术，而在每个元素都要经 PyAdamasList 头 -> data 两次间接寻址，且元组
+   对象在堆上分散。这里把各位置的值先拷进连续键数组，用下标排序（相等键
+   按原下标定序 = 稳定排序），最后按下标置换。比较结果只依赖各位置的值，
+   与 sort_flat_cmp 逐例等价。只对纯值标量（i/x/u/f）生效：str/big 的比
+   较本身就要解引用对象，抽键没有收益。 */
+#define SORT_KEYS_MAX_WORDS ((int64_t)(64 << 20) / (int64_t)sizeof(int64_t))
+#define SORT_KEYS_MIN_LEN 64
+
+static const int64_t* g_flat_keys = 0;  /* 连续键数组：每 arity 个字一条记录 */
+static int g_flat_key_arity = 0;
+static int g_flat_key_stride = 0;
+static const uint8_t* g_flat_key_ops = 0;
+static int g_flat_key_all_word = 0;
+
+static inline __attribute__((always_inline)) int sort_key_lt(int64_t ia, int64_t ib) {
+    const int64_t* a = g_flat_keys + ia * g_flat_key_stride;
+    const int64_t* b = g_flat_keys + ib * g_flat_key_stride;
+    int arity = g_flat_key_arity;
+    if (g_flat_key_all_word) {
+        /* 整数记录：按 arity 展开（常见 1-4 位置），省掉循环计数与边界
+           判断；gcc 默认不内联这个比较器（6 个排序调用点），这里强制内联。 */
+        switch (arity) {
+            case 1:
+                if (a[0] != b[0]) return a[0] < b[0];
+                break;
+            case 2:
+                if (a[0] != b[0]) return a[0] < b[0];
+                if (a[1] != b[1]) return a[1] < b[1];
+                break;
+            case 3:
+                if (a[0] != b[0]) return a[0] < b[0];
+                if (a[1] != b[1]) return a[1] < b[1];
+                if (a[2] != b[2]) return a[2] < b[2];
+                break;
+            case 4:
+                if (a[0] != b[0]) return a[0] < b[0];
+                if (a[1] != b[1]) return a[1] < b[1];
+                if (a[2] != b[2]) return a[2] < b[2];
+                if (a[3] != b[3]) return a[3] < b[3];
+                break;
+            default:
+                for (int j = 0; j < arity; ++j) {
+                    int64_t x = a[j], y = b[j];
+                    if (x != y) return x < y;
+                }
+        }
+    } else {
+        const uint8_t* ops = g_flat_key_ops;
+        for (int j = 0; j < arity; ++j) {
+            int r = sort_scalar_cmp(ops[j], a[j], b[j]);
+            if (r) return r < 0;
+        }
+    }
+    return ia < ib;  /* 相等键按原下标定序：CPython 的稳定排序口径 */
+}
+#define LESS_KEY(a, b) (sort_key_lt((a), (b)))
+PYADAMAS_TIMSORT(keys, LESS_KEY)
+
+/* 尝试键抽取路径；处理成功返回 1，否则返回 0 让调用方走逐对比较。 */
+static int sort_flat_keys_try(PyAdamasList* l, const SortFlatPlan* p) {
+    int64_t n = l->len;
+    int arity = p->n;
+    if (n < SORT_KEYS_MIN_LEN) return 0;
+    for (int j = 0; j < arity; ++j) {
+        uint8_t c = p->op[j];
+        if (c != 'i' && c != 'x' && c != 'u' && c != 'f') return 0;
+    }
+    int64_t key_words = n * (int64_t)arity;
+    /* 总缓冲 = idx(n) + 键(key_words) + 临时(n) ≤ 3*key_words，按此设上限，
+       顺带避免 2*n 在极端长度下溢出。 */
+    if (key_words > SORT_KEYS_MAX_WORDS / 3) return 0;
+    /* 形状校验：所有元素都必须是 arity 长的元组，否则退回逐对比较。 */
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t v = l->data[i];
+        if (!v) return 0;
+        if (((PyAdamasList*)(uintptr_t)v)->len != arity) return 0;
+    }
+    size_t elems = (size_t)n;
+    int64_t* buf = (int64_t*)malloc(
+        (size_t)(2 * n + key_words) * sizeof(int64_t));
+    if (!buf) return 0;
+    int64_t* idx = buf;
+    int64_t* keys = buf + n;
+    int64_t* tmp = keys + key_words;
+    for (int64_t i = 0; i < n; ++i) {
+        const int64_t* src = ((PyAdamasList*)(uintptr_t)l->data[i])->data;
+        int64_t* dst = keys + i * arity;
+        for (int j = 0; j < arity; ++j) dst[j] = src[j];
+        idx[i] = i;
+    }
+    g_flat_keys = keys;
+    g_flat_key_arity = arity;
+    g_flat_key_stride = arity;
+    g_flat_key_ops = p->op;
+    g_flat_key_all_word = p->all_word;
+    sort_keys(idx, n);
+    g_flat_keys = 0;
+    for (int64_t i = 0; i < n; ++i) tmp[i] = l->data[idx[i]];
+    memcpy(l->data, tmp, elems * sizeof(int64_t));
+    free(buf);
+    return 1;
+}
+
 /* kind 3（元素类型推断不出）的排序：CPython 口径 —— 元素必须能相互比较。
    以前一律按机器字（堆指针）比：混合容器会静默排出一串乱序，而不是像
    CPython 那样抛 TypeError（sorted(["a0", 1])）。现在先按元素族分类：
@@ -1003,6 +1204,16 @@ void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
     else if (kind == 1) sort_f64(l->data, l->len);
     else if (kind == 5) sort_u64(l->data, l->len);
     else if (kind == 4 && desc && desc->len > 0) {
+        SortFlatPlan fp;
+        if (sort_flat_plan((const uint8_t*)desc->data, desc->len, &fp)) {
+            if (sort_flat_keys_try(l, &fp)) return;
+            g_flat_ops = fp.op;
+            g_flat_n = fp.n;
+            g_flat_all_word = fp.all_word;
+            sort_flat(l->data, l->len);
+            g_flat_ops = 0;
+            return;
+        }
         g_cmp_desc = (const uint8_t*)desc->data;
         sort_cmp(l->data, l->len);
         g_cmp_desc = 0;
