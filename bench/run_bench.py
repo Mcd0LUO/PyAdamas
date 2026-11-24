@@ -7,6 +7,9 @@
     cd /w && python3 bench/run_bench.py 13_sum 32_sorted   # 只跑指定用例
     cd /w && python3 bench/run_bench.py --repeat 5 --target 0.4
 
+默认 16 路并行，每个用例绑定到独立 CPU（短进程不绑核会被迁移放大）；
+`--jobs 1` 串行、`--no-linear` 跳过 2N 线性检查可进一步提速。
+
 做法：
   1. 先按 CPython 的实测时间把每个用例的 N 校准到 --target 秒左右；
   2. 同一份源码分别喂给 CPython 和 pyadamas（pyadamas 走 build + 跑原生二进制，
@@ -18,11 +21,13 @@
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -85,18 +90,19 @@ def calibrate(src, name, target, work):
     for _ in range(5):
         py = work / (name + ".py")
         py.write_text(set_n(src, n), encoding="utf-8")
-        t, err = timed_run([PYTHON_BIN, str(py)], work / "calib.out")
+        t, err = timed_run([PYTHON_BIN, str(py)], work / (name + ".calib.out"))
         if t is None:
             return None, err
         if best is None or t < best[0]:
             best = (t, n)
+        if t > target * 2.0:
+            # 明显超出目标（例如初始 N 就是几倍）：先缩小再测，
+            # 否则这个用例要跑 5 轮 1s+，拖慢整轮 bench
+            n = max(1, int(n * target / t))
+            continue
         if t >= target * 0.7:
             return n, t
-        if t > target * 3:
-            # 已经偏大，往回缩一点
-            n = max(1, int(n * max(0.3, target / t)))
-        else:
-            n = int(n * max(2.0, min(8.0, target / max(t, 1e-4))))
+        n = int(n * max(2.0, min(8.0, target / max(t, 1e-4))))
         if n > 500_000_000:
             break
     return best[1], best[0]
@@ -117,7 +123,7 @@ def case_note(path):
     return first.lstrip("# ").strip()
 
 
-def bench_case(path, target, repeat, work, baseline):
+def bench_case(path, target, repeat, work, baseline, linear=True):
     name = path.stem
     src = path.read_text(encoding="utf-8")
     row = {"name": name, "note": case_note(path)}
@@ -149,15 +155,17 @@ def bench_case(path, target, repeat, work, baseline):
         return row
 
     # --- 线性检查：2N 的耗时应该接近 2 倍 ---
-    py2 = work / (name + ".2n.py")
-    py2.write_text(set_n(src, n * 2), encoding="utf-8")
-    bin2 = work / (name + ".2n.bin")
-    berr = build(PYADAMAS_BIN, py2, bin2)
     t2 = None
-    if not berr:
-        t2, _ = measure([str(bin2)], max(2, repeat // 2), work / (name + ".p23b.out"))
-    row["n2"] = n * 2
-    row["t_pa_2n"] = t2
+    if linear:
+        py2 = work / (name + ".2n.py")
+        py2.write_text(set_n(src, n * 2), encoding="utf-8")
+        bin2 = work / (name + ".2n.bin")
+        berr = build(PYADAMAS_BIN, py2, bin2)
+        t2 = None
+        if not berr:
+            t2, _ = measure([str(bin2)], max(2, repeat // 2), work / (name + ".p23b.out"))
+        row["n2"] = n * 2
+        row["t_pa_2n"] = t2
 
     # --- 输出比对 ---
     row["out_same"] = None
@@ -186,6 +194,9 @@ def main():
     ap.add_argument("cases", nargs="*", help="只跑这些用例（文件名或前缀）")
     ap.add_argument("--repeat", type=int, default=3, help="每个用例跑几次取最小值")
     ap.add_argument("--target", type=float, default=0.35, help="CPython 侧的校准目标秒数")
+    ap.add_argument("--jobs", type=int, default=0,
+                    help="并行跑几个用例（0=自动，最多 16；每路绑定到独立 CPU）")
+    ap.add_argument("--no-linear", action="store_true", help="跳过 2N 线性检查（更快）")
     ap.add_argument("--json", default="", help="把结果写到 JSON 文件")
     ap.add_argument("--md", default="", help="把结果表写成 Markdown 文件")
     ap.add_argument("--from-json", default="", help="不重跑，直接用已有的 JSON 重新生成表格")
@@ -202,8 +213,10 @@ def main():
         data = json.loads(Path(args.from_json).read_text(encoding="utf-8"))
         base = data.get("baseline", {})
         rows = data.get("rows", [])
+        args.repeat = data.get("repeat", args.repeat)
+        args.target = data.get("target", args.target)
         if args.md:
-            write_markdown(Path(args.md), base, rows, args)
+            write_markdown(Path(args.md), base, rows, args, jobs=data.get("jobs", 1))
             print("Markdown: %s" % args.md)
         return 0
 
@@ -214,7 +227,16 @@ def main():
         print("没有匹配的用例")
         return 1
 
-    # 启动开销基线
+    # 启动开销基线（先绑核：短进程不绑核会被迁移放大，基线也不例外）
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = list(range(os.cpu_count() or 1))
+    if cpus:
+        try:
+            os.sched_setaffinity(0, {cpus[0]})
+        except OSError:
+            pass
     base_path = CASES_DIR / "00_baseline.py"
     base = {}
     if base_path.exists():
@@ -224,13 +246,40 @@ def main():
     print()
 
     rows = []
-    for f in files:
-        if f.stem == "00_baseline":
-            continue
+    todo = [f for f in files if f.stem != "00_baseline"]
+    jobs = args.jobs if args.jobs > 0 else min(16, len(cpus) or 1)
+    jobs = max(1, min(jobs, len(todo), len(cpus) or 1))
+    if jobs > 1:
+        print("并行 %d 路（每路绑定独立 CPU）" % jobs)
+
+    def run_one(idx, f, cpu):
+        if cpu is not None:
+            try:
+                os.sched_setaffinity(0, {cpu})
+            except OSError:
+                pass
         t0 = time.perf_counter()
-        row = bench_case(f, args.target, args.repeat, WORK, base)
+        row = bench_case(f, args.target, args.repeat, WORK, base,
+                         linear=not args.no_linear)
         row["wall"] = time.perf_counter() - t0
-        rows.append(row)
+        return idx, row
+
+    results = [None] * len(todo)
+    if jobs <= 1:
+        for i, f in enumerate(todo):
+            _, results[i] = run_one(i, f, cpus[0] if cpus else None)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [
+                pool.submit(run_one, i, f, cpus[(i % len(cpus))])
+                for i, f in enumerate(todo)
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                i, row = fut.result()
+                results[i] = row
+    rows = results
+
+    for row in rows:
         if "error" in row:
             print("%-18s 跳过：%s" % (row["name"], row["error"].splitlines()[0][:120]))
         else:
@@ -253,7 +302,7 @@ def main():
         if "error" in r:
             print("| `%s` | - | - | - | - | %s |" % (r["name"], r["error"].splitlines()[0][:80]))
             continue
-        lin = "是" if r.get("linear") else "**否**"
+        lin = "-" if r.get("linear") is None else ("是" if r["linear"] else "**否**")
         print(
             "| `%s` | %d | %.2f | %.3f | %.1f× | %s |"
             % (r["name"], r["n"], r["t_cpy"] * 1e3, r["t_pyadamas"] * 1e3, r["speedup"], lin)
@@ -261,13 +310,16 @@ def main():
 
     if args.json:
         Path(args.json).write_text(
-            json.dumps({"baseline": base, "rows": rows}, ensure_ascii=False, indent=2),
+            json.dumps({"baseline": base, "jobs": jobs, "repeat": args.repeat,
+                        "target": args.target, "linear": not args.no_linear,
+                        "rows": rows},
+                       ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         print("\nJSON: %s" % args.json)
 
     if args.md:
-        write_markdown(Path(args.md), base, rows, args)
+        write_markdown(Path(args.md), base, rows, args, jobs=jobs)
         print("Markdown: %s" % args.md)
     return 0
 
@@ -285,7 +337,7 @@ def builtin_name(case):
     return case.split("_", 1)[-1]
 
 
-def write_markdown(path, base, rows, args):
+def write_markdown(path, base, rows, args, jobs=1):
     import datetime
     import platform
 
@@ -311,6 +363,10 @@ def write_markdown(path, base, rows, args):
     )
     lines.append("每次取 %d 轮运行的最小值，循环次数按 CPython 实测时间校准到 %.2f 秒左右。"
                  % (args.repeat, args.target))
+    if jobs > 1:
+        lines.append("每个用例绑定到独立 CPU，%d 路并行执行（短进程不绑核会被调度迁移放大）。" % jobs)
+    else:
+        lines.append("每个用例绑定到独立 CPU，串行执行。")
     lines.append("")
     lines.append("| 用例 | 内置 | 说明 | N | CPython (ms) | pyadamas (ms) | 净加速 | 线性 |")
     lines.append("|---|---|---|---|---|---|---|---|")
@@ -322,7 +378,7 @@ def write_markdown(path, base, rows, args):
                    r["error"].splitlines()[0][:60])
             )
             continue
-        lin = "是" if r.get("linear") else "**否**"
+        lin = "-" if r.get("linear") is None else ("是" if r["linear"] else "**否**")
         lines.append(
             "| `%s` | `%s` | %s | %d | %.2f | %.3f | %.1f× | %s |"
             % (r["name"], builtin_name(r["name"]), r.get("note", ""), r["n"],

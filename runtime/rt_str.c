@@ -444,9 +444,7 @@ PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i) {
     int n = 0;
     uint32_t cp = str_cp_at(s, off, &n);
     if (cp < 0x80) return pa_char_str((int64_t)cp);
-    PyAdamasStr* out = str_alloc_raw(n);
-    memcpy((char*)out->data, s->data + off, (size_t)n);
-    return str_seal_n(out, 1);
+    return pa_cp_str(cp);
 }
 
 /* 带游标的 str 下标：命中「紧接着上一次取出的码点」时 O(1)。
@@ -471,9 +469,9 @@ PyAdamasStr* pa_str_char_at_cursor(PyAdamasStr* s, int64_t i, PyAdamasStrCursor*
         cur->off = off + n;
     }
     if (cp < 0x80) return pa_char_str((int64_t)cp);
-    PyAdamasStr* out = str_alloc_raw(n);
-    memcpy((char*)out->data, s->data + off, (size_t)n);
-    return str_seal_n(out, 1);
+    /* 非 ASCII 单码点走 BMP 驻留表（首次分配、之后零分配），
+       和 ASCII 路径一样返回永生对象，调用方的 rc_dec 是空操作。 */
+    return pa_cp_str(cp);
 }
 
 /* 字节长度出口（O(1)）：len_bytes(s)。 */
@@ -505,6 +503,71 @@ PyAdamasStr* pa_bytes_decode(PyAdamasStr* s) {
     return str_new(s->data, s->len);
 }
 
+/* 两位十进制查表（"00".."99" 的连续排布）：一次写两位，除法次数减半。 */
+static const char pa_dec2[] =
+    "00010203040506070809"
+    "10111213141516171819"
+    "20212223242526272829"
+    "30313233343536373839"
+    "40414243444546474849"
+    "50515253545556575859"
+    "60616263646566676869"
+    "70717273747576777879"
+    "80818283848586878889"
+    "90919293949596979899";
+
+/* 十进制位数（1..20）：逐级缩小量级再把缩小倍数加回去，比逐个比较幂次
+   少了近一半分支，且大部分数值在前几级就退完。 */
+static inline int u64_dec_digits(uint64_t m) {
+    int n = 1;
+    if (m >= 10000000000ull) { m /= 10000000000ull; n += 10; }
+    if (m >= 100000) { m /= 100000; n += 5; }
+    if (m >= 1000) { m /= 1000; n += 3; }
+    if (m >= 100) { m /= 100; n += 2; }
+    if (m >= 10) n += 1;
+    return n;
+}
+
+/* 把 mag 的十进制数字倒着写进以 end 结尾的缓冲区（end 本身不写），
+   返回到写入区间的起点。 */
+static inline char* u64_write_dec(char* end, uint64_t mag) {
+    char* p = end;
+    if (mag < 10u) {
+        *--p = (char)('0' + (int)mag);
+        return p;
+    }
+    do {
+        unsigned r = (unsigned)(mag % 100u);
+        mag /= 100u;
+        p -= 2;
+        p[0] = pa_dec2[r * 2];
+        p[1] = pa_dec2[r * 2 + 1];
+    } while (mag >= 100u);
+    if (mag >= 10u) {
+        p -= 2;
+        p[0] = pa_dec2[(unsigned)mag * 2];
+        p[1] = pa_dec2[(unsigned)mag * 2 + 1];
+    } else if (mag) {
+        *--p = (char)('0' + (int)mag);
+    }
+    return p;
+}
+
+/* 十进制渲染到调用方缓冲（不分配）：print() 直接 fwrite 用，返回字节数。 */
+int64_t pa_i64_to_buf(char* dst, int64_t v) {
+    uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    int len = u64_dec_digits(mag) + (v < 0);
+    char* p = u64_write_dec(dst + len, mag);
+    if (v < 0) *--p = '-';
+    return len;
+}
+
+int64_t pa_u64_to_buf(char* dst, uint64_t v) {
+    int len = u64_dec_digits(v);
+    u64_write_dec(dst + len, v);
+    return len;
+}
+
 PyAdamasStr* pa_str_from_i64(int64_t v) {
     // **个位数直接返回驻留单字节串。**
     //
@@ -518,39 +581,27 @@ PyAdamasStr* pa_str_from_i64(int64_t v) {
     // 里没有 str(单个数字) 后再比较/打印的，正好是用例盲区。）
     if ((uint64_t)v < 10u) return pa_char_str((int64_t)('0' + v));
     // 手写十进制：snprintf 的格式解析在 str(i) 这种热路径上占大头。
-    // 从缓冲区尾部往前写，负数补符号；INT64_MIN 用 -(v+1)+1 取绝对值。
-    char buf[21];
-    char* end = buf + sizeof buf;
-    char* p = end;
+    // **两位数查表 + 直接写进目标串**：一次出两位把除法次数减半；先算位数再
+    // 分配，数字从目标串尾部倒着写，省掉「栈缓冲 → str_new_ascii memcpy」的
+    // 往返（perf 显示那段 2 字节栈写 + 8 字节回读有 store-forwarding 停顿，
+    // 占本函数 30%）。
     uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
-    do {
-        *--p = (char)('0' + (int)(mag % 10));
-        mag /= 10;
-    } while (mag);
+    int len = u64_dec_digits(mag) + (v < 0);
+    PyAdamasStr* s = str_alloc_raw(len);
+    char* p = u64_write_dec((char*)s->data + len, mag);
     if (v < 0) *--p = '-';
-    // **用 str_new_ascii 而不是 str_new。**
-    //
-    // str_new 末尾调 str_seal，它会 str_count_cp 扫一遍字符区数码点数。
-    // 而这里产出的必然是纯 ASCII（数字和可选负号），码点数恒等于字节数，
-    // 直接 pub = len 就行 —— str_new_ascii 正是这个 O(1) 版本。
-    //
-    // 实测 str(i) 单次 31.8ns，其中这次多余的扫描占相当比例（字符串短，
-    // 但 str_count_cp 的调用 + 分支开销是固定的）。
-    return str_new_ascii(p, (int64_t)(end - p));
+    s->pub = len;  // 全 ASCII：码点数恒等于字节数（O(1)，免 str_count_cp）
+    return s;
 }
 
 /* 无符号 64 位 → 十进制串（定宽 u64 的 str()/print() 用）。 */
 PyAdamasStr* pa_str_from_u64(uint64_t v) {
     if (v < 10u) return pa_char_str((int64_t)('0' + v));
-    char buf[21];
-    char* end = buf + sizeof buf;
-    char* p = end;
-    uint64_t mag = v;
-    do {
-        *--p = (char)('0' + (int)(mag % 10));
-        mag /= 10;
-    } while (mag);
-    return str_new_ascii(p, (int64_t)(end - p));
+    int len = u64_dec_digits(v);
+    PyAdamasStr* s = str_alloc_raw(len);
+    u64_write_dec((char*)s->data + len, v);
+    s->pub = len;
+    return s;
 }
 
 /* unknown 值的 str()：先按 RC 索引确认是不是堆字符串；是就原样返回
@@ -684,7 +735,73 @@ int64_t pa_str_to_i64(PyAdamasStr* s, int64_t base) {
     return neg ? (int64_t)(0 - acc) : (int64_t)acc;
 }
 
+/* Clinger 快速路径：|尾数| < 2^53 且 |十进制指数| <= 22 时，10^k 可被 double
+   精确表示，mant * 10^exp（或 /）只发生一次舍入，结果与正确舍入的 strtod
+   完全一致。f-string 的 "%.6f" 之类输出都落在这里，避开 glibc strtod 的
+   大数慢路径（str_to_mpn / round_and_return）。不满足条件返回 0 回落 strtod。 */
+static int f64_fast_path(const char* p, int64_t n, double* out) {
+    static const double pow10[] = {
+        1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+        1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    };
+    int64_t i = 0;
+    while (i < n && is_space(p[i])) ++i;
+    int neg = 0;
+    if (i < n && (p[i] == '+' || p[i] == '-')) {
+        neg = p[i] == '-';
+        ++i;
+    }
+    uint64_t mant = 0;
+    int digits = 0, any = 0, exp10 = 0;
+    while (i < n && p[i] >= '0' && p[i] <= '9') {
+        if (mant || p[i] != '0') {
+            if (++digits > 15) return 0;  /* 超过 2^53 可精确表示的范围 */
+            mant = mant * 10 + (uint64_t)(p[i] - '0');
+        }
+        any = 1;
+        ++i;
+    }
+    if (i < n && p[i] == '.') {
+        ++i;
+        while (i < n && p[i] >= '0' && p[i] <= '9') {
+            if (mant || p[i] != '0') {
+                if (++digits > 15) return 0;
+                mant = mant * 10 + (uint64_t)(p[i] - '0');
+            }
+            any = 1;
+            --exp10;
+            ++i;
+        }
+    }
+    if (!any) return 0;  /* "", ".", "inf", "nan", 十六进制浮点等交给 strtod */
+    if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+        ++i;
+        int eneg = 0;
+        if (i < n && (p[i] == '+' || p[i] == '-')) {
+            eneg = p[i] == '-';
+            ++i;
+        }
+        if (i >= n || p[i] < '0' || p[i] > '9') return 0;  /* "1e" 等非法尾巴 */
+        int ev = 0;
+        while (i < n && p[i] >= '0' && p[i] <= '9') {
+            if (ev < 1000) ev = ev * 10 + (p[i] - '0');
+            ++i;
+        }
+        exp10 += eneg ? -ev : ev;
+    }
+    while (i < n && is_space(p[i])) ++i;
+    if (i != n) return 0;  /* 有多余字符（含 '_' 等），交回 strtod 报错 */
+    if (exp10 > 22 || exp10 < -22) return 0;
+    double v = (double)mant;
+    if (exp10 > 0) v *= pow10[exp10];
+    else if (exp10 < 0) v /= pow10[-exp10];
+    *out = neg ? -v : v;
+    return 1;
+}
+
 double pa_str_to_f64(PyAdamasStr* s) {
+    double fast = 0.0;
+    if (f64_fast_path(s->data, s->len, &fast)) return fast;
     char stackbuf[64];
     char* buf = stackbuf;
     if (s->len + 1 > (int64_t)sizeof stackbuf) {
@@ -735,47 +852,214 @@ PyAdamasStr* pa_chr(int64_t c) {
     return pa_cp_str((uint32_t)c);
 }
 
-PyAdamasStr* pa_int_to_base(int64_t v, int64_t base) {
+/* 2/8/16 的分组查表：一次写一组（2 位十六进制 = 1 字节，8 位二进制 = 1 字节，
+   3 位八进制 = 9 位），把位数循环压缩到原来的 1/8、1/2、1/3。
+   hex/bin/oct 每次都要重建短串，位数循环 + 栈缓冲拷贝曾是主要成本。 */
+static const char pa_hex2[] =
+    "000102030405060708090a0b0c0d0e0f"
+    "101112131415161718191a1b1c1d1e1f"
+    "202122232425262728292a2b2c2d2e2f"
+    "303132333435363738393a3b3c3d3e3f"
+    "404142434445464748494a4b4c4d4e4f"
+    "505152535455565758595a5b5c5d5e5f"
+    "606162636465666768696a6b6c6d6e6f"
+    "707172737475767778797a7b7c7d7e7f"
+    "808182838485868788898a8b8c8d8e8f"
+    "909192939495969798999a9b9c9d9e9f"
+    "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+    "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+    "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+    "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
+    "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
+
+static const char pa_bin8[] =
+    "00000000" "00000001" "00000010" "00000011"
+    "00000100" "00000101" "00000110" "00000111"
+    "00001000" "00001001" "00001010" "00001011"
+    "00001100" "00001101" "00001110" "00001111"
+    "00010000" "00010001" "00010010" "00010011"
+    "00010100" "00010101" "00010110" "00010111"
+    "00011000" "00011001" "00011010" "00011011"
+    "00011100" "00011101" "00011110" "00011111"
+    "00100000" "00100001" "00100010" "00100011"
+    "00100100" "00100101" "00100110" "00100111"
+    "00101000" "00101001" "00101010" "00101011"
+    "00101100" "00101101" "00101110" "00101111"
+    "00110000" "00110001" "00110010" "00110011"
+    "00110100" "00110101" "00110110" "00110111"
+    "00111000" "00111001" "00111010" "00111011"
+    "00111100" "00111101" "00111110" "00111111"
+    "01000000" "01000001" "01000010" "01000011"
+    "01000100" "01000101" "01000110" "01000111"
+    "01001000" "01001001" "01001010" "01001011"
+    "01001100" "01001101" "01001110" "01001111"
+    "01010000" "01010001" "01010010" "01010011"
+    "01010100" "01010101" "01010110" "01010111"
+    "01011000" "01011001" "01011010" "01011011"
+    "01011100" "01011101" "01011110" "01011111"
+    "01100000" "01100001" "01100010" "01100011"
+    "01100100" "01100101" "01100110" "01100111"
+    "01101000" "01101001" "01101010" "01101011"
+    "01101100" "01101101" "01101110" "01101111"
+    "01110000" "01110001" "01110010" "01110011"
+    "01110100" "01110101" "01110110" "01110111"
+    "01111000" "01111001" "01111010" "01111011"
+    "01111100" "01111101" "01111110" "01111111"
+    "10000000" "10000001" "10000010" "10000011"
+    "10000100" "10000101" "10000110" "10000111"
+    "10001000" "10001001" "10001010" "10001011"
+    "10001100" "10001101" "10001110" "10001111"
+    "10010000" "10010001" "10010010" "10010011"
+    "10010100" "10010101" "10010110" "10010111"
+    "10011000" "10011001" "10011010" "10011011"
+    "10011100" "10011101" "10011110" "10011111"
+    "10100000" "10100001" "10100010" "10100011"
+    "10100100" "10100101" "10100110" "10100111"
+    "10101000" "10101001" "10101010" "10101011"
+    "10101100" "10101101" "10101110" "10101111"
+    "10110000" "10110001" "10110010" "10110011"
+    "10110100" "10110101" "10110110" "10110111"
+    "10111000" "10111001" "10111010" "10111011"
+    "10111100" "10111101" "10111110" "10111111"
+    "11000000" "11000001" "11000010" "11000011"
+    "11000100" "11000101" "11000110" "11000111"
+    "11001000" "11001001" "11001010" "11001011"
+    "11001100" "11001101" "11001110" "11001111"
+    "11010000" "11010001" "11010010" "11010011"
+    "11010100" "11010101" "11010110" "11010111"
+    "11011000" "11011001" "11011010" "11011011"
+    "11011100" "11011101" "11011110" "11011111"
+    "11100000" "11100001" "11100010" "11100011"
+    "11100100" "11100101" "11100110" "11100111"
+    "11101000" "11101001" "11101010" "11101011"
+    "11101100" "11101101" "11101110" "11101111"
+    "11110000" "11110001" "11110010" "11110011"
+    "11110100" "11110101" "11110110" "11110111"
+    "11111000" "11111001" "11111010" "11111011"
+    "11111100" "11111101" "11111110" "11111111";
+
+static inline int u64_bit_length(uint64_t m) {
+    return m ? 64 - __builtin_clzll(m) : 0;
+}
+
+/* base 位数（2/8/16 用位长算，其余走除法循环）。 */
+static int u64_base_digits(uint64_t mag, int64_t base) {
+    if (base == 16) {
+        int b = u64_bit_length(mag);
+        return b ? (b + 3) / 4 : 1;
+    }
+    if (base == 2) {
+        int b = u64_bit_length(mag);
+        return b ? b : 1;
+    }
+    if (base == 8) {
+        int b = u64_bit_length(mag);
+        return b ? (b + 2) / 3 : 1;
+    }
+    int n = 1;
+    while (mag >= (uint64_t)base) { mag /= (uint64_t)base; ++n; }
+    return n;
+}
+
+/* 把 mag 按 base 写成数字（从 dst 尾部往前），返回字符数。
+   2/8/16 一次写一组：2 位十六进制 = 1 字节、8 位二进制 = 1 字节、
+   3 位八进制 = 9 位；其余 base 保留通用除法路径。 */
+static int u64_to_base_rev(char* dst_end, uint64_t mag, int64_t base) {
     static const char* digits = "0123456789abcdef";
-    char tmp[72];
-    char* q = tmp + sizeof tmp;
-    uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    char* q = dst_end;
     int n = 0;
-    do {
-        *--q = digits[mag % (uint64_t)base];
-        mag /= (uint64_t)base;
-        ++n;
-    } while (mag);
-    const char* prefix = base == 16 ? "0x" : base == 8 ? "0o" : "0b";
-    char out[80];
-    int k = 0;
-    if (v < 0) out[k++] = '-';
-    for (const char* pp = prefix; *pp; ++pp) out[k++] = *pp;
-    memcpy(out + k, q, (size_t)n);
-    k += n;
-    return str_new(out, k);
+    switch (base) {
+        case 2:
+            while (mag >= 256u) {
+                unsigned g = (unsigned)(mag & 255u);
+                mag >>= 8;
+                q -= 8;
+                memcpy(q, pa_bin8 + (size_t)g * 8, 8);
+                n += 8;
+            }
+            do {
+                *--q = (char)('0' + (int)(mag & 1));
+                mag >>= 1;
+                ++n;
+            } while (mag);
+            break;
+        case 8:
+            while (mag >= 512u) {
+                unsigned g = (unsigned)(mag & 511u);
+                mag >>= 9;
+                q -= 3;
+                q[0] = (char)('0' + (int)(g >> 6));
+                q[1] = (char)('0' + (int)((g >> 3) & 7));
+                q[2] = (char)('0' + (int)(g & 7));
+                n += 3;
+            }
+            if (mag >= 64u) {
+                *--q = (char)('0' + (int)(mag & 7));
+                *--q = (char)('0' + (int)((mag >> 3) & 7));
+                *--q = (char)('0' + (int)(mag >> 6));
+                n += 3;
+                break;
+            }
+            do {
+                *--q = (char)('0' + (int)(mag & 7));
+                mag >>= 3;
+                ++n;
+            } while (mag);
+            break;
+        case 16:
+            while (mag >= 256u) {
+                unsigned g = (unsigned)(mag & 255u);
+                mag >>= 8;
+                q -= 2;
+                q[0] = pa_hex2[g * 2];
+                q[1] = pa_hex2[g * 2 + 1];
+                n += 2;
+            }
+            do {
+                *--q = digits[mag & 15];
+                mag >>= 4;
+                ++n;
+            } while (mag);
+            break;
+        default:
+            do {
+                *--q = digits[mag % (uint64_t)base];
+                mag /= (uint64_t)base;
+                ++n;
+            } while (mag);
+            break;
+    }
+    return n;
+}
+
+PyAdamasStr* pa_int_to_base(int64_t v, int64_t base) {
+    uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    int n = u64_base_digits(mag, base);
+    int k = n + 2 + (v < 0);
+    PyAdamasStr* s = str_alloc_raw(k);
+    char* out = (char*)s->data;
+    int o = 0;
+    if (v < 0) out[o++] = '-';
+    out[o++] = '0';
+    out[o++] = base == 16 ? 'x' : base == 8 ? 'o' : 'b';
+    u64_to_base_rev(out + k, mag, base);
+    /* 结果必然是 ASCII：prefix + 数字，码点数 == 字节数，省掉 seal 扫描。 */
+    s->pub = k;
+    return s;
 }
 
 /* 无符号 64 位 → 0x/0o/0b 串（定宽 u64 的 hex()/bin()/oct()）。
    u64 的 ≥ 2^63 值在 pa_int_to_base 里会被解释成负数并加 '-'，语义错。 */
 PyAdamasStr* pa_uint_to_base(uint64_t v, int64_t base) {
-    static const char* digits = "0123456789abcdef";
-    char tmp[72];
-    char* q = tmp + sizeof tmp;
-    uint64_t mag = v;
-    int n = 0;
-    do {
-        *--q = digits[mag % (uint64_t)base];
-        mag /= (uint64_t)base;
-        ++n;
-    } while (mag);
-    const char* prefix = base == 16 ? "0x" : base == 8 ? "0o" : "0b";
-    char out[80];
-    int k = 0;
-    for (const char* pp = prefix; *pp; ++pp) out[k++] = *pp;
-    memcpy(out + k, q, (size_t)n);
-    k += n;
-    return str_new(out, k);
+    int n = u64_base_digits(v, base);
+    PyAdamasStr* s = str_alloc_raw(n + 2);
+    char* out = (char*)s->data;
+    out[0] = '0';
+    out[1] = base == 16 ? 'x' : base == 8 ? 'o' : 'b';
+    u64_to_base_rev(out + n + 2, v, base);
+    s->pub = n + 2;
+    return s;
 }
 
 double pa_round_f64(double x, int64_t ndigits) {

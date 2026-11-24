@@ -634,7 +634,22 @@ static PA_DBG_UNUSED PyAdamasRc* str_pool_get(int64_t size) {
     return h;
 }
 
+/* 非 ASCII 串的懒码点边界索引（建表在 str_cp_index，见下）。
+   索引数组用的是裸 malloc，生命周期跟字符串走 —— 这里在块回收前还掉。
+   SSO 短串（hash 是字符区）和只读字面量（rc == IMMORTAL，.data.rel.ro
+   不可写，hash 存的是编译期字典哈希）从不缓存，直接跳过。 */
+static void str_cp_index_free(PyAdamasStr* s) {
+    if (s->data == (const char*)&s->hash) return;
+    PyAdamasRc* h = (PyAdamasRc*)((char*)s - PYADAMAS_RC_HDR);
+    if (h->rc == PYADAMAS_RC_IMMORTAL || h->kind != PYADAMAS_RC_STR) return;
+    if (s->hash) {
+        free((void*)(uintptr_t)s->hash);
+        s->hash = 0;
+    }
+}
+
 static void str_pool_put(PyAdamasRc* h) {
+    str_cp_index_free((PyAdamasStr*)((char*)h + PYADAMAS_RC_HDR));
     /* 调试版（canary/guard）不缓存：直接释放（canary 在这里校验）。 */
 #ifdef PYADAMAS_ALLOC_DEBUG
     PA_DBG_FREE(h);
@@ -1843,9 +1858,43 @@ int str_seq_len(unsigned char b) {
     return 1;
 }
 
-/* 码点下标 cp -> 字节偏移（从头扫；cp == pub 时返回 len）。 */
+/* 非 ASCII 串的懒码点边界表：ix[k] = 第 k 个码点的起始字节偏移，ix[pub] = len。
+   第一次随机下标 / 切片时建一次 O(len)，之后 O(1)。返回 NULL 表示不可缓存，
+   调用方退回逐字节扫描：
+     - SSO 短串：hash 字段就是字符区，没有地方放指针（本来也只需扫 <=7 字节）；
+     - 只读字面量（rc == IMMORTAL）：.data.rel.ro 不可写；
+     - 超过 STR_CP_INDEX_MAX 的超长串：索引（8 字节/码点）可能比串本身大很多。
+   索引指针挂在 PyAdamasStr::hash —— 运行期创建的串该字段恒为 0，且全仓库
+   没有读取方（字典哈希走的是 chash）。 */
+#define STR_CP_INDEX_MAX (64 * 1024)
+
+static const int64_t* str_cp_index(PyAdamasStr* s) {
+    if (s->data == (const char*)&s->hash) return NULL;
+    PyAdamasRc* h = (PyAdamasRc*)((char*)s - PYADAMAS_RC_HDR);
+    if (h->rc == PYADAMAS_RC_IMMORTAL || h->kind != PYADAMAS_RC_STR) return NULL;
+    if (s->hash) return (const int64_t*)(uintptr_t)s->hash;
+    if (s->len > STR_CP_INDEX_MAX) return NULL;
+    int64_t n = s->pub;
+    int64_t* ix = (int64_t*)malloc((size_t)(n + 1) * sizeof(int64_t));
+    if (!ix) return NULL;
+    /* 与 str_cp_to_byte 的扫描语义逐字节一致：非法 UTF-8 时 seq_len 可能
+       越过 len，剩余项统一填末尾偏移。 */
+    int64_t off = 0;
+    int64_t k = 0;
+    while (k < n && off < s->len) {
+        ix[k++] = off;
+        off += str_seq_len((unsigned char)s->data[off]);
+    }
+    for (; k <= n; ++k) ix[k] = off;
+    s->hash = (int64_t)(uintptr_t)ix;
+    return ix;
+}
+
+/* 码点下标 cp -> 字节偏移（cp == pub 时返回 len）。 */
 int64_t str_cp_to_byte(const PyAdamasStr* s, int64_t cp) {
     if (s->pub == s->len) return cp;  /* 全 ASCII：码点下标就是字节偏移 */
+    const int64_t* ix = str_cp_index((PyAdamasStr*)(uintptr_t)s);
+    if (ix && cp >= 0 && cp <= s->pub) return ix[cp];
     int64_t off = 0;
     while (cp > 0 && off < s->len) {
         off += str_seq_len((unsigned char)s->data[off]);
@@ -2019,6 +2068,12 @@ static int static_strs_ready;
  * 所以函数体里不需要再判 static_strs_ready。 */
 PyAdamasStr* pa_char_tab[256];
 
+/* 非 ASCII 单码点串的惰性驻留表（BMP，0x80-0xFFFF）。字符串不可变，
+   和 ASCII 的 char_tab 一样做成永生对象：CJK 文本的下标/迭代每轮都要
+   取单字符，原来每次 malloc + memcpy + RC 记账，是 52_index_cjk 的主要
+   成本。表是 BSS，只有实际用到的页才会被映射。 */
+static PyAdamasStr* cp_str_cache[0x10000];
+
 static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n, int64_t pub) {
     e->h.next = NULL;
     e->h.prev = NULL;
@@ -2069,8 +2124,21 @@ PyAdamasStr* pa_char_str(int64_t c) {
 
 PyAdamasStr* pa_cp_str(uint32_t cp) {
     if (cp < 0x80) return pa_char_str((int64_t)cp);
+    if (cp < 0x10000) {
+        PyAdamasStr* hit = cp_str_cache[cp];
+        if (hit) return hit;
+    }
     char buf[4];
     int n = str_cp_encode(cp, buf);
+    if (cp < 0x10000) {
+        /* 首次遇到：分配一个永生对象并登记进 RC 索引（unknown 探针要靠它
+           识别类型），之后整个进程生命周期内复用。 */
+        PyAdamasStaticStr* e = (PyAdamasStaticStr*)malloc(sizeof *e);
+        if (!e) panic_c("out of memory");
+        static_str_init(e, buf, n, 1);
+        cp_str_cache[cp] = &e->s;
+        return &e->s;
+    }
     PyAdamasStr* s = str_alloc_raw(n);
     memcpy((char*)s->data, buf, (size_t)n);
     s->pub = 1;
@@ -2643,6 +2711,8 @@ static void gc_incr_step(void) {
             for (size_t i = 0; i < gc_set_len; ++i) {
                 PyAdamasRc* h = gc_set[i];
                 if (!h) continue;
+                /* IMMORTAL 永不回收。 */
+                if (h->rc == PYADAMAS_RC_IMMORTAL) continue;
                 if (!(h->marked & PYADAMAS_RC_MARK)) {
                     if (rc_stats_on) stat_gc_freed++;
                     gc_free_body(h);
@@ -2660,6 +2730,8 @@ static void gc_incr_step(void) {
         PyAdamasRc* h = gc_set[pos];
         if (gc_stats_on) ++gc_incr_objs;
         if (!h) continue;
+        /* IMMORTAL 永不回收：即使标记被意外清掉也兜住。 */
+        if (h->rc == PYADAMAS_RC_IMMORTAL) continue;
         if (!(h->marked & PYADAMAS_RC_MARK)) {
             if (rc_stats_on) stat_gc_freed++;
             gc_free_body(h);
@@ -2713,6 +2785,9 @@ static void gc_free_body(PyAdamasRc* h) {
         free(d->entries);
         free(d->order);
         free(d->index);
+    } else if (h->kind == PYADAMAS_RC_STR) {
+        // 非 ASCII 串可能挂着懒码点索引（GC 清扫不走 str_pool_put）。
+        str_cp_index_free((PyAdamasStr*)((char*)h + PYADAMAS_RC_HDR));
     }
     PA_DBG_FREE(h);
 }
@@ -2789,6 +2864,16 @@ static void gc_collect(int major) {
     gc_work = gc_work_buf;
     gc_work_len = 0;
     gc_tab_build();
+    /* IMMORTAL（rc = INT64_MIN）对象语义上是永久根，但它们既不在
+       gc_globals 里、也不在栈/寄存器上（例如 sys_stream_files 只是
+       C 静态数组），根扫描扫不到。必须在集合装配后显式标活并入队，
+       否则 minor 的 trial-deletion 会把它当垃圾清扫掉 —— 实测
+       sys.stdout/sys.stderr 的文件对象被 minor GC 误 free。 */
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* ih = gc_set[i];
+        if (ih->rc == PYADAMAS_RC_IMMORTAL)
+            gc_mark((uintptr_t)ih + (uintptr_t)PYADAMAS_RC_HDR);
+    }
     if (t0) t1 = gc_now_ms();
 
     gc_mark_sweep = major;
@@ -2870,6 +2955,8 @@ static void gc_collect(int major) {
             for (size_t si = 0; si < gc_set_len; ++si) {
                 PyAdamasRc* sh = gc_set[si];
                 if (!sh) continue;
+                /* IMMORTAL 永不回收。 */
+                if (sh->rc == PYADAMAS_RC_IMMORTAL) continue;
                 if (!(sh->marked & PYADAMAS_RC_MARK)) {
                     if (rc_stats_on) stat_gc_freed++;
                     gc_free_body(sh);
@@ -2911,7 +2998,10 @@ static void gc_collect(int major) {
         //    所有引用都归某个槽/临时值/容器所有，真实 rc 已经够用。
         for (size_t i = 0; i < gc_set_len; ++i) {
             PyAdamasRc* h = gc_set[i];
-            if (h->rc > 0 && !(h->marked & PYADAMAS_RC_MARK)) {
+            /* IMMORTAL 的 rc 是 INT64_MIN，用 `rc > 0` 判定会把它当死对象；
+               它已经在集合装配后被标活，这里再放行一次作为防御。 */
+            if ((h->rc > 0 || h->rc == PYADAMAS_RC_IMMORTAL) &&
+                !(h->marked & PYADAMAS_RC_MARK)) {
                 h->marked |= PYADAMAS_RC_MARK;
                 gc_work[gc_work_len++] = h;
             }
@@ -2962,6 +3052,8 @@ static void gc_collect(int major) {
     int64_t freed = 0;
     for (size_t i = 0; i < gc_set_len; ++i) {
         PyAdamasRc* h = gc_set[i];
+        /* IMMORTAL 永不回收（集合装配时已标活，这里再兜一次）。 */
+        if (h->rc == PYADAMAS_RC_IMMORTAL) continue;
         if (h->marked & PYADAMAS_RC_MARK) continue;
         if (rc_stats_on) stat_gc_freed++;
         freed++;

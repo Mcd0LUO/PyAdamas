@@ -230,6 +230,28 @@ static int64_t dict_hash_key(PyAdamasDict* d, int64_t key) {
     return dict_hash_value(d->key_kind, key);
 }
 
+/* 标量键（int / float-raw / str）的内联哈希：绕过 dict_hash_value 的多分支
+   分派 + call/ret。30_set 的 set[int] 重建与 29_dict 的 str 关键字建表都是
+   「每 entry 一次哈希」，分派本身曾占 dict_set 总耗时的 11%（int 键走最后一个
+   else 分支，前面的 5 次 kind 比较全是白付的）。冷门域仍回落到 dict_hash_key。 */
+static inline __attribute__((always_inline))
+int64_t dict_hash_key_inline(PyAdamasDict* d, int64_t key) {
+    if (__builtin_expect(d->hash_slot < 0, 1)) {
+        int64_t k = d->key_kind;
+        if (__builtin_expect(k == 0, 1)) {
+            int64_t h = (int64_t)mix64((uint64_t)key);
+            return h ? h : 1;
+        }
+        if (k == 1) {
+            PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)key;
+            int64_t h = s->chash;
+            if (__builtin_expect(h == 0, 0)) h = dict_str_hash(s);
+            return h;
+        }
+    }
+    return dict_hash_key(d, key);
+}
+
 /* always_inline：探测循环每步都调它。新增 dict_lookup_place 后 gcc 的
    内联预算把它 outline 成公共函数（两处调用共享），wordfreq 实测每次
    探测多一层 call/ret，指令 +6.3%。强制内联恢复紧探测循环（0.285）。 */
@@ -314,6 +336,34 @@ static void dict_reindex(PyAdamasDict* d, int64_t nicap) {
         int64_t s = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
         while (d->index[s]) s = (s + 1) & mask;
         d->index[s] = (int32_t)(e + 1);
+    }
+}
+
+/* 批量插入前的预留：entries/order 容量与 index 装载容量一次到位。
+   30_set 每轮 set(T) 从 64 元素列表重建：不预留时 icap 走 8→16→32→64→128
+   四次 reindex，累计多探测 ~78 次（比 64 次真实插入还多）；预留后零 reindex。
+   icap 必须是 2 的幂（掩码探测），n 按 2/3 装载算槽数并留 1 个空槽。 */
+static void dict_reserve(PyAdamasDict* d, int64_t n) {
+    if (n <= 0) return;
+    if (n > d->cap) {
+        int64_t ncap = d->cap > 0 ? d->cap : 8;
+        while (ncap < n) ncap *= 2;
+        PyAdamasDictEntry* ne =
+            (PyAdamasDictEntry*)realloc(d->entries, sizeof(PyAdamasDictEntry) * (size_t)ncap);
+        int32_t* no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
+        if (!ne || !no) panic_c("out of memory");
+        d->entries = ne;
+        d->order = no;
+        d->cap = ncap;
+    }
+    int64_t need = n + n / 2 + 1;
+    int64_t nic = d->icap > 0 ? d->icap : 8;
+    while (nic < need) nic *= 2;
+    if (nic > d->icap) {
+        free(d->index);
+        d->index = (int32_t*)calloc((size_t)nic, sizeof(int32_t));
+        if (!d->index) panic_c("out of memory");
+        d->icap = nic;
     }
 }
 
@@ -445,7 +495,7 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     // 插入与覆盖两条路径都从这里走，统一探针（覆盖时旧值已 dec，新值
     // 可能是堆；键对象沿用插入时已探针的原 key）。
     dict_note_heap(d, key, val);
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t place;
     int64_t e = dict_lookup_place(d, key, h, &place);
     if (e >= 0) {
@@ -526,14 +576,14 @@ void pa_dict_set_default_factory(PyAdamasDict* d, int64_t factory) {
 }
 
 int64_t pa_dict_try_get(PyAdamasDict* d, int64_t key, int64_t* out) {
-    int64_t e = dict_lookup(d, key, dict_hash_key(d, key));
+    int64_t e = dict_lookup(d, key, dict_hash_key_inline(d, key));
     if (e < 0) return 0;
     *out = d->entries[e].val;
     return 1;
 }
 
 int64_t pa_dict_get(PyAdamasDict* d, int64_t key) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) {
         if (d->default_factory) {
@@ -549,7 +599,7 @@ int64_t pa_dict_get(PyAdamasDict* d, int64_t key) {
 }
 
 int64_t pa_dict_contains(PyAdamasDict* d, int64_t key) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     return dict_lookup(d, key, h) >= 0 ? 1 : 0;
 }
 
@@ -581,13 +631,13 @@ int64_t pa_dict_val_at(PyAdamasDict* d, int64_t i) {
 /* d.get(k)：缺失时返回 None。pyadamas 里 None 就是 0（没有类型标签），
    所以这里返回 0——和 const.none 同一个表示。 */
 int64_t pa_dict_get_opt(PyAdamasDict* d, int64_t key) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t e = dict_lookup(d, key, h);
     return e >= 0 ? d->entries[e].val : 0;
 }
 
 int64_t pa_dict_get_or(PyAdamasDict* d, int64_t key, int64_t def) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t e = dict_lookup(d, key, h);
     return e >= 0 ? d->entries[e].val : def;
 }
@@ -656,7 +706,7 @@ int64_t chain_dict_eq(PyAdamasDict* a, PyAdamasDict* b, const uint8_t* chain, in
     int kind = (level < len) ? chain[level] : 'x';
     for (int32_t i = a->head; i >= 0; i = a->entries[i].next) {
         PyAdamasDictEntry ae = a->entries[i];
-        int64_t e = dict_lookup(b, ae.key, dict_hash_key(b, ae.key));
+        int64_t e = dict_lookup(b, ae.key, dict_hash_key_inline(b, ae.key));
         if (e < 0) return 0;
         if (!chain_elem_eq(kind, ae.val, b->entries[e].val, chain, len, level))
             return 0;
@@ -679,7 +729,7 @@ int64_t chain_set_eq(PyAdamasDict* a, PyAdamasDict* b, const uint8_t* chain, int
     if (a->len != b->len) return 0;
     for (int32_t i = a->head; i >= 0; i = a->entries[i].next) {
         int64_t k = a->entries[i].key;
-        if (dict_lookup(b, k, dict_hash_key(b, k)) < 0) return 0;
+        if (dict_lookup(b, k, dict_hash_key_inline(b, k)) < 0) return 0;
     }
     return 1;
 }
@@ -703,6 +753,7 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
         dst->saw_heap = 1;
     int kr = dst->key_own;
     int vr = dst->val_own;
+    dict_reserve(dst, dst->len + src->len);
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
         pa_own_inc(kr, e.key);
@@ -824,6 +875,7 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     out->default_factory = src->default_factory;
     // 0.302：保守传播 sticky 标志（逐 entry 的 pa_dict_set 也会探针）。
     out->saw_heap = src->saw_heap;
+    dict_reserve(out, src->len);
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
         pa_own_inc(src->key_own, e.key);
@@ -840,6 +892,7 @@ PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t ke
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, val_own, hash_slot, eq_slot);
     /* 同 pa_dict_copy：用户 __hash__ 可能在循环内分配，d 只在 C 局部变量里。 */
     pa_gc_pin(d);
+    dict_reserve(d, src->len);
     for (int64_t i = 0; i < src->len; ++i) {
         PyAdamasList* pair = (PyAdamasList*)(uintptr_t)src->data[i];
         if (!pair || pair->len != 2) {
@@ -865,6 +918,7 @@ PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, hash_slot, eq_slot);
     /* 用户 __hash__ 可能在循环内分配，d 只在 C 局部变量里。 */
     pa_gc_pin(d);
+    dict_reserve(d, src->len);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];
         pa_own_inc(key_own, k);
@@ -879,7 +933,7 @@ PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_
    （pop 返回给 Python 层，由临时栈接管）。order 用末尾项填洞、entry 留
    墓碑，删除是摊还 O(1)，不再 memmove 和全表重建。 */
 int dict_take(PyAdamasDict* d, int64_t key, int64_t* val_out) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) return 0;
     *val_out = d->entries[e].val;
@@ -985,7 +1039,7 @@ void pa_dict_clear(PyAdamasDict* d) {
  * 算好的值，def 也是常量，没有可观测的中间状态。
  */
 void pa_dict_bump(PyAdamasDict* d, int64_t key, int64_t def, int64_t delta) {
-    int64_t h = dict_hash_key(d, key);
+    int64_t h = dict_hash_key_inline(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e >= 0) {
         int64_t old = d->entries[e].val;

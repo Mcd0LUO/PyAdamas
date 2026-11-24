@@ -340,10 +340,21 @@ void pa_sys_exit(int64_t code) { exit((int)code); }
 
 /* ── 输出 ─────────────────────────────────────────────────────── */
 
-void pa_print_i64(int64_t v) { printf("%lld", (long long)v); }
+/* print() 每次调用都走这里：printf 的格式解析 + 可变参数 + 锁在
+   48_print_sep / 01_print_int 这类循环里占 30%+。直接用共享的十进制
+   渲染器写进栈缓冲，再 fwrite 一次。 */
+void pa_print_i64(int64_t v) {
+    char buf[24];
+    int64_t n = pa_i64_to_buf(buf, v);
+    fwrite(buf, 1, (size_t)n, stdout);
+}
 
 /* 无符号 64 位（定宽 u64）：print() 用。 */
-void pa_print_u64(uint64_t v) { printf("%llu", (unsigned long long)v); }
+void pa_print_u64(uint64_t v) {
+    char buf[24];
+    int64_t n = pa_u64_to_buf(buf, v);
+    fwrite(buf, 1, (size_t)n, stdout);
+}
 
 void pa_print_f64(double v) {
     char buf[64];

@@ -1201,6 +1201,9 @@ int64_t pa_dict_version(PyAdamasDict* d);
 PyAdamasStr* pa_str_encode(PyAdamasStr* s);
 PyAdamasStr* pa_bytes_decode(PyAdamasStr* s);
 PyAdamasStr* pa_str_from_i64(int64_t v);
+/* 十进制渲染到调用方缓冲（不分配），返回字节数：print() 用。 */
+int64_t pa_i64_to_buf(char* dst, int64_t v);
+int64_t pa_u64_to_buf(char* dst, uint64_t v);
 PyAdamasStr* pa_str_from_u64(uint64_t v);
 PyAdamasStr* pa_uint_to_base(uint64_t v, int64_t base);
 /* unknown 值：堆字符串原样返回并补引用，其余按整数格式化。 */

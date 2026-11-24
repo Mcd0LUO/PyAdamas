@@ -491,6 +491,19 @@ void pa_list_set_len(PyAdamasList* l, int64_t n) {
    降级为 2（销毁走注册表），元素引用按目标种类 retain。 */
 void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
     int64_t slen = src->len;
+    /* 快路径（与 pa_list_copy_range 同款判据）：两边都是纯标量列表时整块
+       memcpy，省掉逐元素 prep+append —— list(T)/tuple(T) 浅拷贝是常见热点。 */
+    if (dst != src && slen > 0 && dst->elem_kind == 0 && src->elem_kind == 0) {
+        if (dst->len + slen > dst->cap) {
+            int64_t ncap = dst->cap ? dst->cap : 4;
+            while (ncap < dst->len + slen) ncap *= 2;
+            list_buf_grow(dst, ncap);
+            if (dst->heap_bits) list_bits_reserve(dst, dst->cap);
+        }
+        memcpy(dst->data + dst->len, src->data, (size_t)slen * sizeof(int64_t));
+        dst->len += slen;
+        return;
+    }
     int64_t* snap = NULL;
     const int64_t* sv = src->data;
     if (dst == src) {
@@ -614,13 +627,19 @@ static inline double f64_of(int64_t v) {
     static void bin_ins_##NAME(int64_t* a, int64_t lo, int64_t hi) {           \
         for (int64_t i = lo + 1; i < hi; ++i) {                                \
             int64_t v = a[i];                                                  \
+            /* 已在有序前缀末尾就直接跳过：timsort 补 run 时最常见的形态是      \
+               「前一段已是 run、后续元素基本就位」，每个元素一次比较即可，      \
+               省掉 6 轮二分 + 可能的 memmove（sorted() 短列表的热路径）。 */   \
+            if (!LESS(v, a[i - 1])) continue;                                  \
             int64_t left = lo, right = i;                                      \
             while (left < right) {                                             \
                 int64_t m = left + (right - left) / 2;                         \
                 if (LESS(v, a[m])) right = m;                                  \
                 else left = m + 1;                                             \
             }                                                                  \
-            for (int64_t j = i; j > left; --j) a[j] = a[j - 1];                \
+            if (i > left)                                                      \
+                memmove(a + left + 1, a + left,                                \
+                        (size_t)(i - left) * sizeof(int64_t));                 \
             a[left] = v;                                                       \
         }                                                                      \
     }                                                                          \
@@ -687,8 +706,11 @@ static inline double f64_of(int64_t v) {
     }                                                                          \
     static void sort_##NAME(int64_t* a, int64_t n) {                           \
         if (n < 2) return;                                                     \
-        /* 小数组只有一个 run：找完自然序再补一段插入排序，不用临时区。 */        \
-        if (n <= 64) {                                                         \
+        /* 小数组走单 run 快捷路径（minrun(n)==n，等价于整段一次插入排序）。    \
+           注意 n==64 必须留给通用路径：minrun(64)==32，切成两个 run 再归并    \
+           只搬 O(n)，而整段插入排序是 O(n²)（sorted() 短列表的旋转型数据上    \
+           实测 memmove 占比 27%）。 */                                        \
+        if (n < 64) {                                                          \
             count_run_##NAME(a, n, 0);                                         \
             bin_ins_##NAME(a, 0, n);                                           \
             return;                                                            \

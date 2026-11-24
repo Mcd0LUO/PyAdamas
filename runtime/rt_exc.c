@@ -599,7 +599,9 @@ int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
     PyAdamasException* gc = (PyAdamasException*)(uintptr_t)*cur;
     PyAdamasExcSave* gt = (PyAdamasExcSave*)(uintptr_t)*top;
     // 轨迹：从帧槽取回异常对象（空槽也记 —— 「本该有值却是空」正是断点）。
-    pa_exc_trace_move(gc, "enter", (void*)cur);
+    // 空对象不记：pa_exc_trace_move 自身也是这个口径，这里先判一次省掉
+    // 每次 resume 一次跨 TU 调用（09_next 里 enter/leave 各占 ~4%）。
+    if (gc) pa_exc_trace_move(gc, "enter", (void*)cur);
     // 两边都空时不用压节点：绝大多数 resume 都走这条快路径。
     if (current_exc || exc_save_top || gc || gt) {
         PyAdamasExcNode* n = (PyAdamasExcNode*)malloc(sizeof(PyAdamasExcNode));
@@ -633,7 +635,7 @@ void pa_exc_free_save_chain(PyAdamasExcSave* s) {
 
 void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
     // 轨迹：把 current_exc 写回帧槽（所有权留在槽里，不是释放）。
-    pa_exc_trace_move(current_exc, "leave", (void*)cur);
+    if (current_exc) pa_exc_trace_move(current_exc, "leave", (void*)cur);
     *cur = (int64_t)(uintptr_t)current_exc;
     *top = (int64_t)(uintptr_t)exc_save_top;
     int64_t before = exc_node_depth;

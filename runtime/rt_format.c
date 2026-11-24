@@ -225,7 +225,17 @@ static PyAdamasStr* fmt_int_mag(uint64_t mag, char sign, PyAdamasFmt* fp) {
     return fmt_pad_parts(sign ? &sign : NULL, prefix, body, &f);
 }
 
+/* 最常见的 format(x, "d") / format(x) / f"{x:d}" —— 说明符是空的或只有
+   'd'，输出就是十进制整数字面量。直接复用 str(int)，跳过 fmt_parse、
+   fmt_uint、fmt_pad 的 malloc/strlen/str_new 全链路。 */
+static int fmt_spec_plain_d(PyAdamasStr* spec) {
+    if (!spec) return 1;
+    if (spec->len == 0) return 1;
+    return spec->len == 1 && spec->data[0] == 'd';
+}
+
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
+    if (fmt_spec_plain_d(spec)) return pa_str_from_i64(v);
     PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
     if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
@@ -249,6 +259,7 @@ PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
 // 无符号 64 位：定宽 u64 的 f-string / format() 走这里（≥ 2^63 的值
 // 不能再按有符号打印）。格式校验与 pa_fmt_i64 完全相同。
 PyAdamasStr* pa_fmt_u64(uint64_t v, PyAdamasStr* spec) {
+    if (fmt_spec_plain_d(spec)) return pa_str_from_u64(v);
     PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
     if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&

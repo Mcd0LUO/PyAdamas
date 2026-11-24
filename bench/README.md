@@ -8,9 +8,11 @@
 在容器里跑（仓库挂在 `/w`）：
 
 ```bash
-cd /w && python3 bench/run_bench.py                      # 全量
+cd /w && python3 bench/run_bench.py                      # 全量（默认 16 路并行 + 每例绑核）
 cd /w && python3 bench/run_bench.py 13_sum 32_sorted     # 只跑指定用例
 cd /w && python3 bench/run_bench.py --repeat 5 --target 0.4
+cd /w && python3 bench/run_bench.py --jobs 24            # 调整并行度（--jobs 1 串行）
+cd /w && python3 bench/run_bench.py --no-linear          # 跳过 2N 线性检查，更快
 
 # 出表：Markdown 快照 + 原始数据
 cd /w && python3 bench/run_bench.py --md bench/RESULTS.md --json bench/report.json
@@ -19,7 +21,32 @@ cd /w && python3 bench/run_bench.py --md bench/RESULTS.md --json bench/report.js
 cd /w && python3 bench/run_bench.py --from-json bench/report.json --md bench/RESULTS.md
 ```
 
-表格直接打在 stdout 上。`RESULTS.md` 是一次实测快照，机器相关，别当基准线看。
+表格直接打在 stdout 上。`report.json` 与 `RESULTS.md` 是同一次实测的原始数据和快照，
+机器相关；对比 base/after 时必须用同样的 `--jobs` / `--repeat` / `--target`。
+
+## 对比两份结果
+
+```bash
+# 按 ns/op 归一化对比（两份结果的 N 不同也不会误判成变慢）
+cd /w && python3 bench/cmp_bench.py --base bench/report.json --after /tmp/bench_after.json
+
+# 只看变化最大的 10 行，并写一份 Markdown
+cd /w && python3 bench/cmp_bench.py --base a.json --after b.json --head 10 --md /tmp/cmp.md
+```
+
+「自身变化」= base 的 ns/op ÷ after 的 ns/op，>1 表示 after 更快；超过
+`--threshold`（默认 8%）才标「快/慢」，避免把噪声当结论。
+
+## perf 采样
+
+```bash
+cd /w && bash bench/profile.sh 40_map          # 用例名，或直接给 .py 路径
+PERF_FREQ=1999 bash bench/profile.sh 47_open   # 提高采样频率
+```
+
+脚本用 dev preset 编译（默认追加 `-g -fno-omit-frame-pointer`），`perf record`
+一次后打印 self time 热点和调用链；`perf.data` 留在 `$TMPDIR/pya-prof/`。
+需要内核允许 perf（`perf_event_paranoid <= 1` 或以 root 运行）。
 
 ## 加一个用例
 
@@ -52,10 +79,13 @@ cd /w && python3 bench/run_bench.py --from-json bench/report.json --md bench/RES
 ## 已知口径
 
 - 计时取多次运行的**最小值**：噪声只会让时间变长，不会变短。
+- 每个用例绑定到独立 CPU 运行：毫秒级的原生二进制跨核迁移会带来 1.5–2.4× 的
+  虚假开销，不绑核的数字不可比。base/after 必须用同样的并行度和绑定方式。
+- 校准超出目标 2 倍时会先缩小 `N` 重测，避免个别 I/O 型用例单轮跑 1s+ 拖慢整轮。
 - 「净加速」扣掉了进程启动开销（`00_baseline` 用例实测：CPython 约 8ms，
   PyAdamas 约 0.8ms）。原始倍数也在 `report.json` 里（`speedup_raw`）。
 - PyAdamas 侧只算**运行**时间，不含编译时间；编译是静态编译，不参与每次运行。
-- CPU 频率调节、容器负载都会影响结果，量级看就好。
+- CPU 频率、邻居负载仍会影响结果，量级看就好；对比时建议同样参数跑两轮取中位数。
 - 用例里的 `N` 是**按 CPython 的实测时间校准**出来的，所以同一个用例在不同
   机器上 `N` 不一样，比的是倍数不是绝对时间。
 

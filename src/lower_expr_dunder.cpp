@@ -351,8 +351,15 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     in.a = v;
     VReg r = def(to, std::move(in));
     // 数值转换产出标量；转成字符串才是一个新的堆对象。
-    if (to->kind == TyKind::Str && (!from || from->kind != TyKind::Str))
+    //
+    // **push_temp 必须配对 fresh_vregs.insert。** 漏登记时容器构造/推导式
+    // 走 retain_elem 分支（多一次 pa_rc_inc + 语句水位上的 dec），持有
+    // 方拿不到 take 快路径。40_map（`map(str, ...)`）每元素因此多一组
+    // temp→inc→append→cleanup→dec，pa_rc_cleanup 单项就占 6.3%。
+    if (to->kind == TyKind::Str && (!from || from->kind != TyKind::Str)) {
         push_temp(r);
+        st_->fresh_vregs.insert(r);
+    }
     return r;
 }
 
