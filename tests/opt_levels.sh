@@ -20,6 +20,10 @@ FILES=(
     tests/run/50_licm.py
     tests/run/51_bounds_versioning.py
     tests/run/52_range_bounds.py
+    # 3.12：空容器真值判断（data 指针 NULL 也不能被当数组解引用）
+    tests/run/empty_container_truth.py
+    # 窄化三类假阳性（walrus / isinstance）：-O0 下也要成立
+    tests/run/narrow_walrus_isinstance.py
 )
 
 fail=0
