@@ -1834,6 +1834,10 @@ int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text);
 int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
                         int64_t flags);
 int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64_t count);
+/* re.subn：返回 (结果串, 匹配次数) 的 2 元组。 */
+int64_t pa_re_subn_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
+                        int64_t flags);
+int64_t pa_re_subn(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64_t count);
 int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, int64_t flags);
 int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit);
 int64_t pa_re_escape(PyAdamasStr* s);

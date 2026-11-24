@@ -2330,6 +2330,79 @@ int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64
     return (int64_t)out;
 }
 
+// subn：与 sub 同一条替换循环，额外数匹配次数，返回 (结果串, 次数)。
+// tuple 用 elem_kind=2（str 是堆引用、次数是标量）—— 销毁时按注册表 dec，
+// 新建的结果串所有权直接转给 tuple（不额外 retain）。
+int64_t pa_re_subn_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
+                         int64_t flags) {
+    const char* err = NULL;
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
+    ReBuf b = {NULL, 0, 0};
+    int64_t pos = 0, done = 0;
+    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps, 0)) {
+        buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
+        PyAdamasMatch tmp;
+        memset(&tmp, 0, sizeof tmp);
+        tmp.text = text;
+        tmp.ngroups = g->ngroups;
+        tmp.caps = caps;
+        tmp.names = g->names;
+        tmp.nnames = g->nnames;
+        add_repl(&b, repl->data, repl->len, &tmp);
+        done++;
+        if (caps[1] == caps[0]) {
+            if (caps[1] < text->len) buf_ch(&b, text->data[caps[1]]);
+            pos = caps[1] + 1;
+        } else {
+            pos = caps[1];
+        }
+    }
+    if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
+    return (int64_t)pa_tuple_new_filled(2, 2, (int64_t)(uintptr_t)out, done, 0, 0);
+}
+
+int64_t pa_re_subn(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64_t count) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
+    int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
+    ReBuf b = {NULL, 0, 0};
+    int64_t pos = 0, done = 0;
+    while (pos <= text->len && (count <= 0 || done < count) &&
+           find_next(&re->prog, text, pos, caps, 0)) {
+        buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
+        PyAdamasMatch tmp;
+        memset(&tmp, 0, sizeof tmp);
+        tmp.text = text;
+        tmp.ngroups = re->prog.ngroups;
+        tmp.caps = caps;
+        tmp.names = re->prog.names;
+        tmp.nnames = re->prog.nnames;
+        add_repl(&b, repl->data, repl->len, &tmp);
+        done++;
+        if (caps[1] == caps[0]) {
+            if (caps[1] < text->len) buf_ch(&b, text->data[caps[1]]);
+            pos = caps[1] + 1;
+        } else {
+            pos = caps[1];
+        }
+    }
+    if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    caps_drop(caps, stackcaps);
+    return (int64_t)pa_tuple_new_filled(2, 2, (int64_t)(uintptr_t)out, done, 0, 0);
+}
 // sub 的 repl 是函数：每匹配一次就调一次闭包，返回值拼进结果。
 int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int64_t count) {
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
