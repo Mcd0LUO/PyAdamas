@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 12 / 反例 91 / 运行 337 / 未建模 1 / 严格 7 / 模块 18。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
+当前规模（`ls tests/<目录>/*.py | wc -l` 实测）：正例 12 / 反例 91 / 运行 441 / 未建模 1 / 严格 7 / 模块 23 目录（`find tests/modules -mindepth 1 -maxdepth 1 -type d | wc -l`）。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
 
 跑单个文件：
 
@@ -128,7 +128,7 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
-`tests/run` 的 -O0/-O2 输出自差分由 `tools/difftest.sh` 负责：默认按 CPU 核数并行（`PYADAMAS_TEST_JOBS` 调并行度），`PYADAMAS_TEST_FILTER` 只跑匹配的用例，自动跳过 `*_perf`（打印计时的用例）；当前 204 个用例 / 0 不一致。
+`tests/run` 的 -O0/-O2 输出自差分由 `tools/difftest.sh` 负责：默认按 CPU 核数并行（`PYADAMAS_TEST_JOBS` 调并行度），`PYADAMAS_TEST_FILTER` 只跑匹配的用例，自动跳过 `*_perf`（打印计时的用例）；当前 440 个用例 / 0 不一致（0.470 闸门记录，8 路并行）。
 
 ### 性能 bench
 
@@ -413,9 +413,9 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=4 \
 ```
 
 ASan 只给**生成代码**插桩（编译器本身不插桩），而整套闸门的耗时主要是
-编译，所以墙钟与普通模式接近（465 个用例、8 作业实测约 2 分钟），只有
+编译，所以墙钟与普通模式接近（469 个用例、8 作业；耗时随机器浮动，不写死），只有
 运行时间长的少数用例会明显变慢。**改动触及 RC / GC / lowering 时跑一遍** ——
-全量 465 ran ok 说明内存层面没有回归。
+全量 469 ran ok（0.470 记录）说明内存层面没有回归。
 
 #### 编译器自身插桩
 

@@ -1,17 +1,16 @@
-# 接续 Handoff —— 0.462（HEAD 668449f）
+# 接续 Handoff —— 0.470（2026-11-24 晚）
 
-> 2026-11-23 23:10 快照。仓库 `/src/luo-proj/pyadamas`，master = origin/master = `668449f`。
-> 工作区另有**未提交**的 0.463–0.466（见 §4）：sorted 类实例键修复、Path 迁移、
-> LSP formatting/workspace symbol、fannkuch kind0 写路径。
+> 2026-11-24 快照。仓库 `/src/luo-proj/pyadamas`，工作区干净。
+> 本轮交付：for 列表迭代免冗余边界检查、for 迭代源持有修复、入口模块私有标量
+> 全局跨调用提升；obj_dispatch 对 Codon **3.42× → 2.56×**。
 > 本文档覆盖状态、闸门、已交付、剩余任务与纪律；下次交接直接覆盖。
 
 ## 0. 会话形态与推送
 
 - 直接在服务器仓库根运行；日常用户是 **celestea**（uid 1003），构建/测试/基准都在本地跑。
-- **不要用 root 跑构建/测试**：root 会在 `build/lead/modcache`、`/tmp` 留下 root 属主文件，
+- **不要用 root 跑构建/测试**：会在 `build/lead/modcache`、`/tmp` 留下 root 属主文件，
   celestea 之后会撞 `fs.protected_regular`（现象：`Permission denied` / `cannot write mod.s`），
-  看起来像测试失败。确需 root 操作后，把 `build/lead`、`build/gfix` chown 回 celestea，
-  并清掉测试临时文件。
+  看起来像编译失败。确需 root 操作后，把 `build/lead`、`build/gfix` chown 回 celestea。
 - push 走 root（GitHub 密钥在 /root/.ssh）：
 
   ```bash
@@ -26,93 +25,127 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | 0.462（HEAD `668449f`）；工作区未提交 0.463 |
-| 服务器 | Debian 13，Xeon Gold 6252，容器 cpuset 48 核 |
+| 版本 | **0.470**（CMake 从 CHANGELOG 首条 `## [x.y]` 推导，别手抄） |
+| 服务器 | Debian 13，Xeon Gold 6252 @ 2.10GHz，容器 cpuset 48 核 |
 | 工具链 | gcc 15.2、cmake 3.31、ninja、python 3.13、go |
-| build/lead | 工作构建（编译器 + rt.o/rt_asan.o/rt_debug.o） |
+| build/lead | 工作构建（编译器 + rt.o/rt_asan.o/rt_debug.o）；**所有闸门/基准用它** |
+| build/gfix | checkall 默认的套件/difftest 构建目录（会增量构建到当前源码） |
 | build/release | 0.271 语料 oracle，**绝不重建** |
-| build/gfix | 套件/difftest 构建目录（checkall 默认） |
-| build/asan、build/gXXX | 历史实验目录，忽略 |
+| build/gfix-deque 等 | 历史构建（0.469 时代）。本轮用它做「改动前后 asm 逐字节相同」对照 |
 
-构建：`cmake --build build/lead -j32`。
+构建：`cmake --build build/lead -j8`（-j32 也可；modules-ts 构建是串行的）。
+改了 CHANGELOG 版本号后要重编，版本字符串会进 `deps --json` 与缓存键。
 
 ## 2. 闸门与基线
 
 ```bash
-bash tools/checkall.sh --full     # 约 3 分钟；必须整套跑
+# 一键全套（构建 + 套件 + difftest + check_size + 12 基准指令数 + SIMD + git + perf）
+bash tools/checkall.sh --full --jobs 8
 ```
 
-| 门 | 668449f 基线 | 加 0.463 用例后 |
-|---|---|---|
-| suite | 461 ran ok / 0 失败 | 462 ran ok / 0 失败 |
-| difftest | 433 / 0 不一致 | 434 / 0 |
-| bench 12×3 | 36/36 逐字节 | 36/36 |
-| 12 基准合计 | −8.54%（见 tools/perf_baseline.txt） | 同 |
-| LSP 冒烟 | 201 checks | 228 checks |
+- **difftest 并行度必须 ≤8**：默认 nproc（48）时 tarfile 组（361–364）会因超时/资源
+  竞争出现假 DIFF（O2 侧 rc=1 + Traceback）；`PYADAMAS_TEST_JOBS=8` 复跑 440/0。
+- **短用例基准不可信**：<2ms 的 builtins 用例（isinstance/hasattr/setattr/type/id/
+  len/range/abs）多轮中位数可波动 ±20%，`cmp_bench` 会标「快/慢」。判定回归前先
+  用 `cmp` 比两侧 `mod.s` 是否逐字节相同（本轮 3 个「慢」标记即是零代码变化的噪声）。
+- **ASan 不在 checkall 默认闸门**；动 lowering 所有权 / runtime / RC / GC 时必须单独跑：
+  `PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/lead build/lead/pyadamas`
+- 单用例对拍 CPython：先 `python3 tests/run/NNN.py > /tmp/ref.txt`，再
+  `PYADAMAS_CACHE_DIR=/tmp/xx build/lead/pyadamas build --rebuild -o /tmp/x tests/run/NNN.py`，
+  diff 输出；新用例的 `# --- expect ---` 段必须来自 CPython 实跑。
+- 绑核计时：`taskset -c 24`，多轮取中位数/最小值；机器双峰，别用单轮。
+- Codon 九例对比脚本在 `/tmp/pa-codon-cmp/codon_cmp.py`（/tmp 可能被清）：
+  9 用例、9 轮随机配对、`taskset -c 24`、输出对 CPython；Codon 二进制在
+  `.ref_proj/tools/codon-0.20.7/bin/codon`，obj_dispatch 的等价改写是
+  `.ref_proj/benchmarks/obj_dispatch_codon.py`。
 
-- 性能口径：`instructions:u` 确定性；perf_baseline 阈值 +2% 警告 / +5% 失败。
-- ASan **不在默认闸门**；仅动 runtime/RC/GC/lowering 所有权时用过滤器定点跑，见
-  `docs/semantics-audit-playbook.md §13`。
-- difftest 必须独占（`tools/checkall.sh` 内置 `flock /tmp/pyadamas-difftest.lock`）；
-  lock 文件属主是 celestea，别 chown 成 root。
+本轮实测（0.470）：
 
-## 3. 已交付（0.447 → 0.462）
+| 项 | 结果 |
+|---|---|
+| 普通套件 | **469 ran ok / 0 失败**，EXIT=0 |
+| ASan 套件 | **469 ran ok / 0 失败**，EXIT=0 |
+| difftest | **440 / 0**（8 路） |
+| O0/O1/O2 一致性 | 全过（tests/opt_levels.sh） |
+| check_size | 仅 HEAD 既有两个超限（typecheck/typecheck.cpp 1227、cimport/cdecl_parse.cpp 1271） |
+| 全量内置基准 53 项 | 几何 0.979×（3 个 <1.2ms 噪声，asm 逐字节相同） |
+| Codon 九例 | 几何 PA/Codon 0.869；obj_dispatch 292.8 / 114.2 ms = 2.56× |
 
-- **声明式签名**（.pysig）：time、os.path、math（57 函数）、sys、os、random 模块级、
-  random.Random、re.Pattern/Match（15 方法）、datetime 三类、collections.deque（10 方法）。
-  `src/cimport/native_sigs.h` + `stdlib/sigs/*.pysig`；新增原生 API 不再改 C++。
-- **声明语法统一**：`.pysig`/`.cpya` 都改成 Python 语法，共用 `src/cimport/pydecl.h`；
-  `.cpya` 支持 union/定长数组/`@packed`。
-- **语言**：enum/abc 编译期语义（0.456）；`.pysig` 类声明、`@ret_specialized`。
-- **标准库**：第 3 批纯 py（itertools/functools/logging/codecs）；22 个模块 CPython 对拍
-  验收（修 copy.copy/deepcopy、calendar 常量、decimal.to_integral_value 等）。
-- **LSP**（独立仓库 pya-lsp，纯 .pya）：completion / definition / semanticTokens /
-  references / rename / signatureHelp / documentHighlight / foldingRange / 诊断 debounce；
-  冒烟 119 → 201。
-- **性能三条线**：rc_dec_unknown 特化（fannkuch −4.56%）、整数 Bin 留 %rax 融合
-  （collatz −20.5%、matmul −1.1%）、循环版本化+仿射 BCE（nqueens −11.35%）；
-  12 基准合计 −8.54%。
-- **P2（未提交）**：Path 声明化（0.464）、LSP formatting/workspace/symbol（0.465）、
-  fannkuch kind0 写路径（0.466，再 −5.61%）。
+## 3. 本轮交付（0.470）
 
-## 4. 未提交改动（0.463–0.466）
+| commit | 内容 |
+|---|---|
+| `c95a320` | fix(lower)：for 迭代源在体内被重绑时读到已释放对象；新增 564 |
+| `83229e5` | perf(lower)：for 列表/元组迭代免冗余边界检查 |
+| `8557f7a` | perf(opt)：入口模块私有标量全局跨调用提升（含两处后端融合）；新增 565 |
+| 文档提交 | CHANGELOG 0.470、HANDOFF、ir/regalloc/roadmap/index 同步 |
 
-- **0.463 sorted 类实例键**：`runtime/rt_list.c` 的 `pa_list_sorted_by` 复用 kind-3
-  族分类/`__lt__` 分派（抽 `uk_sort_family`）；unknown float/big 键按数值比；相等键按
-  原下标稳定。`tests/run/559_sorted_key_class.py`。
-- **0.464 pathlib.Path 迁移**：`stdlib/sigs/pathlib.pysig`（构造器 + 18 方法）、
-  `declared_class_type`、method_call 声明查表；`/` 运算符、构造器降级、`mkdir` 关键字
-  白名单、参数装配保留 C++；`unlink`/`rmdir` 无 pa_path_* 入口保留 method_call。
-  C++ −22 行 / pysig +49 行；`tests/run/560_pathlib_pysig.py`。
-- **0.465 LSP formatting + workspace/symbol**：formatting 只归一缩进（4 空格）与行尾空白，
-  括号续行/三引号内部原样，幂等；workspace/symbol 扫 rootUri 下 `.py`/`.pyi`（≤2000），
-  复用 scan_symbols。冒烟 **201 → 228**。
-- **0.466 kind0 列表写路径**：`src/backend/index.cpp` 的 hk==0 热路径 elem_kind 检查
-  合并为一次比较；fannkuch **33,292,318 → 31,424,592（−5.61%，累计约 −10%）**；
-  nqueens +0.28%（布局噪声）；`tools/perf_baseline.txt` 已更新 fannkuch。
-  **LoadSlot 块内 CSE 负收益已回退**（fannkuch +6.4%）。
-- 全闸门已过：**463 ran ok / difftest 435-0 / bench 36/36 / LSP 228 / perf warn=0 fail=0**。
-- `CHANGELOG.md` 0.463–0.466 + `docs/language.md`/`compatibility.md`/`native-stdlib-cookbook.md`
-  已同步。
+obj_dispatch 演进：389.9 →（边界检查）302.4 →（迭代源持有）314.3 →（私有全局
+提升 + 融合修补）292.5 ms；对 Codon 3.42× → 2.56×。
 
-## 5. 分支与 worktree
+## 4. 关键设计与坑（改动前必读）
 
-- 已清理：base-check、lsp-a/lsp-b、perf/a-d（7 个，均已合并）。
-- 保留：`/src/luo-proj/.wt/scan2-{cg,fe,rt}`（同一 commit `cdcbf3c`，scan2 后续用）。
-- 其余旧分支：backup_before_w5w9/w6/w7、fix/win_*（未合并，历史留档）、rc1、regalloc。
+### 4.1 for 迭代源持有（`src/lower/stmt_for.cpp` `lower_for_seq`）
 
-## 6. 下一步（来自 /tmp/pyadamas-todo.md）
+序列表达式若是借用（名字/属性/下标读），循环开始前 `rc_inc + push_temp`，随语句
+边界 `rc_cleanup` 释放；`fresh_vregs` 里的新分配值已经由临时栈持有，不再补。
+**不要**改成“存进帧槽”：槽会被 RA 复用寄存器，且生命周期会被拉长到函数出口。
+参数来源的调用方本来就持引用，多一对 inc/dec 是无害的。
 
-- P2 已完成（0.464 Path / 0.465 LSP / 0.466 fannkuch），当前工作区未提交。
-- P3-T8 `check` 校验模块属性；T9 enum 剩余语义；T10 os.stat/datetime.strptime；
-  T11 内存调试覆盖二级缓冲。P3 先写方案再动手。
-- **账目缺口**：`35089ac`（re.Pattern/Match）、`56ab9f8`（datetime 三类）、`af2acf4`
-  （全局提升 + dict contains/get 融合）还没有 CHANGELOG 条目；若要补，另起 0.464+。
+### 4.2 入口私有标量全局提升（`src/opt/global_promote.cpp`）
 
-## 7. 纪律（沿用）
+`entry_private_globals(m)`：入口模块（`__pa_main`）里，除入口外没有任何函数
+`LoadGlobal/StoreGlobal`、全模块没有 `GlobalAddr` 的标量全局才算私有。依据：
+- 入口符号前缀固定 `__entry__`（`driver/build.cpp`），`import __entry__` 被拒绝；
+- `globals/eval/exec` 在代码生成阶段直接报错（无法动态读全局）；
+- 入口函数无 handler（`has_handlers`/EH 标记检查），未捕获异常 = 进程终止；
+- 被调函数（方法/闭包/生成器/线程）若引用全局，扫描会把它标成非私有。
 
-- 每轮：增量构建 → `checkall --full` → CHANGELOG + 选择性 `git add` → push。
-- 性能改动只许泛化（IR 结构判据），禁止基准/文件名特化；abbench 交替绑核，
-  profile 只找候选、abbench 定生死；布局敏感先 objdump。
-- 改语言语义/运行时行为必须同步 `language.md` / `compatibility.md` / `runtime.md`。
-- `docs/index.md` 的文档维护规则仍适用；CHANGELOG 数字必须是实测。
+只有入口函数放宽调用门禁；非入口模块可被 import，保持「循环体无 call、无可抛异常
+指令」。堆全局不提升。**新增观察者通路时（C 回调、新 dynamic builtin、跨模块符号
+访问）必须回来复查这个证明。**
+
+### 4.3 两处必须同时保住的融合（`vcall_inline.cpp` / `fuse.cpp`）
+
+把 `total` 从 global 改成 slot 后，两个后端优化匹配不上，提升反而慢 7%：
+1. `VCall + add + store` 融合原来只认 `store.global`（结果留 %rax）；现扩展为
+   `store.slot`，走 `can_fuse` 同套判据，split 模式跳过；“快照位置”判据从只拒
+   `%rax` 收紧为拒全部 caller-saved（槽提升后快照是 callee-saved 槽寄存器）。
+2. `try_forward_global_across_rc` 的 `across_scalar` 原来只认中间的 `LoadGlobal`，
+   提升后是 `LoadSlot`（标量定值）——补上后恢复 dec-forwarding，省每轮一次全局重载。
+**教训**：任何“改操作数形态”的 pass 都要对比内层循环 asm，不能只看语义正确。
+
+## 5. 剩余方向（obj_dispatch 仍是最差用例）
+
+剩余开销结构（内层循环 ~292ms / 64M 轮 ≈ 11 周期）：每轮 ~18 条 RC inc/dec
+（元素装载 inc + 旧值 dec）、~10 条虚调用守卫（3 vtable 比较）、索引/循环控制。
+1. **RC 借用扩展**（最大杠杆，~15%）：把 borrow 扩到“入口全局根 + append-only 根”。
+   注意全局槽是 GC 根，不能留悬垂借用；推荐先把全局降级成帧槽再借用，并保留
+   fail-closed 的所有权分析。改动触碰 UAF 红线，必须 ASan + 语料对拍 + CPython 对拍。
+2. **虚调用守卫**：把 vtable 地址比较换成函数指针比较可省 1–2 条，但会合并
+   “同一实现被多类继承”的候选，改变按类匹配的安全论证，谨慎。
+3. **RA_OPT 默认化**（`PYADAMAS_RA_OPT=1`）：私有全局提升后 obj_dispatch 只剩 ~2%
+   收益；历史上 mandelbrot/fasta +3~4%。默认关，需全量 abbench 再决定。
+4. spectral_norm / fannkuch / fasta 的顶层热循环现在应能吃到入口私有提升，本轮
+   只测了 obj_dispatch 与九例，建议用 run_bench 对应用例确认收益。
+5. 既有杂项：check_size 两个超限文件待拆；`tests/check_size.sh` 的 ALLOW_FILES 为空。
+
+## 6. 教训清单（本轮新增，比数字更值钱）
+
+1. **优化会被下游融合吃掉**：提升把 global 改 slot 后，`VCall+add+store` 与跨 RC
+   转发同时失效，先回退 7%；补融合后才净赚。改 IR 形态必须逐条核对消费该形态的
+   后端优化（grep op 名）。
+2. **ASan 不保证抓住自定义池的 UAF**：for 迭代源悬垂读在 ASan 下 0 报错
+   （分配器池化/复用），是 CPython 对拍 + 错误输出暴露的。所有权改动必须配语义对拍。
+3. **私有性可以来自符号命名空间**：`__entry__` 不可 import 是 driver 层保证，
+   比“模块内没人引用”更强；但 GlobalAddr 逃逸必须单独挡。
+4. **短用例基准先 cmp asm 再谈回归**：<2ms 用例 ±20% 是常态。
+5. **difftest 别用默认并行度**：48 路会出假 DIFF（超时/竞争），8 路稳定。
+6. **“提升/降级 pass 的收益”要按真实热循环验证**：0.269 的全局提升微基准 −84%、
+   真实基准 0 收益；0.470 的私有性放宽才让它第一次在真实用例上命中。
+
+## 7. 待决策
+
+- 是否继续压 obj_dispatch 的 RC（borrow 扩展，风险高、需大量验证）？
+- 是否把 `PYADAMAS_RA_OPT` 默认打开（需全量 abbench 复核）？
+- check_size 两个超限文件何时拆（纯工程债，不阻塞功能）。

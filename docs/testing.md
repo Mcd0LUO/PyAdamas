@@ -18,7 +18,7 @@ bash tools/checkall.sh --write-baseline  # !! 人工确认后才用：覆盖基�
 
 | 模式 | 闸门 | 用途 |
 |---|---|---|
-| --full（默认） | 1 增量构建 + 2 套件 + 3 difftest + 4 check_size + 5 12基准x3档输出 + 6 LSP 冒烟 + 7 SIMD 变体 + 性能基线比对 | 提交前 / CI |
+| --full（默认） | 1 增量构建 + 2 套件 + 3 difftest + 4 check_size + 5 12基准x3档输出 + 6 SIMD 变体 + 7 git 状态 + 8 性能基线比对（LSP 冒烟 0.469 起已迁出） | 提交前 / CI |
 | --quick | 2 套件 + 3 difftest + 4 check_size（可用 CHECKALL_SKIP_BUILD=1 跳过构建） | 日常快速回归 |
 | --perf | 只跑性能基线的采集与比对 | 排查性能变化 / 验证告警 |
 
@@ -41,16 +41,16 @@ bash tools/checkall.sh --write-baseline  # !! 人工确认后才用：覆盖基�
 机器 48 核，但默认并行度是 16（上限 16），避免把机器打满影响别人。
 用 --jobs N 或 PYADAMAS_TEST_JOBS=N 覆盖（脚本会把 >16 的值压到 16）。
 
-实测（lead 提供，2026-11-23）：
+实测（2026-11-23；当时套件 420 例、difftest 392 例，当前为 469 / 440，耗时同量级、未在当前 HEAD 复测）：
 
 | 项目 | JOBS=4 | JOBS=16 | JOBS=1 |
 |---|---|---|---|
-| run_tests（420 例） | 46.4s（gates 实测） | 31.9s（gates 实测） | — |
-| difftest（392 例） | — | 17.6–19s（gates 实测） | 172s |
+| run_tests（现 469 例） | 46.4s（2026-11-23，420 例） | 31.9s（同上） | — |
+| difftest（现 440 例） | — | 17.6–19s（同上，392 例） | 172s（同上） |
 
-本代理另测 JOBS=8 套件 35.1s（介于 4 和 16 之间）。
+JOBS=8 套件另测 35.1s（2026-11-23，介于 4 和 16 之间）。
 
-difftest 是提速主力（172s → 19s，9倍）；套件只有 1.4倍（单例冷编译 120–190ms 已经很短）。
+difftest 是提速主力（172s → 19s，9 倍）；套件只有 1.4 倍（单例冷编译 120–190ms 已经很短）。
 今后要再快，方向是共享 stdlib 模块缓存而不是加并行度。
 
 ## 并发安全（多人同时跑时必读）
@@ -66,8 +66,8 @@ difftest 是提速主力（172s → 19s，9倍）；套件只有 1.4倍（单例
 ## ASan 政策：默认完全不跑
 
 **`--full` 和 `--quick` 都不含 ASan**。ASan 只给生成程序插桩，编译器本身不插桩；
-整套闸门的耗时主要来自编译，因此开 ASan 的墙钟与普通模式接近（465 个用例、8 作业
-实测约 2 分钟），不要因为「会很慢」而跳过必要的 ASan 验证。
+整套闸门的耗时主要来自编译，因此开 ASan 的墙钟与普通模式接近（469 个用例、8 作业
+上一轮实测），不要因为「会很慢」而跳过必要的 ASan 验证。
 
 ### 什么时候真的需要 ASan
 
@@ -135,6 +135,8 @@ bash tools/checkall.sh --write-baseline
 
 ## 当前基线值（2026-11-23，HEAD 18cd374）
 
+基线与 HEAD 无关，按 `tools/perf_baseline.txt`（下表只是当时快照，判定以文件为准）。
+
 | 基准 | instructions:u (-O2) |
 |---|---:|
 | binary_trees | 4,748,393 |
@@ -157,5 +159,5 @@ bash tools/checkall.sh --write-baseline
 
 | 模式 | 总耗时 | 备注 |
 |---|---:|---|
-| --full | **76.8s**（脚本汇总 1:15.97） | 9 道闸门，全部 PASS；420 ran ok / 392 difftest 0 不一致 / 36/36 基准逐字节一致；1 项黄色性能 WARN |
-| --quick | **53.1s**（脚本汇总 0:52.63） | 构建+套件+difftest+check_size，全部 PASS |
+| --full | 2026-11-23 实测 76.8s（当时 9 道闸门含 LSP 冒烟；现 8 道，未在当前 HEAD 复测） | 8 道闸门，全部 PASS；469 ran ok / 440 difftest 0 不一致 / 36/36 基准逐字节一致 |
+| --quick | 2026-11-23 实测 53.1s（未在当前 HEAD 复测） | 构建+套件+difftest+check_size，全部 PASS |

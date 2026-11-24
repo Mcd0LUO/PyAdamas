@@ -305,6 +305,8 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
 
 ## 异常展开
 
+**现状说明**：本节描述的是 **setjmp/longjmp 路径**。0.202 起非可挂起函数默认走 Itanium 表驱动零开销异常（personality + LSDA，见 [zero-cost-exceptions.md](zero-cost-exceptions.md)，`--no-zero-cost-exc` 可回退）；setjmp 仍用于可挂起函数（生成器/协程）、`with` 在 `try` 内、Win64。下文按旧路径叙述，不重写整节。
+
 异常用 **setjmp/longjmp**，不占用返回值寄存器，也不改调用约定：
 
 - `pa_handler_push` 压入一条 `{jmp_buf, prev, temp_mark}` 记录，返回的

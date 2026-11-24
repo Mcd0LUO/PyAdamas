@@ -22,7 +22,7 @@
 | [zero-cost-exceptions.md](zero-cost-exceptions.md) | 零开销异常怎么做？LSDA / personality 的实测格式与 Z1-Z5 路线 | `runtime/rt_personality.c` `tests/exc/` `tools/lsda_ref/` |
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower/exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
-| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？三条路线（第三层 / 全局提升 / 块级分裂）各自为什么被判负？ | `src/backend/regalloc.cpp` |
+| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？第三层 / 块级分裂为什么被判负？全局提升为何最终以「入口私有标量全局」落地？ | `src/backend/regalloc.cpp` |
 | [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/backend/regalloc.cpp` |
 | [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt/loop.cpp` |
 | [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower/impl_slots.cpp` `runtime/rt_core.c` |
@@ -31,6 +31,9 @@
 | [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver/build.cpp` |
 | [nightly-summary.md](nightly-summary.md) | 2026-11-22/23 夜间迭代 + 白天语义审计的总账：模块化、性能两张表、向量化覆盖、bug 清单、剩余工作 | — |
 | [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：哪些基准/循环触发、8 个 0 触发基准各自的第一道拒绝门（IR 证据） | `src/opt/vect_planner_loop.cpp` `src/backend/vect.cpp` |
+| [big-landing.md](big-landing.md) | 定宽大整数 `big` 怎么落地？静态/动态接入与剩余缺口 | `src/typecheck/` `runtime/rt_big.c` |
+| [testing.md](testing.md) | 全闸门怎么跑：checkall 三种模式、并行度、性能基线与并发安全 | `tools/checkall.sh` `tests/` |
+| [next-round-plan.md](next-round-plan.md) | 下一阶段（0.471 起）路线图：P0/P1/P2 的验收标准与每轮闸门 | — |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
 其中 [regalloc-architecture.md](regalloc-architecture.md) 的 §8、[bounds-elimination-attempt.md](bounds-elimination-attempt.md)、
@@ -90,25 +93,27 @@
 
 ## 当前状态
 
-当前状态（对应 CHANGELOG **0.446**）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。
+当前状态（对应 CHANGELOG **0.470**，HEAD `8557f7a`）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。
 
 验证现状（每条命令都能直接复现）：
 
+以下为 **0.470 闸门记录**（口径见 [next-round-plan.md](next-round-plan.md) §0；耗时随机器浮动，不写死）：
+
 | 门 | 命令 | 现状 |
 |---|---|---|
-| **一键闸门** | `bash tools/checkall.sh --full` | **全部 PASS（约 1 分钟）** |
-| 运行用例 | `PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **420 ran ok，0 失败（33s）** |
-| 差分对拍 | `flock /tmp/pyadamas-difftest.lock env PYADAMAS_TEST_JOBS=16 bash tools/difftest.sh build/lead/pyadamas` | **392 个用例，0 个不一致（19s）** |
-| 体积 | `bash tests/check_size.sh` | 通过 |
+| **一键闸门** | `bash tools/checkall.sh --full` | **全部 PASS**（8 项闸门，见 [testing.md](testing.md)） |
+| 运行用例 | `PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **469 ran ok，0 失败**（普通 + ASan 各一遍） |
+| 差分对拍 | `flock /tmp/pyadamas-difftest.lock env PYADAMAS_TEST_JOBS=8 bash tools/difftest.sh build/lead/pyadamas` | **440 个用例，0 个不一致**（8 路并行） |
+| 体积 | `bash tests/check_size.sh` | **仍失败**：`src/typecheck/typecheck.cpp` 1227、`src/cimport/cdecl_parse.cpp` 1271（>1200） |
 | 内存（**默认不跑**） | 见 [semantics-audit-playbook.md §13](semantics-audit-playbook.md) | 仅当改动触及 `runtime/` 内存路径或 lowering 所有权时**定点**跑，且用过滤器 + `JOBS=16` |
 
 性能与能力的当前口径见 [nightly-summary.md](nightly-summary.md)：12 个经典基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 一致
 （nbody 109,040,119 条 ≈ −45.31%、spectral_norm 94,637,438 ≈ −61.75%、sieve −8.58%、matmul −4.52%，相对夜间/0.418 基线），
 向量化覆盖 **4 个基准 / 9 个循环**（matmul、spectral_norm、nbody、sieve），其余 8 个基准的阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)。
 
-剩余主要缺口：8 个基准的向量化（masked 向量化 / 嵌套循环 / 调用屏障）、装饰后的 `__iter__`（内建迭代路径不查类属性包装函数）、未初始化变量读取返回 0（需哨兵/数据流分析）、
+剩余主要缺口（与 [next-round-plan.md](next-round-plan.md) 对齐）：8 个基准的向量化（masked 向量化 / 嵌套循环 / 调用屏障）、装饰后的 `__iter__`（内建迭代路径不查类属性包装函数）、未初始化变量读取返回 0（需哨兵/数据流分析）、
 P4 删特化（spectral_norm 仍约 1.13× 依赖特化）、asyncio 边角、异常对象 traceback/列号/`.debug_info`、字符串码点语义 S3、
-依赖动态属性的 stdlib（`argparse`/`dataclasses`/`contextlib`，见 [stdlib-gaps.md](stdlib-gaps.md)）；以及回归纪律：
-`docs/index.md` 的文档维护规则仍然适用。
+`Fraction`/`Decimal` 与 `int` 的混合运算（静态签名不接受，见 [stdlib-gaps.md](stdlib-gaps.md)）；`argparse` 实测可用，`dataclasses` 只能 import、`@dataclass` 不合成 `__init__`（实测）；
+check_size 仍有两个超限文件待拆（`typecheck/typecheck.cpp` 1227、`cimport/cdecl_parse.cpp` 1271）；下一阶段任务与验收标准见 [next-round-plan.md](next-round-plan.md)。
 
-历次里程碑（完整版见 [CHANGELOG.md](../CHANGELOG.md)）：0.158–0.171 前端基线 281 → 501 / 596；0.172 修 handler 记录空闲链表；0.173 新增 Windows 目标；0.174–0.197 打通零开销异常 Z1–Z4；另有 GC 根扫描收窄、字符串码点语义（0.186）、间接调用统一 ABI（0.188）；0.198–0.202 完成 **Z5**：表驱动成为默认路径，`_setjmp` 670 → 361（-46%），可挂起函数永久保留 setjmp 是设计上的降级，`--no-zero-cost-exc` 可回退；0.203–0.204 落地寄存器分配 R1–R4（活跃性 + 线性扫描 + caller 池 + 浮点线性扫描），正确性收益明确但性能收益为零；同期恢复四语言经典基准（[结果](bench/compare/RESULTS-release.md)）：9 用例全部标注、输出与 CPython 逐字节一致（详见 [zero-cost-exceptions.md](zero-cost-exceptions.md)）。0.205–0.209 IR 重构四步（稳定指令/块 ID、use-def 索引、tag 操作数、DCE 改用索引）并记录「暂不上 SSA」的取舍；0.210–0.213 修四个正确性 bug（>6 参数含浮点的间接调用丢实参、堆槽 LICM 外提、RcMark 寄存器化、切片赋值缺类型检查）；0.214 `join(T, None)` 返回 `Optional[T]`（热循环 4.7×）；0.215–0.216 根治两类 unknown 值 use-after-free；0.217–0.218 ASan 成为一等公民并覆盖运行时内部；0.219–0.233 **泄漏从 23 处清到 0**，新增 `rt_diag.c` 诊断模块；0.234–0.242 **RC/GC 性能优化**：GC 零回收退避（容器段 major 8211 → 22）、容器逐元素堆位图、按位置放宽 exact-RC（用例 41 → 50）、按需关闭索引维护（`bench_rc_gen` 0.75x → 0.90x）、Go pacer 公式（GC 次数 34 → 7）、增量清扫（最大停顿 5.09ms → 1.68ms，-67%）、inc/dec 内联（符号调用 239 → 0）、RAII 作用域守卫（`jp_value` 手工 pin 4 → 0）。**性能归因修正**：原写的「`__pa_main` 调用密度过高（42 块 / 106 call）」描述的是 0.204 之前的 matmul，实测顶层调用几乎全是 `call.rt`（用户调用 0–2 个），真障碍是顶层变量为全局、不在只处理 slot 的分配器候选集里——见 [regalloc.md](regalloc.md)。
+历次里程碑（完整版见 [CHANGELOG.md](../CHANGELOG.md)）：0.158–0.171 前端基线 281 → 501 / 596；0.172 修 handler 记录空闲链表；0.173 新增 Windows 目标；0.174–0.197 打通零开销异常 Z1–Z4；另有 GC 根扫描收窄、字符串码点语义（0.186）、间接调用统一 ABI（0.188）；0.198–0.202 完成 **Z5**：表驱动成为默认路径，`_setjmp` 670 → 361（-46%），可挂起函数永久保留 setjmp 是设计上的降级，`--no-zero-cost-exc` 可回退；0.203–0.204 落地寄存器分配 R1–R4（活跃性 + 线性扫描 + caller 池 + 浮点线性扫描），正确性收益明确但性能收益为零；同期恢复四语言经典基准（[结果](../bench/compare/RESULTS-release.md)）：9 用例全部标注、输出与 CPython 逐字节一致（详见 [zero-cost-exceptions.md](zero-cost-exceptions.md)）。0.205–0.209 IR 重构四步（稳定指令/块 ID、use-def 索引、tag 操作数、DCE 改用索引）并记录「暂不上 SSA」的取舍；0.210–0.213 修四个正确性 bug（>6 参数含浮点的间接调用丢实参、堆槽 LICM 外提、RcMark 寄存器化、切片赋值缺类型检查）；0.214 `join(T, None)` 返回 `Optional[T]`（热循环 4.7×）；0.215–0.216 根治两类 unknown 值 use-after-free；0.217–0.218 ASan 成为一等公民并覆盖运行时内部；0.219–0.233 **泄漏从 23 处清到 0**，新增 `rt_diag.c` 诊断模块；0.234–0.242 **RC/GC 性能优化**：GC 零回收退避（容器段 major 8211 → 22）、容器逐元素堆位图、按位置放宽 exact-RC（用例 41 → 50）、按需关闭索引维护（`bench_rc_gen` 0.75x → 0.90x）、Go pacer 公式（GC 次数 34 → 7）、增量清扫（最大停顿 5.09ms → 1.68ms，-67%）、inc/dec 内联（符号调用 239 → 0）、RAII 作用域守卫（`jp_value` 手工 pin 4 → 0）。**性能归因修正**：原写的「`__pa_main` 调用密度过高（42 块 / 106 call）」描述的是 0.204 之前的 matmul，实测顶层调用几乎全是 `call.rt`（用户调用 0–2 个），真障碍是顶层变量为全局、不在只处理 slot 的分配器候选集里——见 [regalloc.md](regalloc.md)。

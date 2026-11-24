@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.470] - 2026-11-24
+
+> perf/fix：**obj_dispatch 对 Codon 3.42× → 2.56×**（389.9 → 292.5 ms），三项改动。
+>
+> 1. `perf(lower)`：`for x in list/tuple` 的元素装载紧跟循环条件分支，`i < len(seq)`
+>    已成立；有副作用的循环体只要装载前只有索引槽读 / 空操作 rc_cleanup，也标
+>    `index.get.unchecked`（下一轮条件仍重读 len，pop/append 语义与 CPython 迭代器
+>    一致）。单项 obj_dispatch 389.9 → 302.4 ms；全量内置基准 53 项几何 0.997×。
+> 2. `fix(lower)`：`for x in a: a = ...` 的序列只是借用，体内重绑会 dec 掉最后一份
+>    引用并释放旧列表，后续迭代读已释放对象（a=[1,2,3] 实际只迭代出 2 个；ASan 因
+>    分配器池化不报）。循环前补一份引用进临时栈、语句边界释放；新分配值不重复持有。
+>    新增 564。
+> 3. `perf(opt)`：入口模块私有标量全局跨调用提升——除 `__pa_main` 外无人引用、全模块
+>    未取址的标量全局，循环体允许用户调用（入口符号前缀 `__entry__` 不可被 import；
+>    `globals/eval/exec` 直接报错；入口无 handler，未捕获异常即终止）。配套保住两处
+>    融合：`VCall+add+store.slot` 目标、跨 RC 转发夹 `load.slot`，否则回退 7%。新增 565。
+>
+> 验证：普通/ASan 闸门 **469/469**（EXIT=0）；difftest **440/0**（8 路并行；默认
+> nproc 路并行时 4 个 tarfile 用例偶发超时假 DIFF，单跑 0 差异）；O0/O1/O2 全过；
+> check_size 仍只报 HEAD 既有两个超限；全量内置基准 53 项几何 0.979×（3 个 <1.2ms
+> 标记用例与 0.469 产物 asm 逐字节相同，纯噪声）；Codon 九例几何 0.869
+> （obj_dispatch 292.8 / 114.2 ms）。
+>
+> 文档：0.470 同步 + 全仓漂移收口（`index`/`testing`/`roadmap`/`README`/`compatibility`/
+> `development`/`codegen` 的版本号、闸门项、用例计数、check_size 超限清单、异常默认路径均
+> 按当前 HEAD 校正，无法复现的旧数字标注口径）；新增 [docs/next-round-plan.md](docs/next-round-plan.md)
+> （0.471 起路线图：P0 收口 / P1 浮点槽与 RC 借用 / P2 能力面 / P3 工程债）。
+
 ## [0.469] - 2026-11-24
 
 > refactor：**LSP 拆成独立仓库 pya-lsp**，编译器回归「只是编译器」。

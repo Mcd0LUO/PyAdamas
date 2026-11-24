@@ -60,7 +60,7 @@
 
 标注/形参/返回值上下文可只给一元表达式而非其操作数定型为 big；现在先加宽，再调用 BigInt 一元实现。big 左操作数与静态 unknown 移位计数明确拒绝（含复合赋值），可先显式转换计数。这不改变纯动态运算路径。
 
-[399](../tests/run/399_big_signed_literals.py) 与 [移位拒绝](../tests/fail/big_unknown_shift_count.py) 定向通过；399 的 O0/O2 × TYPE_TAGS=0/1 ASan+LSan 四组退出 0、stderr 空。普通 int/i8 正负号用例与 [332](../tests/run/332_fixed_int_basic.py) 的 O0/O2 asm 对 c560614 逐字节不变。此跟进未重跑上表全套。
+[399](../tests/run/399_big_signed_literals.py) 与 [移位拒绝](../tests/fail/big_unknown_shift_count.py) 定向通过；399 的 O0/O2 × TYPE_TAGS=0/1 ASan+LSan 四组退出 0、stderr 空。普通 int/i8 正负号用例与 [332](../tests/run/332_fixed_int.py) 的 O0/O2 asm 对 c560614 逐字节不变。此跟进未重跑上表全套。
 
 ### 动态域隔离的实测
 

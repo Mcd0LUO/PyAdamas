@@ -239,22 +239,21 @@ double 位模式，靠堆探针/RC kind 识别）；而 `list[float]` 的元素�
 
 ## 三、验证手段
 
-分层，从便宜到贵。`tests/run_tests.sh` 全量 **205 ran ok**（= 188 运行 + 15 模块
-+ 1 cdecl + 1 cfi），exit 0；正例/反例/严格/未建模用各自的结果标记，不计入这 205。
+分层，从便宜到贵。`tests/run_tests.sh` 全量 **469 ran ok / 0 失败**（0.470 记录，普通 + ASan 各一遍）；正例/反例/严格/未建模用各自的结果标记，不计入这一计数。规模用 `ls tests/<目录>/*.py | wc -l` 实测：正例 12 / 反例 91 / 运行 441 / 严格 7 / 未建模 1 / 模块 23 目录（`find tests/modules -mindepth 1 -maxdepth 1 -type d | wc -l`）。
 
 | 层 | 命令 | 规模 | 防的是什么 |
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 12 个文件 | 前端退回保守 |
-| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 53 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 188 个文件 | 后端烂掉没人知道 |
-| 严格 | `ctest --preset dev` 里 `tests/strict/*.py` | 6 个文件 | 严格模块口径下的行为漂移 |
-| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 15 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
+| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 91 个文件 | 检查器为了过测而放水 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 441 个文件 | 后端烂掉没人知道 |
+| 严格 | `ctest --preset dev` 里 `tests/strict/*.py` | 7 个文件 | 严格模块口径下的行为漂移 |
+| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 23 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 展开 / CFI | `tests/eh`、`tests/cfi/`、`tools/lsda_ref/` | z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42 | LSDA 字节布局、personality 判据、生成代码的栈展开 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
-| O0/O2 自差分 | `bash tools/difftest.sh` | 188 个运行用例 | 优化遍引入静默算错（野指针、越界、丢实参）；0.210 的间接调用 bug 就是它抓到的 |
-| ASan 全量 | `PYADAMAS_TEST_ASAN=1 bash tests/run_tests.sh` | 205 ran ok | 运行时内部的越界 / UAF / 双重释放（0.218 起 `rt_asan.o` 也插桩） |
-| 泄漏扫描 | `ASAN_OPTIONS=detect_leaks=1` + `PYADAMAS_RC_TRACE` / `PYADAMAS_EXC_TRACE` | **0 处 / 188 用例** | 所有权转移断链；0.217 首次扫描 23 处，0.233 清零，0.234–0.242 保持 0 |
+| O0/O2 自差分 | `bash tools/difftest.sh` | 440 个用例（0.470 记录，8 路并行） | 优化遍引入静默算错（野指针、越界、丢实参）；0.210 的间接调用 bug 就是它抓到的 |
+| ASan 全量 | `PYADAMAS_TEST_ASAN=1 bash tests/run_tests.sh` | 469 ran ok（0.470 记录） | 运行时内部的越界 / UAF / 双重释放（0.218 起 `rt_asan.o` 也插桩） |
+| 泄漏扫描 | `ASAN_OPTIONS=detect_leaks=1` + `PYADAMAS_RC_TRACE` / `PYADAMAS_EXC_TRACE` | **0 处 / 188 用例**（0.233 口径，当前 HEAD 未重跑） | 所有权转移断链；0.217 首次扫描 23 处，0.233 清零，0.234–0.242 保持 0 |
 | 随机程序差分 | `pyadamas build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 默认 840 个程序 | 语义漂移、边界错误 |
 
 ### 四类测试的写法
@@ -334,6 +333,8 @@ unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增�
 ### 前端鲁棒性基线
 
 拿 CPython 标准库当输入，看 `check` 的通过率。这不是功能测试，是「别把真实代码判错」的护栏。
+
+> 下列 501 / 596 是 0.171（2026-11-15）的记录；当前 HEAD（0.470）未重测，重测任务见 [next-round-plan.md](next-round-plan.md) P2（3.4）。
 
 ```bash
 cmake --preset dev && cmake --build --preset dev   # 先构建 build/dev/pyadamas

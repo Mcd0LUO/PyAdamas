@@ -82,6 +82,8 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 标量、字符串、**bytes**（含迭代与 `%` 格式化）、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、序列重复（`str`/`list`/`tuple` 乘 `int`）、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`（异常值、`args`、`raise ... from`、自定义异常）、本地包/相对导入（`.py` → `.pya` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、C3 多继承、零参 `super()`、`@staticmethod`、`@classmethod`、`@property`、类属性）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、`del`、`match/case`、复数字面量、f-string（含格式说明）、dunder 协议、`open`/`input`/`sys.stdin`、`print`（含 `sep=` / `end=`）。`struct` 值类型、`cimport`/`cdecl` C 互操作（缓冲区、回调、可变参数、结构体按值）与跨模块继承也已支持。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器（`async for` / `async with`、`asend` / `athrow` / `__anext__` / `aclose`）。标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`/`fnmatch`/`copy`，以及封装 OpenBLAS 的 `linalg`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
+定宽大整数 `big`（0.357–0.368 落地）也已支持：超 u64 十进制字面量、`+ - * // %`、位运算/移位、比较、格式化（`big` 标注与 `cast_big`/`cast_i64` 互转），实测 `a: big = 123456789012345678901234567890` 可编译运行（见 [big-landing.md](docs/big-landing.md)）；`fractions`/`decimal`/`enum`/`abc` 已内置（`import fractions` 等实测通过，但 `Fraction`/`Decimal` 与 `int` 的混合运算仍受限，见 [next-round-plan.md](docs/next-round-plan.md) P2）。
+
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
 ## 目录
@@ -134,7 +136,7 @@ tools/                    工具脚本（差分 / 基准 / 同步 / IR dump）
 - **RC + 保守循环收集**：堆对象进注册表，分代收集（minor trial-deletion + major 标记-清扫）按存活堆自适应阈值触发（下限 2MB）；根来自全局表、临时值栈、帧记录登记的 unknown 槽和 callee-saved 寄存器，纯类型化帧不扫整段栈。误报只延迟回收，不提前释放。→ [运行时](docs/runtime.md#循环收集器)
 - **字典是开放寻址表**：entries 按插入顺序串成双向链表（`order` 只作遍历快照），`set` 复用同一结构；key/value 按静态类型接入 RC，未知类型交给 GC。字符串 key 按字节哈希、逐字节判等。删除用墓碑，摊还 O(1)。→ [运行时](docs/runtime.md#字典--集合)
 - **语法糖各归其位**：`lambda` 在类型检查前脱糖成嵌套 `def`，推导式在降级期展开成独立作用域的循环，`with` 在正常/跳转/异常出口补 `__exit__`，装饰器按逆序做普通闭包调用。→ [IR](docs/ir.md#降级规则)
-- **异常用 setjmp/longjmp 展开**：`try`/`with`/`finally` 压运行时 handler 记录，`raise` 一次 `longjmp` 到最内层 landing pad；含 handler 的函数关闭热变量寄存器提升，异常跳过的局部引用交给保守 GC。→ [代码生成](docs/codegen.md#异常展开)
+- **异常默认走表驱动零开销展开**：0.202 起非可挂起函数的 `try` 用 Itanium personality + LSDA（`--no-zero-cost-exc` 可回退）；setjmp/longjmp 只保留给可挂起函数（生成器/协程）、`with` 在 `try` 内、Win64。旧口径「`try`/`with`/`finally` 压 handler 记录、`raise` 一次 `longjmp`」仅描述 setjmp 路径；含 handler 的函数关闭热变量寄存器提升，异常跳过的局部引用交给保守 GC。→ [代码生成](docs/codegen.md#异常展开) / [零开销异常](docs/zero-cost-exceptions.md)
 - **生成器是状态机 + 堆帧**：含 `yield` 的函数拆成创建包装和 resume，局部槽位在堆帧里；yield 时把 handler 记录摘下，恢复时重新 setjmp；`close()` 和引用计数归零会按挂起点快照跑 `finally` / `__exit__`。→ [运行时](docs/runtime.md#生成器)
 - **协程复用同一套状态机**：`async def` 的帧多一个 kind 标记，`await` 是第三种挂起；`asyncio.run` 驱动就绪队列 + 定时器，`gather` 并发启动，`create_task` 立即调度并可 `cancel()`（沿 await 链级联取消），`Future` 支持多等待者、Task 支持多个协程同时等待、`set_result`/`set_exception`/`add_done_callback`，`wait_readable`/`wait_writable` 把 fd 交给事件循环 `poll`；异常通过帧内注入跨 await 传播；异步生成器 + `async for` / `async with` / `asend` / `athrow` / `aclose` 也已接通。→ [运行时](docs/runtime.md#协程与事件循环)
 - **模块独立编译 + 链接**：本地 `.py` 模块与内置 `math`/`sys`；每个 `.py` 编译成独立 `.o` 和二进制 `.pya` 接口，入口与依赖按 import 图链接；初始化惰性且只执行一次，源码哈希 + 依赖接口哈希决定是否复用缓存。→ [路线图](docs/roadmap.md)
@@ -154,15 +156,15 @@ tools/                    工具脚本（差分 / 基准 / 同步 / IR dump）
 
 | 组 | 数量 | 内容 |
 |---|---|---|
-| `tests/*.py` | 12 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
-| `tests/fail/*.py` | 53 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 189 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
-| `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
-| `tests/strict/*.py` | 6 | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
-| Windows 目标 | 146 | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
-| `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
-| `tools/difftest.sh` | 188 个用例 | `tests/run` 的 -O0/-O2 输出自差分，并行（`PYADAMAS_TEST_JOBS` 调并行度），自动跳过 `*_perf`，0 不一致 |
-| `tests/modules/` | 15 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/*.py` | 12（`ls tests/*.py \| wc -l`） | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式，为旧口径未在当前 HEAD 复测） |
+| `tests/fail/*.py` | 91（`ls tests/fail/*.py \| wc -l`） | 反例，必须报出首行 `# expect:` 指定的错 |
+| `tests/run/*.py` | 441（`ls tests/run/*.py \| wc -l`） | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/unsupported/*.py` | 1（`ls tests/unsupported/*.py \| wc -l`） | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
+| `tests/strict/*.py` | 7（`ls tests/strict/*.py \| wc -l`） | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
+| Windows 目标 | 146（0.4xx 口径，未在当前 HEAD 复测） | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
+| `tests/diff/` | 7 个生成器（0.4xx 口径，未在当前 HEAD 复测） | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
+| `tools/difftest.sh` | 440 个用例（0.470 闸门记录，8 路并行） | `tests/run` 的 -O0/-O2 输出自差分，并行（`PYADAMAS_TEST_JOBS` 调并行度），自动跳过 `*_perf`，0 不一致 |
+| `tests/modules/` | 23 个目录（`find tests/modules -mindepth 1 -maxdepth 1 -type d \| wc -l`） | 多模块编译 + 运行 + 二次构建缓存命中 |
 | `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 零开销异常 | 4 套夹具 | `tests/exc/`：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项；`tools/lsda_ref` 100+ 条字节断言。默认路径下非可挂起函数的 try 全程无 `_setjmp`（`--no-zero-cost-exc` 可回退） |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |

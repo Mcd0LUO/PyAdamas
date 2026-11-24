@@ -274,9 +274,12 @@ P0/P1/P2，O2 再加控制流与小函数优化：
   不提升。
 - **免检查下标**：`for x in list/tuple`、推导式、`sum`/`min`/`max`/
   `any`/`all`/`print(*seq)` 的元素装载在能证明 `0 <= i < len` 时改成
-  `index.get.unchecked`。普通 for/推导式用降级期副作用计数判断循环体
-  是否会调用、`del`、切片赋值或触发属性/with 等可能改变长度的操作；
-  生成器帧与异步推导式不参与。
+  `index.get.unchecked`。普通 for 循环的元素装载紧跟在循环条件分支之后
+  （`i < len` 刚成立），所以即使循环体有副作用也标 unchecked；有副作用
+  时下一轮条件仍重读 len（pop 提前结束、append 看到新元素，与 CPython
+  迭代器一致）。推导式仍用降级期副作用计数判断循环体是否会调用、`del`、
+  切片赋值或触发属性/with 等可能改变长度的操作；生成器帧与异步推导式
+  不参与。
   另外，`for k in range(len(a))`（含 `range(0, len(a))`、步长 1）在循环体
   没有副作用、也没给 `a`/`k` 赋值时，体内形如 `a[k]` 的读下标同样改成
   `index.get.unchecked`；一旦有人写 `a` 或 `k` 的槽，提示立即作废。

@@ -139,14 +139,14 @@
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 | 0.271–0.300 | 池化+内联+融合+守卫去虚化+类型推断：dict 缓冲池化、元组/append/str 下标/临时栈内联快路径、contains+get IR 融合、Bin+StoreGlobal 融合、store.global→load.global 转发（0.295 起禁止跨可重入 RC 释放）、RC 热路径缩短、守卫整数叶子虚方法内联、浮点下标写入快路、返回类型与默认实参推断。realistic 六项合计约 1981ms（0.274）→1365ms（0.297），obj_dispatch 508.73→338ms。逐版实测与教训见 [CHANGELOG.md](../CHANGELOG.md) |
 
-## 当前状态（0.300）
+## 当前状态（0.470，HEAD `8557f7a`）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`/`fnmatch`/`copy`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：205 个运行用例、64 个反例、12 个正例、6 个严格用例、1 个未建模、15 个模块目录；`tests/run_tests.sh` 全量 exit 0（222 ran ok = 205 运行 + 15 模块 + 1 cdecl + 1 cfi，release 与 ASan 各一遍）。差分 runner 已自举，默认 840 例；另有 `tools/difftest.sh` 做 O0/O2 自差分（204 用例 0 不一致，跳过 1 个 perf 用例）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
-- **内存正确性（0.215–0.233）**：ASan 全量 205 ran ok；**泄漏扫描 0 处 / 188 用例**（0.217 首次开 `detect_leaks=1` 时为 23 处）。两类 unknown 值的 use-after-free 已根治（返回值/存储所有权、unknown 槽被提升导致 GC 根缺失）。剩余已知不精确点见「技术债」第 2 条。
+- **验证**（规模用 `ls tests/run/*.py` 等实测；闸门结果为 0.470 记录，见 [next-round-plan.md](next-round-plan.md) §0）：运行 441、反例 91、正例 12、严格 7、未建模 1、模块目录 23（`find tests/modules -mindepth 1 -maxdepth 1 -type d | wc -l`）。`tests/run_tests.sh` 全量 exit 0，普通 + ASan 各 **469 ran ok / 0 失败**；`tools/difftest.sh` **440 用例 / 0 不一致**（8 路并行，跳过 `*_perf`）。差分 runner 已自举（历史记录默认 840 个生成程序，当前 HEAD 未复测该生成数）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。此前口径「205 运行 / 64 反例 / 15 模块 / 204 差分」均已过时。
+- **内存正确性（0.215–0.233）**：ASan 全量 **469 ran ok**（0.470 记录）；泄漏扫描 0 处 / 188 用例（0.217 首开 `detect_leaks=1` 时 23 处，0.233 清零；**该用例数为当轮记录，当前 HEAD 未重跑**）。两类 unknown 值的 use-after-free 已根治（返回值/存储所有权、unknown 槽被提升导致 GC 根缺失）。剩余已知不精确点见「技术债」第 2 条。
 - **诊断工具（0.227–0.231）**：`runtime/rt_diag.c` 独立模块，`PYADAMAS_RC_TRACE` / `PYADAMAS_RC_TRACE_MIN` / `PYADAMAS_RC_TRACE_KIND` / `PYADAMAS_EXC_TRACE` / `PYADAMAS_DIAG_DEPTH` 追踪对象分配、释放、临时栈进出与异常所有权转移，退出汇总未释放对象并给出源码行归因。关闭时零输出、零可测开销。用法与两个陷阱见 [development.md](development.md)。
 - **IR 基础设施（0.205–0.209）**：`Inst::id` / `Block::id` 稳定标识（不随 `vector::insert/erase` 与新增块失效）、`uses_of` / `def_of` / `inst_by_id` / `block_by_id` 反向索引、`Operand` 带 tag（`PYADAMAS_IR_CHECK=1` 校验 op 与 kind 一致性）。`EhRegion` 不再存会过期的块号。**明确不上 SSA**，理由见 [ir.md](ir.md)。
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
@@ -179,7 +179,7 @@
 
 性能优化（先解决模块顶层函数边界）与语言/标准库完备性并行；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
 
-### 0. 性能瓶颈的根因（归因已按实测修正；全局提升已评估放弃）
+### 0. 性能瓶颈的根因（归因已按实测修正；入口私有标量全局已落地）
 
 寄存器分配 R1–R4 已落地（0.203–0.204，见 [regalloc.md](regalloc.md)）：基于活跃区间的线性扫描、caller 池（r10/r11）、浮点也走线性扫描。正确性收益明确，但**性能收益为零**。
 
@@ -212,24 +212,24 @@
 
 0.204 手工把 matmul 包进 `run()` 就见效，侧面印证症结是「变量是不是局部槽」，而不是「调用有多少」。
 
-#### 两条候选路线（全局提升已评估放弃，B 尚未定案）
+#### 两条候选路线（A 的入口私有版本已落地，B 尚未定案）
 
 | 路线 | 做法 | 代价与风险 |
 |---|---|---|
 | **A. 标量全局提升** | 把分配器候选集从 slot 扩到**标量** global，复用现有活跃区间 + 线性扫描 | 不改程序结构，语义 / traceback / 异常路径零风险。标量不是 GC 根，提升到 callee-saved 后不需要在 `call.rt` 前写回，绕开 R4 列的 GC / 展开耦合。**主要工作量是审计一份「哪些 `call.rt` 会回调用户代码」的白名单**（sort 比较器、生成器 resume、`__exit__`、C 回调跳板），这些必须保守写回。堆全局先不碰。收益上限仍受 6 个 callee 寄存器约束，且只覆盖顶层 |
 | **B. 顶层热循环 outlining** | 把顶层循环包成合成函数，诱导变量变局部槽（等价于自动化 0.204 对 matmul 的手工改造） | 更通用，覆盖未来任意顶层代码。但要处理 try 保护区切割、traceback 的 PC→函数表、GC 帧记录链与控制流边界，风险与工作量高一档 |
 
-**A 路线：全局提升已评估并放弃。** 先做了一个窄版本实验：对循环体内没有任何 `call.*` 的循环，把读写的标量全局缓存进新分配的局部槽、循环出口写回（`src/opt/global_promote.cpp` 的 `promote_globals_in_loops`，提交 `89885a0`，已接进优化管线）。结果是**微基准 −84%、真实基准无收益**——所以按 A 的完整形态（把分配器候选集扩到标量 global）继续做的预期收益不成立，这条方向不再作为下一步。B（顶层热循环 outlining）仍未定案，后续若做需先给出实测证据。
+**A 路线：窄版本无收益，0.470 以「入口私有标量全局」补齐跨函数分析后落地。** 0.269 的窄版本（循环体无 `call.*` 才提升，`src/opt/global_promote.cpp`，提交 `89885a0`）微基准 −84%、真实基准无收益；真实热循环都有调用。0.470 增加了私有性证明：入口模块符号前缀 `__entry__` 不可被 import，除 `__pa_main` 外无人引用、未取址的标量全局，任何被调函数都观察不到，因此循环体有用户调用也能提升（`globals/eval/exec` 直接报错，入口无 handler）。obj_dispatch 315 → 292 ms，Codon 2.74× → 2.56×。A 的完整形态（分配器候选集扩到标量 global）仍未做；B（顶层热循环 outlining）仍未定案。
 
-**验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 204 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
+**验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 440 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
 
 **注意 0.212 的教训**：判断「还有多少提升空间」必须看修正后的调试输出（整型与浮点分开统计）。此前的 `7/14 slots promoted` 是错的，实际已接近饱和——不要基于饱和的池子再承诺收益。
 ### 1. 工程收尾
 
-- **`tests/check_size.sh` 当前会失败**（0.242 实测）：硬限制 1200 行、`ALLOW_FILES` 为空，5 个文件超限 —— `src/driver/build.cpp` 1395、`src/backend/regalloc.cpp` 1325、`src/typecheck/types.h` 1253、`src/ir/ops.h` 1241、`src/lower/impl.h` 1207。按 [development.md](development.md) 的规矩清单只能删不能加，这五个必须拆。0.152–0.154 那轮拆分后的回弹主要来自寄存器分配（0.203–0.204）、IR 基础设施（0.205–0.208）和 0.234–0.242 的性能优化（`lower/impl.h` +7 是 RAII 宏，`driver/build.cpp` +9 是方案 C 的判定接入）。
+- **`tests/check_size.sh` 当前会失败**（0.470 实测 `bash tests/check_size.sh`）：硬限制 1200 行、`ALLOW_FILES` 为空，**只剩 2 个文件超限** —— `src/typecheck/typecheck.cpp` 1227、`src/cimport/cdecl_parse.cpp` 1271；其余已拆（`build.cpp` / `regalloc.cpp` / `types.h` / `ops.h` / `impl.h` 均已降到限制内）。按 [development.md](development.md) 的规矩清单只能删不能加，这两个必须拆。此前 5 文件清单（1395/1325/1253/1241/1207）是 0.242 口径，已过时。
 - 标准库前端基线 0.171 复测（Debian 3.13.5：本体 501 / 596，去掉 `test/` 449 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
-- **CHANGELOG 轮转逾期**：现含 0.100–0.242 共 140 个版本 / 2582 行。既有约定是把旧区间整块移到 `docs/archive/`（已有 `changelog-0.40.md`、`changelog-0.41-0.99.md`），下一次轮转建议归档 0.100–0.199、保留 0.200–0.242，并同步 `docs/index.md` 与本文里指向被移动条目的链接。
+- **CHANGELOG 轮转逾期**：`grep -c '^## \[' CHANGELOG.md` = **367**、`wc -l CHANGELOG.md` = **9565**，现覆盖 **0.100–0.470**（0.100–0.199 共 97 个版本）。既有约定是把旧区间整块移到 `docs/archive/`（已有 `changelog-0.40.md`、`changelog-0.41-0.99.md`），下一次轮转建议归档 0.100–0.199、保留 0.200–0.470，并同步 `docs/index.md` 与本文里指向被移动条目的链接。此前「0.100–0.242 共 140 个版本 / 2582 行」是 0.242 口径，已过时。
 - `tests/bench/` 标准库基准已固化（0.144）。
 
 ## 待决策
