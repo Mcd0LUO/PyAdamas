@@ -193,6 +193,12 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         // 装饰器的返回值常常就是包装函数：从下往上套，每一层用返回类型
         // 替换当前类型。这样调用点能按包装签名检查实参并做数值转换，
         // 而不是退化成 unknown 后按错误的调用约定传参。
+        //
+        // 试过「未知装饰器 → 保留被装饰函数签名」，在 628 文件语料上 **500 →
+        // 496**（asyncio/tasks、importlib/resources/_common、pkgutil、
+        // test/support/import_helper）：contextmanager / types.coroutine /
+        // singledispatch 这些装饰器**确实改变**签名与返回类型，保留签名会误杀。
+        // 判负，保持「装饰后的符号是 unknown」。详见 docs/frontend-gaps.md §8.3。
         if (!owner && !f.decorators.empty()) {
             TypePtr cur = new_ty(TyKind::Func);
             cur->fn = info;
