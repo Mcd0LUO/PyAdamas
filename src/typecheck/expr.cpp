@@ -201,7 +201,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 auto l = expr(*b.left);
                 auto r = expr(*b.right);
-                TypePtr bt = binop_type(b.op, l, r, b.line, b.col);
+                TypePtr bt = binop_type(b.op, l, r, b.line, b.col, b.left.get(), b.right.get());
                 // 提升到 U64 的运算：u64 大字面量操作数按 U64 定型消费。
                 consume_u64_literal(bt, b.left.get());
                 consume_u64_literal(bt, b.right.get());
@@ -258,12 +258,22 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto& b = static_cast<BoolOp&>(e);
                 TypePtr acc = nullptr;
                 bool has_big = false, has_other = false;
-                for (auto& v : b.values) {
+                // 短路内的窄化（0.498）：`a and a.foo()` 的右操作数只在左侧为真时
+                // 求值，所以左操作数的真值窄化要作用到后面所有元素；`or` 用假值
+                // 方向（`x is None or x.foo()`）。求值完恢复原类型。
+                std::vector<Narrowing> active;
+                for (size_t vi = 0; vi < b.values.size(); ++vi) {
+                    auto& v = b.values[vi];
                     auto t = expr(*v);
                     has_big |= t->kind == TyKind::Big;
                     has_other |= t->kind != TyKind::Big;
                     acc = acc ? join(acc, t) : t;
+                    if (vi + 1 < b.values.size()) {
+                        auto n = narrow_on(*v, b.op == Tok::KW_AND);
+                        if (n.sym) active.push_back(n);
+                    }
                 }
+                for (auto& n : active) restore_narrowing(n);
                 // and/or 保留被选中的值；不能把标量当成 big 指针。
                 if (has_big && has_other) return t_unknown();
                 return acc ? acc : t_unknown();
@@ -746,7 +756,8 @@ bool TypeChecker::dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r) {
     return side_ok(l, r, fwd) || side_ok(r, l, rev);
 }
 
-TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col) {
+TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col,
+                                const Expr* le, const Expr* re) {
         // unknown 计数可能不是整数，不能走机器字移位或一般的 big 转换。
         if ((op == Tok::LSHIFT || op == Tok::RSHIFT) && l && l->kind == TyKind::Big &&
             is_unknown(r)) {
@@ -784,10 +795,17 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
         // dunder 时后端只能按整数算指针，宁可在这里报错。
         if (l->kind == TyKind::BoundMethod || r->kind == TyKind::BoundMethod)
             return t_unknown();
-        // Optional / None 需要先判空才能运算，这里不做数据流分析，直接放行
-        if (l->kind == TyKind::Optional || r->kind == TyKind::Optional ||
-            l->kind == TyKind::None || r->kind == TyKind::None)
+        // Optional / None 需要先判空才能运算：窄化（0.498）在分支内把类型换成
+        // 内层类型，走到这里仍是 Optional 就说明没判空 → 报错并给可操作提示。
+        if (l->kind == TyKind::Optional) {
+            maybe_none(le, l, line, col);
             return t_unknown();
+        }
+        if (r->kind == TyKind::Optional) {
+            maybe_none(re, r, line, col);
+            return t_unknown();
+        }
+        if (l->kind == TyKind::None || r->kind == TyKind::None) return t_unknown();
         // Path / str：路径拼接（CPython 的 Path.__truediv__）
         if (l->kind == TyKind::Path && op == Tok::SLASH) {
             if (r->kind != TyKind::Str && !is_unknown(r)) {
@@ -970,7 +988,16 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             return;
         }
         if (is_unknown(l) || is_unknown(r)) return;
-        if (l->kind == TyKind::Optional || r->kind == TyKind::Optional) return;
+        if (l->kind == TyKind::Optional || r->kind == TyKind::Optional) {
+            // 与 None 的 is/is not/==/!= 是判空本身，不报；排序比较要先判空（0.498）。
+            const bool ordering = op == CmpOp::Lt || op == CmpOp::Le || op == CmpOp::Gt ||
+                                  op == CmpOp::Ge;
+            if (ordering) {
+                err(line, col, "this value may be None here; check it first "
+                               "(if x is not None:) or use assert");
+            }
+            return;
+        }
         switch (op) {
             case CmpOp::Eq:
             case CmpOp::Ne:
@@ -1022,7 +1049,13 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
     }
 
 TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col) {
-        if (is_unknown(obj) || obj->kind == TyKind::Optional) return t_unknown();
+        if (is_unknown(obj)) return t_unknown();
+        if (obj->kind == TyKind::Optional) {
+            // 没有表达式可指，消息用泛化主语（0.498）。
+            err(line, col, "this value may be None here; check it first "
+                           "(if x is not None:) or use assert");
+            return t_unknown();
+        }
         switch (obj->kind) {
             case TyKind::List:
                 if (!is_unknown(idx) && !is_int_like(idx))

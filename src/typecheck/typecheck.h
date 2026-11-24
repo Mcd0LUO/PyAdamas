@@ -462,8 +462,17 @@ private:
         Symbol* sym = nullptr;
         TypePtr old;
         TypePtr now;  // 收窄后的类型；块内被重新赋值过就不该再恢复
+        // 属性收窄（0.498）：`if self.x is not None:` 之后 `self.x.foo()`。
+        // 键是「基名.属性」，值存在 attr_refine_ 里（没有 Symbol 可改）。
+        std::string akey;
+        bool had_old = false;
     };
+    std::unordered_map<std::string, TypePtr> attr_refine_;
     Narrowing narrow_on(Expr& cond, bool truthy);
+    // 同一条件的全部窄化（`a is not None and b is not None` 有两个）。
+    std::vector<Narrowing> narrow_all(Expr& cond, bool truthy);
+    // 未判空就使用 T | None（0.498 窄化配套）：报错并返回 true。
+    bool maybe_none(const Expr* e, const TypePtr& t, int line, int col);
     void restore_narrowing(const Narrowing& n);
 
     static Tok aug_to_bin(Tok t);
@@ -546,7 +555,8 @@ private:
 
     // ── 运算规则 ────────────────────────────────────────────────
 
-    TypePtr binop_type(Tok op, TypePtr l, TypePtr r, int line, int col);
+    TypePtr binop_type(Tok op, TypePtr l, TypePtr r, int line, int col,
+                       const Expr* le = nullptr, const Expr* re = nullptr);
     // 类实例的算术 dunder：有可用实现时返回方法声明的返回类型，
     // 否则 nullptr。
     TypePtr dunder_binop_ret(Tok op, TypePtr l, TypePtr r);

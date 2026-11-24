@@ -62,8 +62,22 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
     if (auto* vn = dynamic_cast<Name*>(a.value.get()); vn && is_type_name(vn->id))
         return t_unknown();
     auto ot = expr(*a.value);
+
+    // 属性收窄（0.498）：`if self.x is not None:` 之后 `self.x` 直接用窄化后的类型。
+    if (auto* bn = dynamic_cast<Name*>(a.value.get())) {
+        auto it = attr_refine_.find(bn->id + "." + a.attr);
+        if (it != attr_refine_.end()) return it->second;
+    }
     if (is_unknown(ot)) return t_unknown();
     if (ot->kind == TyKind::Optional) {
+        // 0.498：窄化之后走到这里说明没判空 —— 报错给出可操作提示，
+        // 然后仍按内层类型继续检查（避免一条语句刷两条错）。
+        // C 结构体/联合指针的可空性（cimport 返回 T | None）不是 Python None
+        // 语义：运行期是裸指针，判空写法在 C 代码里很少见。这里只解包不报错，
+        // 否则 tests/run/104_cstruct / 215_c_float32 / 527_union_array 会被误杀。
+        const TyKind ik0 = ot->sub.empty() ? TyKind::Unknown : ot->sub[0]->kind;
+        if (ik0 != TyKind::Struct && ik0 != TyKind::StructPtr)
+            maybe_none(a.value.get(), ot, a.line, a.col);
         // 收窄做不到逐条路径成立，但内层是类/结构体指针时字段
         // 类型是确定的；运行时有空指针检查兜底。
         if (ot->sub.empty()) return t_unknown();

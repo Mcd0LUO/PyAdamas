@@ -459,20 +459,25 @@ void TypeChecker::stmt_if(If& f) {
         for (auto& b : f.branches) {
             restore_types();
             expr(*b.cond);
-            auto n = narrow_on(*b.cond, true);
+            auto ns = narrow_all(*b.cond, true);
             stmts(b.body);
-            restore_narrowing(n);
+            // 先合并再恢复窄化（0.498）：`if x is None: x = 0` 之后，分支末尾的
+            // 类型是 int（赋值 + 窄化），恢复在前会让 merge 又看到 Optional，
+            // 合并结果退回归声明类型，下一步 `x + 1` 就误报 may be None。
             merge_in();
+            for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         }
         restore_types();
         // else 分支等价于「所有条件都为假」，也要收窄：
         // `if x is None: ... else: x.foo()` 里的 x 不是 None
-        Narrowing n;
-        if (f.branches.size() == 1 && !f.orelse.empty())
-            n = narrow_on(*f.branches[0].cond, false);
+        std::vector<Narrowing> ns;
+        // 显式 else 与**隐式空 else** 都要按「条件为假」窄化（0.498）：
+        // `if x is None: x = 0` 之后没有 else，但走到下一句时条件必为假，
+        // x 就是非 None；漏了这条，分支合并会把 Optional 又并回来。
+        if (f.branches.size() == 1) ns = narrow_all(*f.branches[0].cond, false);
         stmts(f.orelse);
-        restore_narrowing(n);
         merge_in();
+        for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         // 写回：类型取各分支上界，分支里新出现的名字保留
         for (auto& [name, ty] : merged) {
             auto it = cur_->vars.find(name);
@@ -487,7 +492,11 @@ void TypeChecker::stmt_if(If& f) {
 void TypeChecker::stmt_while(While& w) {
         expr(*w.cond);
         ++loop_depth_;
+        // 循环体内条件必为真（0.498）：`while cur is not None: cur = cur.next`
+        // 里 cur 在体内是非 None。退出后不做反向窄化（循环可能零次执行）。
+        auto ns = narrow_all(*w.cond, true);
         stmts(w.body);
+        for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         --loop_depth_;
         stmts(w.orelse);
         return;
@@ -749,6 +758,10 @@ void TypeChecker::stmt_raise(Raise& r) {
 void TypeChecker::stmt_assert(Assert& a) {
         expr(*a.test);
         if (a.msg) expr(*a.msg);
+        // `assert x is not None` 之后 x 一定非 None（0.498）：只在这里施加窄化，
+        // 不登记恢复点 —— 它的作用域就是余下的语句；外层 if 分支的
+        // restore_types 快照会自然地把它限制在该分支内。
+        (void)narrow_on(*a.test, true);
         return;
     }
 
