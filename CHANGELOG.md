@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.507] - 2026-11-25
+
+> feat(lower)：**给 `MethodInfo` 补「声明类」，并把直调路径的 self 偏移修掉**——adjustor thunk 的原子第一步。
+>
+> 0.506 之后卡在一个缺失的字段上：`lower_method_call` 从 `recv_ty->cls->method(attr)` 拿到的 `MethodInfo` **没有记录它声明在哪个类**，
+> 而 `delta = 8 * base_field_offsets[声明类]` 必须要它。本版补上：
+>
+> **① `MethodInfo::owner`**（`const ClassInfo*`，生命周期由 `TypeChecker::all_classes_` 保证，与 `Type::cls` 同一契约；
+> 不用 `ClassInfoPtr` 是为了避免 `ClassInfo::methods` 再持 shared_ptr 成环）：
+> - 填充点：`func.cpp` 的 `cls->methods.push_back(...)`（与 push 合一行，保住 1200 行上限）；
+> - **别名填声明者**：`class_alias.cpp` 的 `MethodInfo am = src` 复制，owner 跟着 `src` 走，不是别名所在的类；
+> - 继承槽没有「owner 被复制成子类」的路径（vtable 只填槽、不复制 `MethodInfo`）。
+> **零行为改动**：三个基准 asm 与 master 逐字节相同。
+>
+> **② 直调路径的 self delta**：`replace` 在 sealed `CallDirect` 分支（`method.cpp:478` 的 `cd.args.push_back(recv)` 处），
+> 条件是 `m->owner && m->owner != recv_ty->cls` 且 `base_field_offsets[owner] > 0`；手段是现有 `IrOp::Bin(BinKind::Add)` + 常量，
+> **没有新增 IR op**；`VCall` 路径（487–495）完全没动。
+>
+> **顺带修一个布局 bug**：`materialize_base_fields` 现在只在**真的追加了字段**时记 `base_field_offsets`——
+> 菱形继承（共享祖先）时字段已在前缀里、偏移差为 0，之前记了偏移会把 `self` 挪错位（六形态实测段错误）。
+>
+> **实测**（临时开关 `PYADAMAS_MI_UNSAFE=1` 绕过护栏，默认关闭、注释写明「thunk 落地前不要用」）：
+>
+> ```
+> cb.x, cb.get()  →  1 1      （CPython 1 1；改前是 1 2）
+> f(cb)           →  2        （f(a: A) 里的 a.get()：基类转型的虚调用，静态类型不知道真实类，下一轮 vtable thunk 修）
+> ```
+>
+> 护栏**默认行为不变**（两状态基类仍拒绝，三个 stdlib 文件仍被拒——要等 thunk 覆盖虚调用）。
+> 语料：628 默认口径 **496/623 不降**；本仓库 **899 个 `.py`：781 通过**；12 基准 asm 不变。
+>
+> 闸门：套件 **498** / difftest **468** / check_size **PASS** / ctest 9/9。
 ## [0.506] - 2026-11-25
 
 > feat(typecheck)：**布局实体化**——非 layout 基类的字段块真正进入子类布局（adjustor thunk 的第一步）。
