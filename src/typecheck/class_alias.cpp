@@ -66,6 +66,7 @@ bool TypeChecker::class_body_method_alias(const ClassInfoPtr& cls, Stmt& s) {
         pi.getter = static_cast<int>(cls->methods.size());
         cls->properties[nm.id] = pi;
     }
+    // owner 保持**声明者**：alias 只是同一个实现的第二个名字，delta 仍按声明类算。
     cls->methods.push_back(std::move(am));
     if (auto ait = class_body_attrs_.find(vn.id); ait != class_body_attrs_.end())
         class_body_attrs_[nm.id] = ait->second;
