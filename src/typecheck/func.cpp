@@ -604,6 +604,10 @@ void TypeChecker::classdef(ClassDef& c) {
         }
         // layout base（0.504）：MRO 顺序里第一个有字段的基类提供前缀（mi_guard.cpp）。
         set_layout_base(*cls, base, extra_bases);
+        // 布局实体化（0.506）：非 layout base 的字段块追加进子类布局（mi_guard.cpp）。
+        // 偏移修正（thunk / 调用点 delta）不在本步，护栏继续拒绝。
+        materialize_base_fields(*cls, base, extra_bases);
+        dump_layout(c, *cls);
         // 3.9：非 layout base 的方法碰字段 + 字段确实挪位 → 类定义处明确报错。
         check_mi_layout(c, cls.get(), base, extra_bases, open);
         if (base) {
