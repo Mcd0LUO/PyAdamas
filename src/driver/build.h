@@ -118,5 +118,9 @@ bool link_program(Program& p, const std::string& output);
 // --asan 时改用插桩版运行时（rt_asan.o），让 RC/GC 内部的越界/UAF 也能被
 // AddressSanitizer 检查到。默认的 rt.o 不带插桩，只覆盖生成代码那一侧。
 void set_asan_runtime(bool on);
+// 缓存根目录（PYADAMAS_CACHE_DIR 或配置期常量）。模块缓存与整程序产物缓存
+// 共用这一个根：换目录 = 两套缓存一起搬家。实现是 build.cpp 内部 cache_root()
+// 的导出壳（那个在匿名命名空间里，外部链接不到）。
+std::string prog_cache_root();
 
 }  // namespace pyadamas

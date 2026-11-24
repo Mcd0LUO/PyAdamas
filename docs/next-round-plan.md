@@ -118,14 +118,16 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/lead bui
 
 **现状**（口径见 [iteration-roadmap.md](iteration-roadmap.md#一次性短脚本的固定成本实测构建路径)）：hello-world 冷构建 52ms、热构建 38ms，其中 `as`≈8ms、`ld`≈9ms、编译器自身 10–15ms、两次 `sh -c` 各约 1ms。模块级缓存已经存在（manifest v3 逐字段校验，入口模块也走缓存），**真正的固定成本在汇编、链接与进程启动**，不在前端。
 
-**交付**：
-1. **整程序产物缓存**：源码 + 全部开关 + 工具链 + 依赖接口哈希都没变、且输出文件仍是上次产物 → 直接复用，不再跑 `as`/`ld`。键必须含 target、module_version、lang_gaps、dynamic_big、simd/vect/avx2——**漏一项就是静默错误**。
-2. **`run` 的重复执行**：同源同选项第二次 `run` 不重新编译链接（临时产物按内容键复用）。
-3. **缓存键确定性**：把 CHANGELOG 纳入 CMake 的 `CMAKE_CONFIGURE_DEPENDS`，消灭「版本号改了但二进制仍报旧版本」（现在 `deps --json` 报 0.469，而 CHANGELOG 是 0.471）。
+**交付（0.478 已完成 1–3）**：
+1. ~~整程序产物缓存~~ **已落地**：键 = 每个 `.o`（含运行时对象）的内容摘要 + target ABI + `toolchain_id` + gc/asan/cc flags + cimport 链接参数；命中直接写输出，`--rebuild` 与 `PYADAMAS_NO_PROGCACHE=1` 绕过。
+2. ~~`run` 的重复执行~~ **已随 1 生效**：临时产物按内容键复用（实测 95 → 26 ms）。
+3. ~~缓存键确定性~~ **已修**：CHANGELOG 进 `CMAKE_CONFIGURE_DEPENDS`；顺带把 `toolchain_id` 的内容摘要从逐字节 FNV 改成按 64 位字混合（原来每次进程要读 151MB 的 `/proc/self/exe`，实测吃 25–30ms）。
 4. **不做**内嵌汇编器/链接器：那是另一个量级的工程，先让产物缓存把收益上限量出来。
 
+**实测（本机，5 次最小；`/bin/true` 同窗 11–12ms，是进程启动地板）**：hello 热构建 91 → **23 ms**（扣掉启动 79 → 11 ms），`run` 95 → **26 ms**；关掉缓存的构建也从 90 → 72 ms（digest 修复的独立收益）。
+
 **验收**：
-- hello-world 第二次 `build` 从 38ms 量级降到 <10ms（同窗 A/B、5 次取最小、绑核）；
+- ~~hello-world 第二次 `build` 从 38ms 量级降到 <10ms~~ **0.478 实测 23ms（扣启动 11ms）**：剩下的固定成本是进程启动本身，再往下要内嵌 as/ld；
 - 改动任一输入（源码 / 任一开关 / 编译器 / target / 依赖接口）必须 miss，并且做一次**「故意漏项」反向实验**：从键里删掉一个开关，应观察到「切换开关仍命中」的错误行为，然后修复并留下回归；
 - 复用产物后程序输出逐字节一致；两进程并发 0 损坏（复用 `tests/cache_race.sh` 的思路）；
 - 全量闸门绿（套件 469 / difftest 440 / check_size 不新增超限）。

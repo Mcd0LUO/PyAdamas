@@ -32,6 +32,7 @@ set(PYADAMAS_SOURCES
   src/driver/util.cpp
   src/driver/link.cpp
   src/driver/build.cpp
+  src/driver/progcache.cpp
   src/driver/modules.cpp
   src/driver/check.cpp
   src/driver/sha256.cpp
@@ -321,6 +322,12 @@ target_compile_definitions(pyadamas PRIVATE
 target_include_directories(pyadamas PRIVATE src)
 target_compile_options(pyadamas PRIVATE -Wall -Wextra)
 
+# 改 CHANGELOG 必须触发重新 configure：版本字符串进 deps --json 与缓存键，
+# 而 file(STRINGS) 只在 configure 阶段求值；不登记依赖的话 ninja 会判定
+# 「无工作」，二进制一直报旧版本（0.476 之前实测报 0.469）。
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md")
+
 # 编译器版本：从 CHANGELOG 首条 "## [x.y]" 推导，避免手抄版本号漂移。
 # deps --json 的 compiler.version 直接用它（消费方据此判断兼容性）。
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md" _pa_ver_line
@@ -472,6 +479,17 @@ add_test(
           "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
 )
 set_tests_properties(pyadamas_pkg PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  TIMEOUT 300
+)
+
+# 整程序产物缓存（0.478）：键必须覆盖全部链接输入——同输入 hit、任一项变化 miss。
+# 脚本自带 PYADAMAS_CACHE_DIR 隔离，不碰仓库/用户的缓存。
+add_test(
+  NAME pyadamas_progcache
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/progcache.sh" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_progcache PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   TIMEOUT 300
 )

@@ -44,6 +44,18 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 
 拆 TU 只对「只改一个文件」有效：预处理后一共 10 万行，项目自身只有 1 万行，95% 是标准库模板展开，全量构建只能靠并行。PCH 试过（84MB，只省 0.34s，且 `-O` 级别不匹配会静默失效），不划算。
 
+### 整程序产物缓存（0.478）
+
+同源码 + 同开关 + 同工具链的重复 `build`/`run` 不再跑 `as`/`ld`：链接前按**真实链接输入**
+算键（每个 `.o` 与运行时对象的**内容摘要** + target ABI + `toolchain_id` + gc/asan/cc 额外
+flags + cimport 链接参数），命中就把缓存产物写到输出路径（已存在且字节相同则跳过拷贝）。
+
+- 缓存位置：`$PYADAMAS_CACHE_DIR/progcache`（默认 `<modcache>/progcache`）；
+- 绕过：`--rebuild`（语义上就是「重做一遍」）或 `PYADAMAS_NO_PROGCACHE=1`；
+- 诊断：`PYADAMAS_PROGCACHE_DEBUG=1` 打印 `store` / `hit` / `hit (written)`；
+- 键只由链接输入推导，不从命令行选项名单猜。**改键必须重做「故意漏项」实验**：
+  摘掉一项后要能观察到「输入变了仍命中」的错误行为，恢复后再验 miss（见 `tests/progcache.sh`）；
+- 实测（本机、5 次最小、进程启动地板 11–12ms）：hello 热构建 91 → 23 ms，`run` 95 → 26 ms。
 ## 测试
 
 ### 四类用例

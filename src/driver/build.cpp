@@ -1,5 +1,6 @@
 // driver/build.cpp —— 多模块解析、增量缓存、汇编与链接
 #include "driver/build.h"
+#include "driver/progcache.h"
 #include "driver/util.h"
 #include "backend/target_abi.h"
 
@@ -149,23 +150,13 @@ int avx2_emit_tag() {
     return (v != nullptr && v[0] == '0' && v[1] == '\0') ? 0 : 1;
 }
 
-// 文件内容摘要：流式 FNV-1a 64。用来识别「编译器/运行时换了」，
-// 不用 mtime —— 拷贝、解包、checkout 之后 mtime 都会变（不可信），
-// 而且跨机器无法比较。
+// 文件内容摘要：识别「编译器/运行时换了」。不用 mtime —— 拷贝、解包、
+// checkout 之后 mtime 都会变（不可信），跨机器也无法比较。
+// 实现在 driver/progcache.cpp（按 8 字节字混合；逐字节 FNV 对 151MB 的
+// /proc/self/exe 要 25–30ms，而热构建总共才 23ms）。
 uint64_t file_digest(const char* path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return 0;
-    uint64_t h = 1469598103934665603ull;
-    char buf[1 << 16];
-    while (in) {
-        in.read(buf, static_cast<std::streamsize>(sizeof buf));
-        const std::streamsize n = in.gcount();
-        if (n <= 0) break;
-        for (std::streamsize i = 0; i < n; ++i) {
-            h ^= static_cast<unsigned char>(buf[i]);
-            h *= 1099511628211ull;
-        }
-    }
+    unsigned long long h = 0;
+    if (!pyadamas::hash_file(path, h)) return 0;
     return h;
 }
 
@@ -1041,6 +1032,9 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
 
 }  // namespace
 
+// 给 progcache.cpp 的导出壳：cache_root() 在匿名命名空间里，外部链接不到。
+std::string prog_cache_root() { return cache_root(); }
+
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p) {
     if (!validate_module_table()) return false;
@@ -1099,8 +1093,9 @@ bool link_program(Program& p, const std::string& output) {
     // 链接有两条路（见 driver/link.cpp）：配置期成功复刻出 gcc 的 ld 命令行
     // 时直接 exec ld，省掉 gcc 驱动 + collect2 的 11 ms 固定开销；否则回退
     // 到 cc。两条路生成的二进制逐字节相同（--build-id 由输入决定）。
-    std::string objs;
-    for (auto* u : p.order) objs += " " + shell_quote(u->obj_path);
+    std::vector<std::string> obj_paths;
+    obj_paths.reserve(p.order.size() + 1);
+    for (auto* u : p.order) obj_paths.push_back(u->obj_path);
     // 运行时变体三选一（符号集合相同，链接期只取一个）：
     //   --asan            → rt_asan.o（运行时代码插桩）
     //   PYADAMAS_CANARY/GUARD → rt_allocdbg.o（分配器 canary / guard page）
@@ -1118,9 +1113,12 @@ bool link_program(Program& p, const std::string& output) {
         }
         dbg_rt = true;
     }
-    objs += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ
-                                                 : (dbg_rt ? PYADAMAS_RT_DEBUG_OBJ
-                                                           : PYADAMAS_RT_OBJ));
+    const std::string rt_obj = g_use_asan_runtime
+                                  ? PYADAMAS_RT_ASAN_OBJ
+                                  : (dbg_rt ? PYADAMAS_RT_DEBUG_OBJ : PYADAMAS_RT_OBJ);
+    obj_paths.push_back(rt_obj);
+    std::string objs;
+    for (const auto& o : obj_paths) objs += " " + shell_quote(o);
     // -ldl：rt_cffi 的 dlopen/dlsym（glibc 2.34+ 已并入 libc，-ldl 是空壳，
     // 旧 glibc 仍需要）。Win64 目前只做交叉汇编验证，不走这条链接路径。
     objs += " -lm -ldl";
@@ -1134,10 +1132,34 @@ bool link_program(Program& p, const std::string& output) {
     const bool gc = elf_target && gc_sections_enabled() && !p.uses_c_sym_default;
     const std::string gc_ld = gc ? " --gc-sections" : "";
     const std::string gc_cc = gc ? " -Wl,--gc-sections" : "";
+    // ── 整程序产物缓存（0.478）──
+    // 键由**真实链接输入**推导：每个 .o（含运行时）的内容摘要 + target +
+    // toolchain + gc/asan/cc 额外 flags + cimport 链接参数。任一变化键就变。
+    // 不从命令行选项名单猜，避免「漏一项 = 静默用错二进制」。
+    std::string key;
+    const bool cache_on = progcache_enabled() && !p.rebuild && elf_target;
+    if (cache_on) {
+        std::string extra = std::format("target={}|toolchain={}|gc={}|asan={}|cc={}|args=",
+                                        target_abi().name, toolchain_id(), gc ? 1 : 0,
+                                        g_use_asan_runtime ? 1 : 0, cc_extra_flags());
+        for (auto& l : p.link_args) extra += l + "\x1f";
+        key = progcache_key(obj_paths, extra);
+        if (!key.empty() && progcache_fetch(key, output)) {
+            if (p.verbose)
+                std::fprintf(stderr, "note: program cache hit %s\n", key.c_str());
+            return true;
+        }
+    }
+    auto store = [&]() {
+        if (cache_on && !key.empty()) progcache_store(key, output);
+    };
     if (elf_target && direct_ld_available() && direct_ld_args_ok(p.link_args)) {
         std::string ld_cmd = direct_ld_prefix() + gc_ld + " -o " + shell_quote(output) + objs + " " +
                              direct_ld_tail();
-        if (std::system(ld_cmd.c_str()) == 0) return true;
+        if (std::system(ld_cmd.c_str()) == 0) {
+            store();
+            return true;
+        }
         // ld 直接链接失败（环境差异）：不报错，回退 cc 再试一次。
     }
     std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" + gc_cc + cc_extra_flags() + objs;
@@ -1145,6 +1167,7 @@ bool link_program(Program& p, const std::string& output) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());
         return false;
     }
+    store();
     return true;
 }
 

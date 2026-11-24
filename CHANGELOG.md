@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.478] - 2026-11-24
+
+> perf(build)：**整程序产物缓存**——同源码 + 同开关 + 同工具链的重复 `build`/`run` 不再跑 `as`/`ld`。
+>
+> 键由**真实链接输入**推导：每个 `.o`（含运行时对象）的内容摘要（按链接顺序）+ target ABI +
+> `toolchain_id` + gc/asan/cc 额外 flags + cimport 链接参数；不从命令行选项名单猜。命中时把
+> 缓存产物写到输出路径（已存在且字节相同则跳过拷贝），`--rebuild` 与 `PYADAMAS_NO_PROGCACHE=1`
+> 绕过；任何 IO 失败静默退化成照常链接（缓存是纯优化）。
+>
+> 顺带修掉一块隐藏固定成本：`toolchain_id` 要对 `/proc/self/exe`（本机构建 151MB）算内容摘要，
+> 原来逐字节 FNV 每次进程吃掉 25–30ms；改成按 64 位字混合（本地失效指纹，不是信任根）。
+> 副作用：已有 modcache/progcache 失效一次。
+>
+> 实测（同窗、5 次最小；`/bin/true` 同机 11–12ms 为进程启动地板）：
+>
+> | 场景 | 改前 | 改后 |
+> |---|---|---|
+> | 热构建（hello，`build -O2 -o` 同路径） | 91 ms | **23 ms**（扣掉启动 79 → 11 ms） |
+> | `run` 同源重复执行 | 95 ms | **26 ms** |
+> | 关掉缓存的构建（digest 修复的独立收益） | 90 ms | 72 ms |
+>
+> 回归：`tests/progcache.sh`（16 项，已接进 ctest）覆盖 store/hit/换输出路径/源码变更/-O 档/
+> `--asan`/工具链指纹/`--rebuild`/关缓存开关/`run` 命中/清缓存重建。另做了一次**「故意漏项」
+> 反向实验**：把 toolchain 从键里摘掉后，换 `PYADAMAS_TOOLCHAIN_ID` 仍命中（错误行为可复现），
+> 恢复后 A/B 都 miss——证明这条防线有效，而不是靠审阅。
+>
+> 另把 CHANGELOG 登记进 `CMAKE_CONFIGURE_DEPENDS`，修掉「改了版本号但 ninja 不重配、
+> `deps --json` 仍报旧版本」。
+>
+> 闸门：套件 477 / difftest 447 / ctest（pkg + progcache）/ check_size 无新增。
 ## [0.477] - 2026-11-24
 
 > fix(lower)：`from pkg import sub` 之后调用子模块函数会 **SIGSEGV（call 0）**。
