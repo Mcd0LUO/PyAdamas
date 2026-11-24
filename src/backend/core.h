@@ -122,8 +122,11 @@
     // 操作数工厂 + 迷你发射器（emit2/emit_imm_op/emit_jmp）拆在 backend/emit.h，
     // 类体片段，就地展开（文件规模闸门）。
 #include "backend/emit.h"
-    // SIMD 向量化成员/声明拆在 backend/simd.h（类体片段，文件规模闸门）。
-#include "backend/simd.h"
+    // 向量化成员/声明拆在 backend/vect.h（类体片段，文件规模闸门）。
+    // 0.480：特化 SIMD 模板（原 backend/simd*.cpp，PYADAMAS_SIMD）整段删除 ——
+    // 对当前 IR 一次都没匹配上（12 基准 asm 零 SIMD 标记、指令数与关掉向量化
+    // 逐位相同），见 docs/simd-vectorization-design.md 与 CHANGELOG 0.480。
+#include "backend/vect_gates.h"
 #include "backend/vect.h"
     // ── 目标相关的汇编指示符 ────────────────────────────────────
     // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上

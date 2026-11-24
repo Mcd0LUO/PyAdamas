@@ -18,7 +18,7 @@ namespace pyadamas {
 std::string generate_asm(const IRModule& m, bool disable_unknown_index = false,
                          bool zero_cost_exc = true, bool index_readonly = false,
                          bool rc_split = false,
-                         bool simd = false, bool ra_opt = false,
+                         bool ra_opt = false,
                          bool inline_opt = false, bool type_tags = false,
                          bool vect = false, bool needs_dynamic_big = false);
 

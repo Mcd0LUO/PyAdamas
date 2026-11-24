@@ -138,13 +138,10 @@ src/opt/intloop.cpp
   src/backend/cffi.cpp
   src/backend/index.cpp
   src/backend/vcall_inline.cpp
-  src/backend/simd.cpp
-  src/backend/simd_int.cpp
-  src/backend/simd_nbody.cpp
-  src/backend/simd_nbody_pair.cpp
   src/backend/vect.cpp
   src/backend/vect_affine.cpp
   src/backend/vect_avx2.cpp
+  src/backend/vect_gates.cpp
   src/backend/vect_jvec.cpp
   src/opt/vect_planner.cpp
   src/opt/vect_planner_loop.cpp

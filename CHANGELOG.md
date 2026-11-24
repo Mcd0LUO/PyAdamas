@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.480] - 2026-11-24
+
+> 收尾（§8.2-2）：**删特化 —— 特化 SIMD 模板（`PYADAMAS_SIMD`）整段删除**。
+> 1304 行 → 149 行（只留 VectPlanner 复用的纯 IR 判据）。默认路径 asm 逐字节不变。
+>
+> **取证（删之前先证明它是死的）**：
+> - 12 个基准 `asm -O2` 里 **0 条** `SIMD` 标记（模板一次都没匹配上）；
+> - `PYADAMAS_SIMD=1` 与「关掉全部向量化」的用户态指令数**逐位相同**：
+>   spectral_norm 234,860,961 vs 234,860,233、nbody 199,420,356 vs 199,420,323、
+>   matmul 76,380,915 vs 76,381,175、sieve 33,044,313 vs 33,044,332；
+> - 也就是说 0.417 记录的「spectral_norm 仍约 1.13× 依赖特化路径」**已经不成立**：
+>   0.384 之后通用向量化（含 0.4xx 的 masked）把它全面盖过（今天 VECT=0→1：
+>   spectral_norm −59.6%、matmul −86.5%、sieve −51.9%、nbody −45.2%、mandelbrot −36.3%）。
+>
+> **删除内容**：
+> - `src/backend/simd_int.cpp` / `simd_nbody.cpp` / `simd_nbody_pair.cpp` 整文件删除；
+> - `src/backend/simd.cpp` 里的 `try_simd_reduction/vectorize/int_map/nbody_pos/nbody_pair`
+>   与只服务它们的 `simd_func_ok/simd_core_body/simd_slot_writers` 删除；
+> - 剩下的纯 IR 形状判据（for/while 块形状、loop op 白名单、槽写者/取址/逃逸/稳定、
+>   scratch 安全、`simd_def`）**保留并改名为 `backend/vect_gates.{cpp,h}`** ——
+>   VectPlanner（通用向量化）一直在用它们，不是死代码；
+> - `block.cpp` 的三路分流（`block_int_only` 顺序分流）收敛成一行 `try_vect_loop(b)`；
+>   `block_int_only` 随之删除（只服务旧分流）；
+> - `PYADAMAS_SIMD` 从 manifest 键与 `generate_asm` 签名里去掉；env 仍被识别，
+>   但**显式报错**（`error: PYADAMAS_SIMD 已删除`），免得 A/B 脚本以为在跑另一条路径。
+>
+> **验收**：默认路径（`PYADAMAS_VECT=1`、无 SIMD）12 基准 `asm` 与删除前**逐字节相同**
+> （HEAD worktree 编译器对照）；`PYADAMAS_SIMD=1` 现在返回码 2；套件/difftest/check_size 见下。
 ## [0.479] - 2026-11-24
 
 > 收尾（§8.2-1）：**向量化缺口定论 —— 剩余 7 个 0 触发基准不再做，负结论归档**。

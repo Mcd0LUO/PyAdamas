@@ -1,5 +1,12 @@
 # 向量化：从「给基准特化」到「泛化」
 
+> **0.480 更新**：特化 SIMD 模板（`PYADAMAS_SIMD`）**已整段删除**。§1 的「代价」
+> 是 0.384 时点的历史数字，今天不再成立 —— 通用向量化（含 0.4xx 的 masked）已把
+> 三个基准全面盖过：VECT=0→1 的指令数是 matmul −86.5%、spectral_norm −59.6%、
+> sieve −51.9%、nbody −45.2%、mandelbrot −36.3%，而 `PYADAMAS_SIMD=1` 与
+> 「关掉全部向量化」逐位相同（模板一次都没匹配上）。详见
+> [vectorization-coverage.md](vectorization-coverage.md) 的「当前状态」块与 §10。
+>
 > 0.384 起：**特化 SIMD 默认关**（`PYADAMAS_SIMD=1` 才开，只作对照），
 > **通用向量化默认开**（`PYADAMAS_VECT=0` 才关）。
 >

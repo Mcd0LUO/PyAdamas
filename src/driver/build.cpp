@@ -245,8 +245,6 @@ struct Manifest {
     int rc_split = -1;
     // callee-saved 提升增强开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int ra_opt = -1;
-    // SIMD 向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
-    int simd = -1;
     // 通用循环向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int vect = -1;
     // AVX2 4-lane 开关（PYADAMAS_AVX2）。-1 = 旧清单没有这一行：缓存必然
@@ -338,12 +336,6 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.ra_opt = static_cast<int>(*o);
-        } else if (tag == "simd") {
-            std::string v;
-            ss >> v;
-            auto o = parse_u64(v);
-            if (!o) return std::nullopt;
-            m.simd = static_cast<int>(*o);
         } else if (tag == "vect") {
             std::string v;
             ss >> v;
@@ -430,7 +422,6 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
     out << "raopt " << (p.ra_opt ? 1 : 0) << "\n";
-    out << "simd " << (p.simd ? 1 : 0) << "\n";
     out << "vect " << (p.vect ? 1 : 0) << "\n";
     out << "avx2 " << avx2_emit_tag() << "\n";
     out << "loopopt " << p.loop_opt << "\n";
@@ -692,7 +683,6 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
     if (m->ra_opt != (p.ra_opt ? 1 : 0)) return false;
-    if (m->simd != (p.simd ? 1 : 0)) return false;
     if (m->vect != (p.vect ? 1 : 0)) return false;
     if (m->avx2 != avx2_emit_tag()) return false;
     if (m->loop_opt != p.loop_opt) return false;
@@ -995,7 +985,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
                                         p.zero_cost_exc, skip_idx, p.rc_split,
-                                        p.simd, p.ra_opt, p.inline_opt,
+                                        p.ra_opt, p.inline_opt,
                                         p.type_tags, p.vect, p.needs_dynamic_big);
     auto t3 = now();
     std::string err;

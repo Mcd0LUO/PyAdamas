@@ -220,7 +220,7 @@ public:
         void set_rc_split(bool v) { rc_split_ = v; }
         void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
-        void set_simd(bool v) { simd_enabled_ = v; }
+
         void set_vect(bool v) { vect_enabled_ = v; }  // PYADAMAS_VECT，默认关，参与缓存失效
         void set_inline_opt(bool v) { inline_opt_ = v; }  // PYADAMAS_INLINE_OPT，默认关
         // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关，docs/numeric-types-design.md §2）：

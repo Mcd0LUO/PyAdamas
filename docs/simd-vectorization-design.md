@@ -1,6 +1,14 @@
 # 浮点循环 SIMD 向量化设计（0.333 原型）
 
-> 状态：**设计 + spectral_norm 最小原型**。门控 `PYADAMAS_SIMD=0/1`，**默认 0**。
+> **状态（0.480）：代码已删除，本文只作历史设计存档。** 特化模板（`backend/simd*.cpp`、
+> `PYADAMAS_SIMD`）在 0.384 通用向量化之后一次都没再匹配上：12 个基准的 `asm` 里 0 条
+> `SIMD` 标记，`PYADAMAS_SIMD=1` 的用户态指令数与「关掉全部向量化」逐位相同。
+> 0.480 删掉模板与开关（1304 → 149 行，只留 VectPlanner 复用的纯 IR 判据
+> `backend/vect_gates.{cpp,h}`），默认路径 `asm` 逐字节不变，`PYADAMAS_SIMD=1` 改为显式报错。
+> 收益对比的历史数字见 [vectorization-generalization.md](vectorization-generalization.md) §4；
+> 当前覆盖率见 [vectorization-coverage.md](vectorization-coverage.md)。
+>
+> 以下为原文（门控 `PYADAMAS_SIMD=0/1`，**默认 0**）。
 >
 > 默认值（0.384）：**默认关**。这套 matcher 是照着 `bench/compare` 的循环形状
 > 写的固定 IR 模板，放进默认管线等于拿靶子上的性能冒充通用性能。默认路径改走

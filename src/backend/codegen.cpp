@@ -799,7 +799,7 @@ void AsmGen::emit_eh_tables() {
 
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
                          bool zero_cost_exc, bool index_readonly, bool rc_split,
-                         bool simd, bool ra_opt,
+                         bool ra_opt,
                          bool inline_opt, bool type_tags, bool vect, bool needs_dynamic_big) {
     AsmGen g;
     // Erased big keys (and UNK shadow tags) rely on the live RC index, even
@@ -808,7 +808,6 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index,
     g.set_index_readonly(index_readonly && !needs_dynamic_big);
     g.set_zero_cost_exc(zero_cost_exc);
     g.set_rc_split(rc_split);
-    g.set_simd(simd);
     g.set_ra_opt(ra_opt);
     g.set_inline_opt(inline_opt);
     g.set_type_tags(type_tags);

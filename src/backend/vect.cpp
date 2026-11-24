@@ -59,36 +59,6 @@ bool AsmGen::vect_func_ok() const {
 // 允许的类型：int / bool / 定宽整数，以及元素为这些类型的 list（下标访问的
 // 数组操作数）；浮点常量、float 任何出现、unknown 类型、其它容器/调用一律
 // 视为「含浮点」。这个判据里没有任何基准名或循环形状特判。
-bool AsmGen::block_int_only(const Block& b) const {
-    auto scalar_int = [](const TypePtr& t) -> bool {
-        if (!t) return false;
-        switch (t->kind) {
-            case TyKind::Int: case TyKind::Bool:
-            case TyKind::I8: case TyKind::I16: case TyKind::I32:
-            case TyKind::U8: case TyKind::U16: case TyKind::U32: case TyKind::U64:
-                return true;
-            default:
-                return false;
-        }
-    };
-    auto int_ok = [&](VReg r) -> bool {
-        if (r == kNoReg) return true;
-        TypePtr t = ty_of(r);
-        if (!t) return false;
-        if (t->kind == TyKind::List)
-            return !t->sub.empty() && scalar_int(t->sub[0]);
-        return scalar_int(t);
-    };
-    for (const Inst& in : b.insts) {
-        if (in.op == IrOp::ConstFloat) return false;   // 浮点常量
-        if (!int_ok(in.dst) || !int_ok(in.a) || !int_ok(in.b) || !int_ok(in.c))
-            return false;
-        for (VReg r : in.args)
-            if (!int_ok(r)) return false;
-    }
-    return true;
-}
-
 bool AsmGen::xmm_high_free(MReg r) const {
     if (r < kXmm8 || r > kXmm15) return false;
     // 浮点槽提升（slot_reg）与跨块 vreg 提升（fp_promoted_vregs）是 xmm8-15 的

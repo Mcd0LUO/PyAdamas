@@ -553,13 +553,19 @@ int main(int argc, char** argv) {
         // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
         prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
                       std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
-        // 特化 SIMD（**默认关**，0.384）：codegen_simd*.cpp 是照着
-        // bench/compare 里那几个程序的循环体写出来的固定 IR 模板，属于对基准
-        // 的特化优化 —— 只有形状完全一致的代码才吃得到，等于把「测出来的性能」
-        // 当成「通用性能」。它继续留着只作对照，PYADAMAS_SIMD=1 显式开。
-        // 默认路径改走下面的通用向量化。
-        const char* simd_env = std::getenv("PYADAMAS_SIMD");
-        prog.simd = simd_env && std::string_view(simd_env) != "0";
+        // 特化 SIMD 模板（backend/simd*.cpp，PYADAMAS_SIMD）**0.480 已整段删除**：
+        // 它们是照着 bench/compare 里几个程序的循环体写死的 IR 形状模板，默认关；
+        // 通用向量化（0.384）落地后它们一次都没再匹配上（12 基准 asm 零标记、
+        // 指令数与「关掉向量化」逐位相同）。留显式报错而不是静默忽略，免得
+        // A/B 脚本以为自己在跑特化路径却拿到同一份产物。
+        if (const char* se = std::getenv("PYADAMAS_SIMD");
+            se != nullptr && std::string_view(se) != "0" && se[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_SIMD 已删除（特化 SIMD 模板对当前 IR 全部"
+                         "失配，见 docs/simd-vectorization-design.md 与 CHANGELOG "
+                         "0.480）\n");
+            return 2;
+        }
         // 通用循环自动向量化（**默认开**，0.384）：认任意可数循环的
         // map/reduction（backend/vect.cpp），不依赖具体程序的形状。
         // PYADAMAS_VECT=0 显式关。参与缓存失效。
@@ -620,7 +626,7 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split, prog.simd, prog.ra_opt,
+                    false, prog.rc_split, prog.ra_opt,
                     prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
