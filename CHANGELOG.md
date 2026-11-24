@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.487] - 2026-11-24
+
+> feat(stdlib)：**Fraction / Decimal 与 int / big 的混合运算**（§3.1）。
+>
+> 之前 `Fraction(1,3) * 3`、`f + 1`、`Decimal("1.1") * 3` 都是编译期
+> `unsupported operand type(s)`：`__mul__(self, o: Fraction)` 的静态签名不接受 int。
+>
+> **设计取舍**（先定口径再动手）：选**改 stdlib 签名**，不做类型检查里的「数值类提升」。
+> 理由：① 提升规则必须知道「哪些类是数值类」——任何定义了 `__mul__(self, self)` 的类
+> （比如矩阵）都满足，静态一刀切会静默放宽所有类；② 提升要在每个运算符点合成转换调用
+> （BinOp/比较/反射/容器元素），影响面从「两个模块」扩到整个类型系统，而 Fraction/Decimal
+> 自己最清楚自己的数值域（CPython 也是用 `_operator_fallbacks` 在类内做这件事）；
+> ③ 代价可控：dunder 形参变成 `Fraction | int | big`（Decimal 同理），**float 仍然被拒绝**
+> （CPython 的 `Fraction + 0.5` 返回 float，是结果类型变化，本模块不覆盖），
+> 非数值类型（str/bytes/list）照样编译期报错 —— 只放弃「用 Fraction 当参数」这一条静态
+> 精确性，换来 int/big 的双向混合（含反射 `3 * f`）。
+>
+> 实现：`stdlib/fractions.py` 加 `_coerce(o: Fraction | int | big) -> Fraction`
+> （`isinstance` 分派，int/big → `Fraction(o)`），四则/六个比较的形参放宽为联合类型，
+> 并补 `__radd__/__rsub__/__rmul__/__rtruediv__`（`3 * f`、`1 - f` 之前直接报错）；
+> `stdlib/decimal.py` 同构（`_to_decimal`，int/big → `Decimal(o)` 走精确 str 解析）。
+>
+> 验收（新用例 `tests/run/569_fraction_decimal_mix.py`，输出与 CPython 3.14.4 **逐字节相同**）：
+> - 四则 + 反射两个方向 + 六个比较：`f*3 / 3*f / f+1 / 1+f / f-1 / 1-f / f/3 / 3/f`；
+> - 超 i64：big 分子字面量 `Fraction(1180591620717411303424, 3) * 3`，以及
+>   「操作数都在 i64 内、交叉乘积越界」`Fraction(3037000500,1) * 3037000500 = 9223372037000250000`；
+> - Decimal：`1/d` 按 28 位上下文正确舍入（1.818181818181818181818181818）、`0.1+0.2 = 0.3`；
+> - 容器场景不变：`list[Fraction]` / `dict[str, Fraction]` 照旧；
+> - 旧用例不退：169 / 402_fraction_big / 403_decimal / 534 / 535 全过。
+>
+> 已记录的边界：float 混合仍编译期拒绝；`"%s" % (Fraction(...),)` 这类 %-格式化收对象
+> 会报 `unsupported format argument type`（与本条无关的既有缺口，用 `str()`/f-string）。
 ## [0.486] - 2026-11-24
 
 > fix(frontend)：**`--imports` 回退为 opt-in**（0.484 的默认值把 `check` 在真实代码上的
