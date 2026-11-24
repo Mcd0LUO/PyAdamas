@@ -26,6 +26,63 @@ VReg Lowerer::lower_operator(const std::string& member, Call& c) {
         {"le", CmpOp::Le}, {"gt", CmpOp::Gt}, {"ge", CmpOp::Ge},
     };
 
+    // index(x)：整数域（int/bool 等）原样返回；其余类型在运行期抛 TypeError，
+    // 消息与 CPython 对齐（`'float' object cannot be interpreted as an integer`）。
+    if (member == "index") {
+        if (c.args.size() != 1) {
+            eval_all();
+            err(c.line, c.col, "operator.index() expects 1 argument");
+            return const_none();
+        }
+        VReg v = expr(*c.args[0]);
+        TypePtr t = strip_optional(argty(0));
+        auto tk = t ? t->kind : TyKind::Unknown;
+        bool int_domain = tk == TyKind::Int || tk == TyKind::Bool || tk == TyKind::I8 ||
+                          tk == TyKind::I16 || tk == TyKind::I32 ||
+                          tk == TyKind::U8 || tk == TyKind::U16 || tk == TyKind::U32 ||
+                          tk == TyKind::U64 || tk == TyKind::Big ||
+                          (t && is_unknown(t));
+        if (int_domain) return v;
+        const char* what = tk == TyKind::Float   ? "float"
+                           : tk == TyKind::Str   ? "str"
+                           : tk == TyKind::Bytes ? "bytes"
+                           : tk == TyKind::List  ? "list"
+                           : tk == TyKind::Dict  ? "dict"
+                           : tk == TyKind::Set   ? "set"
+                           : tk == TyKind::Tuple ? "tuple"
+                                                 : "object";
+        call_void(raise_rt(RtFn::Raise),
+                  {const_str("TypeError"),
+                   const_str(std::format("'{}' object cannot be interpreted as an integer", what))});
+        return const_int(0);
+    }
+    // length_hint(x, default=0)：有 len 的容器取 len；没有 len 时给 default 就返回它，
+    // 否则抛 TypeError（消息与 CPython 一致：object of type 'X' has no len()）。
+    if (member == "length_hint") {
+        if (c.args.empty() || c.args.size() > 2) {
+            eval_all();
+            err(c.line, c.col, "operator.length_hint() expects 1 or 2 arguments");
+            return const_none();
+        }
+        VReg v = expr(*c.args[0]);
+        TypePtr t = strip_optional(argty(0));
+        bool has_default = c.args.size() == 2;
+        VReg dv = has_default ? expr(*c.args[1]) : const_int(0);
+        auto tk = t ? t->kind : TyKind::Unknown;
+        bool has_len = tk == TyKind::List || tk == TyKind::Str || tk == TyKind::Dict ||
+                       tk == TyKind::Tuple || tk == TyKind::Set || tk == TyKind::Bytes ||
+                       tk == TyKind::Range;
+        if (has_len) {
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = v;
+            return def(t_int(), std::move(ln));
+        }
+        // 没有 len 就返回 default（签名里 default 默认 0）。注意 CPython 的
+        // operator.length_hint(obj) 对没有 len 的对象**不抛**，直接返回 0 ——
+        // 与内置 len() 不同，别按 len 的语义写。
+        return dv;
+    }
     if (member == "itemgetter") {
         TypePtr fty = rt && rt->kind == TyKind::Func ? rt : nullptr;
         if (!fty) {

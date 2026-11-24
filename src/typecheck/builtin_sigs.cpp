@@ -329,6 +329,41 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             simple(n, 1, pyadamas::t_unknown());
         for (const char* n : {"truth", "not_"})
             simple(n, 1, pyadamas::t_bool());
+        // index(x) -> int：只接受整数域（int/bool），其余在调用点抛 TypeError。
+        // 参数标 ann_unknown：同一个函数被 float/str 调用是合法的（运行期抛），
+        // 不能让「实参类型不一致」的检查把它判死。
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.index";
+            pyadamas::Param a;
+            a.name = "a";
+            a.ty = pyadamas::t_unknown();
+            a.ann_unknown = true;
+            f->pos.push_back(std::move(a));
+            f->ret = pyadamas::t_int();
+            f->ret_known = true;
+            func_with("index", f);
+        }
+        // length_hint(x, default=0) -> int：有 len 的容器走 IrOp::Len，
+        // 没有 len 时返回 default，连 default 都没有就抛 TypeError。
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.length_hint";
+            pyadamas::Param a;
+            a.name = "obj";
+            a.ty = pyadamas::t_unknown();
+            a.ann_unknown = true;
+            f->pos.push_back(std::move(a));
+            pyadamas::Param d;
+            d.name = "default";
+            d.ty = pyadamas::t_int();
+            d.has_default = true;
+            d.default_lit = lv_int(0);
+            f->pos.push_back(std::move(d));
+            f->ret = pyadamas::t_int();
+            f->ret_known = true;
+            func_with("length_hint", f);
+        }
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();
             f->name = "operator.itemgetter";
