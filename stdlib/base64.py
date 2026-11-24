@@ -74,13 +74,15 @@ def b16decode(data: bytes) -> bytes:
     out: list[int] = []
     n = len(data)
     if n % 2 != 0:
-        raise ValueError("Odd-length string")
+        # CPython b16decode 先校验字符集再校验长度，任何奇数长度输入
+        # 都报 Non-base16 digit found（binascii.unhexlify 才是 Odd-length）。
+        raise ValueError("Non-base16 digit found")
     i = 0
     while i + 1 < n:
         hi = _hex_lookup[data[i]]
         lo = _hex_lookup[data[i + 1]]
         if hi < 0 or lo < 0:
-            raise ValueError("Non-hexadecimal digit found")
+            raise ValueError("Non-base16 digit found")
         out.append((hi << 4) | lo)
         i += 2
     return bytes(out)

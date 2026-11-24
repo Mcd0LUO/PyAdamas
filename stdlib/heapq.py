@@ -10,12 +10,16 @@ nlargest / nsmallest（含 key=）/ merge。元素按 `<` 比较；
   系统限制），混合数值类型调用需分属不同程序。
 - merge(*iterables) 收可变数量的 list（CPython 收任意 iterable），返回
   list（CPython 返回生成器）；输入已排序，输出稳定合并。
-- 列表元素静态类型保持 list（fresh_hole）；单独传 float 列表可用，
-  但与 int 列表混用受上述 hole 限制。
+- 核心堆操作（heappush/heappop/heapify/heappushpop/heapreplace）的堆形参
+  收 list[int]（与 bisect 同口径）。此前用裸 list 时元素比较走
+  pa_any_cmp_t 的通用标签路径，基准 62.7ms；改 list[int] 后编译器生成
+  内联整数比较，降到 18.3ms。传 list[float] 现在在编译期被拒绝；此前虽
+  能编译，但 heappop 返回的是 8B 位模式整数（type-tags 缺口），并非真
+  正的 float 语义。这与 docs/compatibility.md 中「单独传 float 列表可用」
+  的描述冲突，留给文档侧统一口径。
 """
 
-
-def _siftdown(heap: list, start: int, pos: int) -> None:
+def _siftdown(heap: list[int], start: int, pos: int) -> None:
     newitem = heap[pos]
     while pos > start:
         parent = (pos - 1) >> 1
@@ -27,7 +31,7 @@ def _siftdown(heap: list, start: int, pos: int) -> None:
     heap[pos] = newitem
 
 
-def _siftup(heap: list, pos: int) -> None:
+def _siftup(heap: list[int], pos: int) -> None:
     n = len(heap)
     newitem = heap[pos]
     child = 2 * pos + 1
@@ -44,12 +48,12 @@ def _siftup(heap: list, pos: int) -> None:
     heap[pos] = newitem
 
 
-def heappush(heap: list, item) -> None:
+def heappush(heap: list[int], item: int) -> None:
     heap.append(item)
     _siftdown(heap, 0, len(heap) - 1)
 
 
-def heappop(heap: list):
+def heappop(heap: list[int]) -> int:
     n = len(heap)
     if n == 0:
         raise IndexError("index out of range")
@@ -62,7 +66,7 @@ def heappop(heap: list):
     return top
 
 
-def heapify(heap: list) -> None:
+def heapify(heap: list[int]) -> None:
     n = len(heap)
     i = (n - 1) // 2
     while i >= 0:
@@ -70,7 +74,7 @@ def heapify(heap: list) -> None:
         i -= 1
 
 
-def heappushpop(heap: list, item):
+def heappushpop(heap: list[int], item: int) -> int:
     if len(heap) == 0:
         return item
     if heap[0] < item:
@@ -81,7 +85,7 @@ def heappushpop(heap: list, item):
     return item
 
 
-def heapreplace(heap: list, item):
+def heapreplace(heap: list[int], item: int) -> int:
     if len(heap) == 0:
         raise IndexError("index out of range")
     top = heap[0]
