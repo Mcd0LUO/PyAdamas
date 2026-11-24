@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.503] - 2026-11-25
+
+> fix(typecheck)：**多继承「非主基类方法读错字段」从静默错值变成明确报错**（3.9）。
+>
+> 之前 `class C(B, A)`（A 不是主基类）时，A 的方法里 `self.x` 按 **A 自己的布局**取偏移，实际读到的却是 B 的字段（实测 `cb.get()` 返回 20，CPython 10）；
+> 而 `cb.x` 属性访问是对的——错只发生在方法体内。
+>
+> **护栏的精确条件**（三条同时满足才拒绝，写在 `typecheck/mi_guard.cpp`，class 定义处）：
+> 1. 非主基类 A 的 `methods_access_own_fields` 为真（方法体里有 `self.<字段>` 的读或写，静态记录）；
+> 2. A 链上的字段在 C 的布局里**真的挪了位置**（同名字段落在同一偏移也算安全；菱形共享祖先偏移不变 → 放行）；
+> 3. 不是导入类、不是 open 类（静态判不准就保守放过）。
+>
+> 报错：`base 'A' of 'C' is not the primary base and its methods access instance fields; put A first or make it a stateless mixin`。
+> 单继承、主基类（第一个）、纯 mixin、菱形、`super()` 链**全部放行**（五形态输出与 CPython 逐字节一致）。
+>
+> **语料**：标准库默认口径 **499 → 496/623**（新拒绝 5 例，全部是「状态基类放在第二位、其方法按自己布局读字段」的真会算错组合）：
+> `socketserver.py:722`（`ThreadingUDPServer(ThreadingMixIn, UDPServer)`）、`_pyio.py:1393`、`xmlrpc/server.py:938`、
+> `urllib/request.py:1199`、`xml/dom/expatbuilder.py:803`。本仓库 **898 个 `.py`：0 新拒绝**。
+>
+> 下一步（已写进 [mi-layout.md](mi-layout.md) §6）：**主基类没有字段时，让第一个带字段的基类提供布局前缀**——
+> 这样「mixin 在前、状态在后」的常见写法会变正确且被允许，上面 5 例里至少 3 例会自己消失；
+> 剩下真正需要 adjustor thunk 的是「非主基类字段与主基类字段交错」。
+>
+> codegen 不动：`04_containers`/`09_class`/`19_comprehension` 的 asm 与 master 逐字节相同。
+> 闸门：套件 **497** / difftest **467** / check_size **PASS** / ctest 8/8。
 ## [0.502] - 2026-11-25
 
 > fix(typecheck)：**修掉 `check --imports` 的 heap-use-after-free**（3.13）。根因不是栈溢出——是 `TypeChecker::check()` 的**重查轮**。
