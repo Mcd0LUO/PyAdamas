@@ -392,6 +392,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ExcMessage:
         case RtFn::Reraise:
         case RtFn::SysArgv:
+        case RtFn::SysGetRecursionLimit:  // () -> i64
         case RtFn::SysExecutable:   // () -> str*（sys.executable）
         case RtFn::LangGapsEnable:  // P4 块3：() -> void，运行期门控
         case RtFn::ExcInfo:         // P4 块3：() -> list*（sys.exc_info）
@@ -573,6 +574,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TbFrames:      // P4 块3：(tb*) -> list*
         case RtFn::ReprSet:       // P4 块4：(set*) -> str*
         case RtFn::ReprBytes:     // P4 块4：(bytes*) -> str*
+        case RtFn::SysSetRecursionLimit:
         case RtFn::SysExit:
         case RtFn::PrintStr:
         case RtFn::PrintBytes:

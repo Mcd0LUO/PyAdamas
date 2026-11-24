@@ -30,3 +30,8 @@ def exit(code: int) -> None: pass
 
 # sys.intern(s)：返回驻留后的字符串（pa 没有驻留表，返回同一份）。
 def intern(s: str) -> str: pass
+
+# 递归上限：pyadamas 没有运行期递归限制，这两个函数只保存/查询一个值
+# （默认 1000，与 CPython 一致；set 校验 n >= 1），让依赖它的代码行为一致。
+def getrecursionlimit() -> int: pass
+def setrecursionlimit(limit: int) -> int: pass

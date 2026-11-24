@@ -352,6 +352,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SysArgv: return "pa_sys_argv";
         case RtFn::SysIntern: return "pa_sys_intern";
         case RtFn::SysExit: return "pa_sys_exit";
+        case RtFn::SysGetRecursionLimit: return "pa_sys_getrecursionlimit";
+        case RtFn::SysSetRecursionLimit: return "pa_sys_setrecursionlimit";
         case RtFn::GenNext: return "pa_gen_next";
         case RtFn::GenNextOpt: return "pa_gen_next_opt";
         case RtFn::GenSend: return "pa_gen_send";
