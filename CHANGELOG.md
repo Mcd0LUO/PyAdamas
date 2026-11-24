@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.496] - 2026-11-25
+
+> refactor(regalloc) + perf(vcall)：**删掉已废弃的 live range splitting**，并把**虚调用守卫改成比较实现指针**。
+>
+> **一、删 RA_SPLIT 死代码**（净删 **925 行**，22 文件）：`assign_slot_regs_split`（含 SpillPlacement 求解与块频次模型）、
+> `slot_loc_`/`slot_reload_in_`/`slot_spill_out_` 及 `block.cpp` 的 5 处使用、`spill_placement.{cpp,h}`、
+> `Program.rc_split` 与 manifest 的 `rcsplit` 行、`generate_asm` 参数。默认路径的槽位置回到「整函数固定寄存器或栈槽」。
+> `PYADAMAS_RA_SPLIT` / `PYADAMAS_SPLIT_MAXREG` 保留明确报错（rc=2），不让 A/B 脚本以为在跑另一条分配路径。
+> **验收**：删前/删后 12 个基准 asm **逐字节相同**（12/12，`cmp`）。
+>
+> **二、虚调用守卫（2.5）**：守卫从「比较 vtable 地址」改成「取 vtable 槽里的实现指针再比较」，
+> 并按实现指针合并候选（Square 继承 Rect.area → 同一个 `.Lf5`），比较顺序按「该实现覆盖几个类」降序。
+> obj_dispatch 的守卫从 **3 次比较降到 2 次**（内层每条守卫 10 → 8 条指令）。
+>
+> | 证据 | 改前 | 改后 | Δ |
+> |---|---|---|---|
+> | 指令/内层迭代 | 48.62 | 47.67 | **−1.95%**（与按类频率 34/33/33 算出的 −0.95 条完全吻合，不是布局巧合） |
+> | `idq.dsb_uops`/迭代 | 39.22 | 36.98 | −5.7%（前端总 uop 44.31→43.81） |
+> | `cycles:u`（单事件） | 799.1M | 786.8M | −1.6%，IPC 持平 |
+> | 墙钟（15 轮×BURST=5，A/A ±0.1%） | 298.55ms | 292.75ms | 中位 **−1.9%**、p25 −1.8% |
+>
+> **已丢弃的反例**（值得记）：只换实现指针但**保持类顺序** → 指令净变化 +0.01 条/迭代、墙钟 **+1.1%**
+> （多出的 vtable 槽 load 有 load-to-use 依赖，抵掉省下的 `leaq`/`cmp`）。所以「合并组优先」是收益成立的前提。
+> 已知取舍：合并组先比会让**单类占绝对多数**的站点每次调用多花 4 条；现有 12 基准没有守卫点，闸门测不到这类回退。
+> 12 基准 asm 逐字节不变、`instructions:u` ±0.03%。
+>
+> 闸门：套件 **488** / difftest **458** / check_size **PASS** / ctest 8/8 / ASan 488 / `--perf` warn=0。
 ## [0.495] - 2026-11-25
 
 > feat(big)：**`round(big, ndigits)` 与三参 `pow(b, e, m)` 落地**，并修掉 int 三参 pow 的溢出。
