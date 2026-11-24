@@ -96,6 +96,10 @@
 > mini-language 维持原状。
 ## [0.487] - 2026-11-24
 
+> **后续（0.489）**：本版把 dunder 形参放宽成 `Fraction | int | big` 的做法**已回退并判负** ——
+> `isinstance` 无法区分裸 double 与 int/big（未装箱的 double 与 int 同为裸字），联合分派在
+> 运行期必落到构造函数、把位模式当 BigInt 指针读（静默算错、每次结果不同）。见 0.489 的 Bug B。
+
 > feat(stdlib)：**Fraction / Decimal 与 int / big 的混合运算**（§3.1）。
 >
 > 之前 `Fraction(1,3) * 3`、`f + 1`、`Decimal("1.1") * 3` 都是编译期
