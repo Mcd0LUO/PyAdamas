@@ -12,8 +12,18 @@ namespace {
 
 constexpr char kMagic[8] = {'P', 'Y', '2', '3', 'I', '\0', '\0', '\0'};
 
+// 类型编码的递归深度上限：容器嵌套/自引用类型理论上可以无限深，超过就按
+// unknown 收口（解码端把 tag 0 读成 nullptr = unknown，语义上安全）。
+constexpr int kMaxEncTypeDepth = 64;
+
 struct Enc {
     std::string buf;
+    // 循环进口的递归保护（3.13）：函数类型可以互相引用（回调、自引用签名，
+    // 例如 threading 里的 lambda/装饰器包装），enc_sig ↔ enc_type 会成环。
+    // 在环上第二次遇到同一个 FuncInfo 时按「签名未知」编码 —— 循环依赖本身
+    // 合法，接口必须能终止，不能靠拒绝。
+    std::vector<const FuncInfo*> sig_stack;
+    int type_depth = 0;
 
     void u8(uint8_t v) { buf.push_back(static_cast<char>(v)); }
     void u16(uint16_t v) {
@@ -176,6 +186,34 @@ Param dec_default(Dec& d) {
 }
 
 void enc_sig(Enc& e, const FuncInfoPtr& fn) {
+    // 已经在这个签名的展开栈上：环上再展开就无限递归（3.13，check --imports
+    // 在 sched/random/threading 上栈溢出）。按「签名未知」收口，调用方拿到的
+    // 是 unknown 调用约定 —— 宁可漏报，不可崩。
+    bool cyclic = false;
+    if (fn) {
+        for (auto* f : e.sig_stack)
+            if (f == fn.get()) cyclic = true;
+        if (!cyclic) e.sig_stack.push_back(fn.get());
+    }
+    if (cyclic) {
+        // 编码成「unknown 签名」：与 fn == nullptr 同形，但保留位置/关键字
+        // 计数为 0 —— 解码端按 unknown 处理。
+        e.u32(0);
+        e.u32(0);
+        e.u32(0);
+        e.u8(0);
+        e.u8(0);
+        e.u8(0);
+        e.u8(0);
+        return;
+    }
+    struct PopSig {
+        Enc& e;
+        bool armed;
+        ~PopSig() {
+            if (armed) e.sig_stack.pop_back();
+        }
+    } pop{e, fn != nullptr};
     if (!fn) {
         e.u32(0);
         e.u32(0);
@@ -263,6 +301,17 @@ FuncInfoPtr dec_sig(Dec& d) {
 }
 
 void enc_type(Enc& e, const TypePtr& t) {
+    // 深度上限（3.13）：类型图里可能出现自引用（容器套自己、函数签名互相
+    // 引用）。超过上限按 unknown 收口，接口编码必须能终止。
+    if (e.type_depth >= kMaxEncTypeDepth) {
+        e.u8(0);
+        return;
+    }
+    ++e.type_depth;
+    struct PopDepth {
+        Enc& e;
+        ~PopDepth() { --e.type_depth; }
+    } pop_depth{e};
     if (!t) {
         e.u8(0);
         return;

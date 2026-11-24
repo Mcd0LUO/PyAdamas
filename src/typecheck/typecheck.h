@@ -362,6 +362,11 @@ private:
     // 所有建过的类，含被同名重定义顶掉的旧类。Type 里存的是裸指针，
     // 这里必须保证它们在 typecheck 期间一直有效。
     std::vector<ClassInfoPtr> all_classes_;
+    // 重查轮留下的上一代 ClassInfo（3.13）。check() 的每一轮都会重建整个类
+    // 世界，而旧一代的 ClassInfo 可能仍被某些 Type 的裸 cls 指针引用（跨轮
+    // 缓存、接口快照）；move 赋值会把它们释放掉 → 悬空指针。旧一代统一留到
+    // 本 TypeChecker 析构，代价是每轮一点内存。
+    std::vector<ClassInfoPtr> retired_classes_;
 
     // 值类型 struct：名字 → 布局；vector 保证 Type::st 的裸指针长期有效。
     std::unordered_map<std::string, StructInfo*> structs_;

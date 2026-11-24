@@ -65,8 +65,46 @@ else
     fail=1
 fi
 
+# 4) 循环 import 必须能终止（3.13：接口编码 UAF / 无限递归会段错误 rc=139）。
+#    循环依赖本身合法：要么通过，要么报类型错，绝不能崩。
+cat > "$work/cyc_a.py" <<'PYEOF'
+import cyc_b
+
+def fact(n: int):
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+def use() -> int:
+    return cyc_b.helper(fact(3))
+
+print(use())
+PYEOF
+
+cat > "$work/cyc_b.py" <<'PYEOF'
+import cyc_a
+
+def helper(n: int) -> int:
+    return n + 1
+
+def depth(n: int):
+    if n <= 0:
+        return 0
+    return 1 + depth(n - 1)
+PYEOF
+
+"$PA" check --imports -I "$work" "$work/cyc_a.py" >"$work/cyc.log" 2>&1
+cyc_rc=$?
+if [ $cyc_rc -le 1 ]; then
+    echo "  check --imports cyclic import: terminated (rc=$cyc_rc, ok)"
+else
+    echo "  check --imports cyclic import: CRASHED (rc=$cyc_rc)"
+    sed -n '1,6p' "$work/cyc.log"
+    fail=1
+fi
+
 if [ $fail -ne 0 ]; then
     echo "check --imports 口径回归失败"
     exit 1
 fi
-echo "check --imports 口径 3/3 通过"
+echo "check --imports 口径 4/4 通过"
