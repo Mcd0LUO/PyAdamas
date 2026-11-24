@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.513] - 2026-11-25
+
+> feat(lower)：**`operator.index(x)` / `operator.length_hint(x, default=0)`**——静态分派，**零运行期改动**。
+>
+> - **`index(x)`**：整数域（`Int`/`Bool`/定宽/`Big` 与 `unknown`）**原样返回**（`index(True)` = 1，bool 与 int 同槽天然一致）；
+>  其余类型在**调用点**发射 `raise TypeError("'<type>' object cannot be interpreted as an integer")`，类型名按静态类型映射；
+> - **`length_hint(x, default=0)`**：静态类型是 list/str/dict/tuple/set/bytes/range → 发射 `IrOp::Len`（零运行期开销）；其余返回 `default`。
+>
+> **CPython 语义纠正（我给的清单里那条是错的）**：`operator.length_hint(1)` **返回 0**，不是抛 TypeError ——
+>`default` 默认就是 0，抛 TypeError 的是内置 `len()`。按实测对齐，注释与测试都写明。
+>
+> 踩到的坑：第一版把两个参数当普通 unknown 声明，结果 `operator.index(1.5)` 被类型检查判死
+>（`argument 'a' of 'operator.index' is used with both float and non-float values`）—— 那是**新增拒绝**；
+>修法：签名里把参数标 `ann_unknown`（同一函数被不同静态类型调用是合法的，运行期抛）。
+>
+> 对拍（CPython 3.14.4 逐字节一致）：`index(5/True/-3)` → `5 1 -3`；`length_hint([1,2,3])`/`{}`/`'abc'`/`(1,2)` → `3 0 3 2`；
+>`length_hint(1,7)` → 7、`length_hint(1)` → 0；`index(1.5)` 的 TypeError 消息逐字一致。
+> 自定义类的 `__index__`/`__length_hint__` **判负**（要在 lowering 里按静态类型找 dunder、或运行期按 vtable 分派）；`unknown` 参数目前不做校验。
+>
+> 语料：628 默认口径 **499/623 不降**；本仓库 **902 个 `.py`：785 通过**、零新拒绝；12 基准 asm 与 master 逐字节相同。
+> 闸门：套件 **502** / difftest **472** / check_size **PASS**。（本轮没改运行期，只对目标用例跑了 ASan。）
 ## [0.512] - 2026-11-25
 
 > feat(runtime)：**`re.subn(pattern, repl, string, count=0)` → `tuple[str, int]`**（接口表小件，一次一件推进）。
