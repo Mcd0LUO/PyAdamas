@@ -477,6 +477,10 @@ private:
     };
     std::unordered_map<std::string, TypePtr> attr_refine_;
     Narrowing narrow_on(Expr& cond, bool truthy);
+    // 条件里「可窄化的名字」：裸名字或 walrus 的赋值目标（定义在 stmt.cpp）。
+    Name* narrow_name_of(Expr* e);
+    // isinstance 窄化的类型计算（定义在 stmt.cpp）：判不准返回 nullptr。
+    TypePtr narrow_isinstance(const TypePtr& t, const ClassInfo* cls, bool truthy);
     // 同一条件的全部窄化（`a is not None and b is not None` 有两个）。
     std::vector<Narrowing> narrow_all(Expr& cond, bool truthy);
     // 未判空就使用 T | None（0.498 窄化配套）：报错并返回 true。

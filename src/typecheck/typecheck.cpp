@@ -347,6 +347,17 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             return;
         }
         if (assigning_none) return;  // 保持已有类型，不清空也不收窄
+        // 模块级全局的「先定义后初始化」：_P = None if cond else 92 这类条件
+        // 赋值会把类型并成 T | None，随后 a < _P 就被判成「可能为 None」而拒绝
+        // （multiprocessing/util.py 的 _SUN_PATH_MAX）。模块级名字的值取决于模块
+        // 代码跑到哪一步，已经有一处确定类型时不要把 None 并回来 —— 与上面
+        // 「模块级 None 占位 → unknown」同一条口径。只对未标注的模块级名字生效：
+        // x: int | None = ... 是显式语义，必须保留。
+        if (sc->is_module && !sym.annotated && ty && ty->kind == TyKind::Optional &&
+            ty->celem == CKind::None && ty->cdims.empty() && !ty->st && !assigning_none &&
+            sym.ty && !is_unknown(sym.ty) && sym.ty->kind != TyKind::Optional &&
+            sym.ty->kind != TyKind::None && !ty->sub.empty())
+            ty = ty->sub[0];
         // 无标注变量按 Python 习惯可以改类型：x = None 只是占位，
         // x = [] 的元素类型待定。取公共上界；合不上就退化成 unknown，
         // 后续检查自动放行 —— 宁可漏报，不可误杀。
