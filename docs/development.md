@@ -412,8 +412,10 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=4 \
     bash tests/run_tests.sh build/dev build/dev/pyadamas
 ```
 
-比平时慢 3-5 倍，日常不用。**改动触及 RC / GC / lowering 时跑一遍** ——
-全量 222 ran ok 说明内存层面没有回归。
+ASan 只给**生成代码**插桩（编译器本身不插桩），而整套闸门的耗时主要是
+编译，所以墙钟与普通模式接近（465 个用例、8 作业实测约 2 分钟），只有
+运行时间长的少数用例会明显变慢。**改动触及 RC / GC / lowering 时跑一遍** ——
+全量 465 ran ok 说明内存层面没有回归。
 
 #### 编译器自身插桩
 
