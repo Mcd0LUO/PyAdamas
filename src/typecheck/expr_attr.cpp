@@ -240,7 +240,10 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                             a.attr));
             return t_unknown();
         }
-        if (auto* f = ot->cls->field(a.attr)) return f->ty;
+        if (auto* f = ot->cls->field(a.attr)) {
+            mark_self_field(a);  // 3.9：读 self.<字段> 记在方法所属类上
+            return f->ty;
+        }
         // 装饰方法在类属性里也有包装函数，必须先按方法查，
         // 否则会把含 self 的包装签名当成方法值的类型。
         if (const MethodInfo* m = ot->cls->method(a.attr))

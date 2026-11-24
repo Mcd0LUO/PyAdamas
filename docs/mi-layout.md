@@ -1,6 +1,6 @@
 # 多继承的字段布局与「非主基类方法」问题（3.9）
 
-> 状态：**已确认的静默错值 bug**，未修。记录实测、根因与两条修法，供下一轮选型。
+> 状态：**A（精确护栏）已落地（0.503）**；B（adjustor thunk）未做。记录实测、根因与两条修法。
 > 相关：[language.md](language.md)（继承与 MRO 的契约）、路线图 3.9。
 
 ## 1. 契约与实现的错位
@@ -68,3 +68,39 @@ A 落地时注意：mixin（无字段的基类）必须不受影响——`class 
 - 本仓库 889 个 `.py` 零新拒绝；
 - 回归：单继承、主基类多继承（`class C(A, B)`）、非主基类多继承（`class C(B, A)`）、菱形、mixin、`super()` 六种形态，输出与 CPython 逐字节一致；
 - 12 基准 asm 不变（这块不动 codegen 的默认路径时）。
+## 6. A 已落地（0.503，分支 mi-fix）
+
+**标记**：`ClassInfo::methods_access_own_fields` —— 方法体里出现 `self.<字段>` 的读
+（`typecheck/expr_attr.cpp` 的属性字段分支）或写（`typecheck/stmt.cpp` 的字段赋值
+分支）时，在**方法所属类**上置位（`is_self_attr` + `cur_class_`，只做静态访问记录，
+不做运行期分析）。纯 mixin 的方法只碰方法/参数时不会置位。
+
+**拒绝条件**（`func.cpp` 的 classdef，类定义处）：类 C 的某个**非主基类** A 同时满足
+① `A.methods_access_own_fields`；② A 链上的字段在 C 的布局里**真的挪了位置**
+（`C.field_index(f) != A.field_index(f)`，菱形共享祖先偏移不变 → 放行）；③ 不是
+导入类、不是 open 类。报错：
+
+```
+error: base 'A' of 'C' is not the primary base and its methods access instance fields;
+       put A first or make it a stateless mixin (see docs/mi-layout.md)
+```
+
+单继承、主基类（第一个）、纯 mixin（无字段 / 方法不碰字段）完全不受影响。
+
+**语料实测**：标准库 628 文件默认口径 **499 → 496/623**，新拒绝 5 例，全部是真的会算错：
+
+| 文件 | 类 | 说明 |
+|---|---|---|
+| `socketserver.py:722` | `ThreadingUDPServer(ThreadingMixIn, UDPServer)` | 状态基类 `UDPServer` 在第二位，`TCPServer.server_bind` 等按自己布局读 `self.socket` |
+| `_pyio.py:1393` | `BufferedRandom(BufferedIOBase, BufferedReader)` | `BufferedReader` 的方法读 `self._read_buf` 等字段 |
+| `xmlrpc/server.py:938` | `DocXMLRPCServer(SimpleXMLRPCServer, XMLRPCDocGenerator)` | 生成器的方法读 `self._dispatch` 等 |
+| `urllib/request.py:1199` | `HTTPDigestAuthHandler(BaseHandler, AbstractDigestAuthHandler)` | 摘要处理器方法读 `self.passwd` / `self.add_password_file` 状态 |
+| `xml/dom/expatbuilder.py:803` | `ExpatBuilderNS(ExpatBuilder)` 多基类组合 | 基类方法读 `self._parser` 等 |
+
+本仓库 898 个 `.py`：**0 新拒绝**（除本任务新增的 `tests/strict/mi_non_primary_base_fields.py`，
+它本来就该被拒）。
+
+**下一步（修法 B 的更省事版本）**：主基类没有字段时，让「第一个带字段的基类」提供布局
+前缀 —— 这样 `ThreadingUDPServer(ThreadingMixIn, UDPServer)` 这类「mixin 在前、状态在后」
+的常见写法会变正确且被允许，上面 5 例里至少 3 例会自己消失。真正的 adjustor thunk 仍按
+§3 B 的另一半做（非主基类字段与主基类字段交错时）。

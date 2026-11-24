@@ -602,6 +602,8 @@ void TypeChecker::classdef(ClassDef& c) {
             }
             if (eb->is_open()) cls->open = true;
         }
+        // 3.9：非主基类方法碰字段 + 字段确实挪位 → 类定义处明确报错（mi_guard.cpp）。
+        check_mi_layout(c, cls.get(), base, extra_bases, open);
         if (base) {
             cls->base_fields = base->n_fields();
             cls->has_field_defaults = base->has_field_defaults;
