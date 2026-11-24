@@ -535,10 +535,61 @@ void TypeChecker::stmt_for(For& f) {
                     "'asyncgen' object is not iterable without 'async for'");
             elem = iter_elem(it, f.line, f.col);
         }
+        // 同名循环目标可能被不同元素类型的 for 反复绑定
+        // （`for t in [(1, 2, 3)]` 后接 `for t in [(1.5, 4)]`）。符号表里
+        // 一个名字只有一个槽类型，declare 会取 join；join 出来的
+        // tuple[float, ...] 与循环体内那一轮的真实值表示并不一致：
+        // 存储点按槽类型逐元素重建（把 1 变成 1.0），读取点又按当初记录的
+        // 元素类型解释（float 位模式当 int 打印 4607182418800017408）。
+        // 这里把「本轮元素类型」和「跨轮合并后的槽类型」分开：
+        //   * 循环体内按本轮元素类型检查（tc_.type_of 记录的就是它）；
+        //   * 与上一轮绑定不同时槽退化成 unknown（存储不做转换，float
+        //     标量由既有机制装箱成 CPYFLOAT），循环结束后再合并回去
+        //     （循环可能一次都不执行）。
+        std::vector<std::pair<std::string, TypePtr>> body_tys;
+        collect_target_types(*f.target, elem, body_tys);
+
+        struct ForTarget {
+            Scope* sc;
+            std::string name;
+            TypePtr prev;  // 循环前的类型（不存在为空）
+            TypePtr body;  // 循环体内类型
+            TypePtr exit;  // 循环结束后的槽类型
+        };
+        std::vector<ForTarget> binds;
+        binds.reserve(body_tys.size());
+        for (auto& [name, bty] : body_tys) {
+            Scope* sc = assign_target_scope(name);
+            auto sit = sc->vars.find(name);
+            binds.push_back(ForTarget{sc, name,
+                                      sit != sc->vars.end() ? sit->second.ty : nullptr, bty,
+                                      nullptr});
+        }
         assign(*f.target, elem, f.line, f.col);
+        for (auto& b : binds) {
+            auto sit = b.sc->vars.find(b.name);
+            if (sit == b.sc->vars.end() || sit->second.annotated) continue;
+            bool prev_none = b.prev && b.prev->kind == TyKind::None;
+            bool prev_concrete = b.prev && b.prev->kind != TyKind::Unknown &&
+                                 b.prev->kind != TyKind::None;
+            if (prev_concrete && !type_eq(b.prev, b.body)) {
+                sit->second.ty = t_unknown();
+                sit->second.dynamic = true;
+            }
+            // 槽仍是 unknown 时（含上面刚退化的）循环体保持元素类型：
+            // 元素值的真实表示就是本轮类型，按它读才不会被槽类型带偏。
+            if (!prev_none && !is_unknown(sit->second.ty)) b.body = sit->second.ty;
+            b.exit = sit->second.ty;
+            sit->second.ty = b.body;
+        }
         ++loop_depth_;
         stmts(f.body);
         --loop_depth_;
+        for (auto& b : binds) {
+            auto sit = b.sc->vars.find(b.name);
+            if (sit == b.sc->vars.end() || sit->second.annotated) continue;
+            sit->second.ty = join(b.exit, sit->second.ty);
+        }
         stmts(f.orelse);
         return;
     }

@@ -312,8 +312,13 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             // 否则后面 `x = "s"` 会走「无标注可改类型」的分支，静默变成 unknown。
             sym.ty = std::move(ty);
             sym.annotated = true;
+            sym.dynamic = false;  // 显式标注优先于此前的动态退化
             return;
         }
+        // 槽已被 for 的异构绑定退化成动态表示（见 stmt_for）：后续赋值
+        // 不能再把槽收窄回具体类型，否则前面循环的存储点会按新类型做
+        // 逐元素转换，而读取点仍按当时的元素类型解释（位模式错读）。
+        if (sym.dynamic) return;
         if (sym.annotated) {
             // 函数名被重新绑定成非函数的东西（协程对象、装饰器返回值）：
             // 继续按原签名检查只会误报，直接退化成 unknown

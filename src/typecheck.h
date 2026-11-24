@@ -56,6 +56,11 @@ struct Symbol {
     bool from_def = false;
     // class 语句绑定的名字：函数内定义的类也靠它和「类实例变量」区分。
     bool is_class_name = false;
+    // 槽已退化成动态表示（见 stmt_for）：同一个名字被不同类型元素的 for
+    // 先后绑定过，槽不能再收窄回某个具体类型 —— 前面循环的存储点会按新
+    // 类型逐元素转换，而读取点仍按原类型解释（实测把 int 位模式当 double
+    // 读）。置位后 declare 不再用后续赋值给槽定型。
+    bool dynamic = false;
 };
 
 // from 内置模块 import 的函数：保留原始签名，调用点据此走模块专用规则。
@@ -512,6 +517,17 @@ private:
     void check_u64_literals();
 
     void unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col);
+
+    // 解包目标各自拿到的类型（不写符号表）。规则与 unpack_assign 的各个
+    // 分支一致；quiet=true 时只算类型、不报诊断（调用方随后还会走 assign
+    // 报错，避免重复诊断）。返回 false 表示解包本身不合法。
+    bool unpack_types(const std::vector<ExprPtr>& targets, TypePtr value, int line, int col,
+                      std::vector<TypePtr>& out, bool quiet);
+
+    // for 目标里每个名字在**循环体内**应有的类型（逐层解包，规则同上）。
+    // 用于把「本轮元素类型」与「跨轮合并后的槽类型」分开（见 stmt_for）。
+    void collect_target_types(Expr& target, TypePtr value,
+                              std::vector<std::pair<std::string, TypePtr>>& out);
 
     // ── 表达式 ──────────────────────────────────────────────────
 

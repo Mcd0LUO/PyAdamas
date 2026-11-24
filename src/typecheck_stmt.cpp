@@ -660,57 +660,51 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
         err(line, col, "cannot assign to this expression");
     }
 
-void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col) {
+bool TypeChecker::unpack_types(const std::vector<ExprPtr>& targets, TypePtr value, int line,
+                               int col, std::vector<TypePtr>& out, bool quiet) {
         size_t n = targets.size();
+        out.assign(n, t_unknown());
         size_t star_at = n;  // n 表示没有星号目标
         for (size_t i = 0; i < n; ++i)
             if (targets[i]->kind == ExprKind::Starred) { star_at = i; break; }
-
-        auto assign_one = [&](Expr& t, TypePtr ty) {
-            if (t.kind == ExprKind::Starred) {
-                assign(*static_cast<Starred&>(t).value, ty, line, col);
-            } else {
-                assign(t, ty, line, col);
-            }
-        };
 
         if (value->kind == TyKind::Tuple) {
             if (value->variadic) {
                 // 长度不定：每个目标拿元素类型，星号目标拿 list[元素]
                 TypePtr e = value->sub.empty() ? t_unknown() : value->sub[0];
-                for (auto& t : targets) {
-                    if (t->kind == ExprKind::Starred)
-                        assign_one(*t, mk_list(e));
-                    else
-                        assign_one(*t, e);
-                }
-                return;
+                for (size_t i = 0; i < n; ++i)
+                    out[i] = targets[i]->kind == ExprKind::Starred ? mk_list(e) : e;
+                return true;
             }
             auto& elems = value->sub;
             if (star_at == n) {
                 if (!elems.empty() && elems.size() != n) {
-                    err(line, col, std::format("cannot unpack {} values into {}", elems.size(), n));
-                    return;
+                    if (!quiet)
+                        err(line, col,
+                            std::format("cannot unpack {} values into {}", elems.size(), n));
+                    return false;
                 }
                 for (size_t i = 0; i < n; ++i)
-                    assign_one(*targets[i], i < elems.size() ? elems[i] : t_unknown());
-                return;
+                    out[i] = i < elems.size() ? elems[i] : t_unknown();
+                return true;
             }
             // a, *b, c = (...)：星号吃中间，剩余目标与末尾元素对齐
             size_t tail = n - star_at - 1;
             if (elems.size() + 1 < n) {
-                err(line, col, std::format("cannot unpack {} values into {}", elems.size(), n));
-                return;
+                if (!quiet)
+                    err(line, col,
+                        std::format("cannot unpack {} values into {}", elems.size(), n));
+                return false;
             }
             for (size_t i = 0; i < star_at; ++i)
-                assign_one(*targets[i], i < elems.size() ? elems[i] : t_unknown());
+                out[i] = i < elems.size() ? elems[i] : t_unknown();
             TypePtr rest = nullptr;
             for (size_t i = star_at; i + tail < elems.size(); ++i)
                 rest = rest ? join(rest, elems[i]) : elems[i];
-            assign_one(*targets[star_at], mk_list(rest ? rest : t_unknown()));
+            out[star_at] = mk_list(rest ? rest : t_unknown());
             for (size_t j = 0; j < tail; ++j)
-                assign_one(*targets[star_at + 1 + j], elems[elems.size() - tail + j]);
-            return;
+                out[star_at + 1 + j] = elems[elems.size() - tail + j];
+            return true;
         }
 
         if (value->kind == TyKind::List || value->kind == TyKind::Set ||
@@ -722,33 +716,63 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
             TypePtr elem = value->kind == TyKind::Str ? t_str()
                           : value->sub.empty()        ? t_unknown()
                                                       : value->sub[0];
-            for (auto& t : targets) {
-                if (t->kind == ExprKind::Starred)
-                    assign_one(*t, mk_list(elem));
-                else
-                    assign_one(*t, elem);
-            }
-            return;
+            for (size_t i = 0; i < n; ++i)
+                out[i] = targets[i]->kind == ExprKind::Starred ? mk_list(elem) : elem;
+            return true;
         }
 
         // 类可能实现了 __iter__（静态看不到），None/unknown 无从判断：
         // 都按 unknown 逐个赋，不报错。
         if (is_unknown(value) || value->kind == TyKind::None ||
             value->kind == TyKind::Class) {
-            for (auto& t : targets) assign_one(*t, t_unknown());
-            return;
+            return true;  // out 已全是 unknown
         }
         if (value->kind == TyKind::Optional && !value->sub.empty()) {
             // a, b = maybe_tuple：拆 Optional 内层，None 走 unknown。
             TypePtr inner = value->sub[0];
             if (inner->kind == TyKind::Tuple || inner->kind == TyKind::List ||
                 inner->kind == TyKind::Str || inner->kind == TyKind::Generator) {
-                for (auto& t : targets) assign_one(*t, t_unknown());
-                return;
+                return true;
             }
         }
-        err(line, col, std::format("cannot unpack non-sequence '{}'", type_name(value)));
-    }
+        if (!quiet)
+            err(line, col, std::format("cannot unpack non-sequence '{}'", type_name(value)));
+        return false;
+}
+
+void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col) {
+        std::vector<TypePtr> tys;
+        if (!unpack_types(targets, value, line, col, tys, false)) return;
+        for (size_t i = 0; i < targets.size(); ++i) {
+            if (targets[i]->kind == ExprKind::Starred) {
+                assign(*static_cast<Starred&>(*targets[i]).value, tys[i], line, col);
+            } else {
+                assign(*targets[i], tys[i], line, col);
+            }
+        }
+}
+
+void TypeChecker::collect_target_types(Expr& target, TypePtr value,
+                                       std::vector<std::pair<std::string, TypePtr>>& out) {
+        if (target.kind == ExprKind::Name) {
+            out.emplace_back(static_cast<Name&>(target).id, value);
+            return;
+        }
+        if (target.kind == ExprKind::Starred) {
+            collect_target_types(*static_cast<Starred&>(target).value, value, out);
+            return;
+        }
+        if (target.kind == ExprKind::Tuple || target.kind == ExprKind::List) {
+            auto& elts = target.kind == ExprKind::Tuple
+                             ? static_cast<TupleExpr&>(target).elts
+                             : static_cast<ListExpr&>(target).elts;
+            std::vector<TypePtr> tys;
+            if (!unpack_types(elts, value, target.line, target.col, tys, true)) return;
+            for (size_t i = 0; i < elts.size(); ++i)
+                if (elts[i]) collect_target_types(*elts[i], tys[i], out);
+        }
+        // 下标/属性目标不绑定新名字，跳过
+}
 
 
 
