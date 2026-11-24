@@ -466,6 +466,12 @@ struct ClassInfo {
     int n_fields() const { return base_fields + static_cast<int>(fields.size()); }
     int64_t obj_size() const { return 8 * static_cast<int64_t>(n_fields() + 1); }
 
+    // 3.9：本类的方法体里读过/写过 self.<字段>（含继承来的字段）。多继承下
+    // 非主基类的字段偏移会平移，而方法体按**声明类**的布局算偏移 → 静默
+    // 读错字段。这个标记让「class C(B, A)」在类定义处被拒绝，而不是算错值。
+    // 纯 mixin（方法不碰 self.<字段>）不受影响。
+    bool methods_access_own_fields = false;
+
     // 整条继承链上只要有一层看不全，就都看不全
     bool is_open() const {
         for (const ClassInfo* p = this; p; p = p->base) {

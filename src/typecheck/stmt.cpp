@@ -748,7 +748,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 }
                 // `self.x = ...` 且 x 没声明过：就地补成字段，类型不再苛求
                 if (add_implicit_field(*at, value)) return;
-                if (auto* f = ot->cls->field(at->attr)) {
+                if (auto* f = ot->cls->field(at->attr)) { mark_self_field(*at);  // 3.9
                     // self.d = {}：空字面量的洞按字段标注填（否则运行时
                     // 按 unknown 种类建表，str 键变指针哈希）。
                     if (value && ty_contains_hole(value, 0))

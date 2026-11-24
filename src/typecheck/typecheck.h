@@ -506,6 +506,11 @@ private:
 
     // 这个属性访问的目标是不是当前方法的 self（`self.x`）
     bool is_self_attr(const Attribute& a) const;
+    // 3.9（docs/mi-layout.md）：方法体碰 self.<字段> 的记录与多继承布局护栏。
+    // 实现放在 typecheck/mi_guard.cpp（文件规模限制）。
+    void mark_self_field(const Attribute& a);
+    void check_mi_layout(const ClassDef& c, const ClassInfo* self, ClassInfo* base,
+                         const std::vector<ClassInfo*>& extra_bases, bool open);
     // 接收者是不是类本身（`C.x` / @classmethod 里的 `cls.x`），而不是实例
     bool is_class_receiver(const Attribute& a);
     // 裸名字是不是类本身（构造）而不是装着实例的变量
