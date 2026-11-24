@@ -60,7 +60,9 @@ print(abi.cvar_i)
 print(abi.cvar_u, abi.cvar_f, abi.cvar_b)
 
 # ── ptr[T] 返回值 + 解引用 + 写回 ────────────────────────────────────
-buf = c.malloc_i(3)
+# 分配量按 memset 的字节数给足 24：3 字节 + memset 24 是真实堆越界，
+# 普通跑能过（malloc 会向上取整），ASan 下必然报 heap-buffer-overflow。
+buf = c.malloc_i(24)
 c.memset(buf, 0, 24)
 buf[0] = 7
 print(buf[0])
