@@ -20,6 +20,25 @@ void TypeChecker::mark_self_field(const Attribute& a) {
     }
 }
 
+// layout base（0.504）：MRO 顺序里第一个**有字段**的基类。它的字段前缀在子类里
+// 保持原偏移，所以「mixin 在前、状态基类在后」的方法体按声明类布局算偏移是对的。
+// 没有带字段的基类 → 无前缀（与 0.503 相同）。C3 保序，[base]+extra 就是 MRO 里
+// 基类的先后。
+void TypeChecker::set_layout_base(ClassInfo& cls, ClassInfo* base,
+                                  const std::vector<ClassInfo*>& extra_bases) {
+    std::vector<ClassInfo*> cand;
+    if (base) cand.push_back(base);
+    for (ClassInfo* e : extra_bases) cand.push_back(e);
+    ClassInfo* layout = nullptr;
+    for (ClassInfo* b : cand)
+        if (b->n_fields() > 0) {
+            layout = b;
+            break;
+        }
+    cls.layout_base = layout;
+    cls.base_fields = layout ? layout->n_fields() : 0;
+}
+
 void TypeChecker::check_mi_layout(const ClassDef& c, const ClassInfo* self, ClassInfo* base,
                                   const std::vector<ClassInfo*>& extra_bases, bool open) {
     // 精确护栏：拒绝条件三条同时成立 ——

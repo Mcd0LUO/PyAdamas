@@ -602,10 +602,11 @@ void TypeChecker::classdef(ClassDef& c) {
             }
             if (eb->is_open()) cls->open = true;
         }
-        // 3.9：非主基类方法碰字段 + 字段确实挪位 → 类定义处明确报错（mi_guard.cpp）。
+        // layout base（0.504）：MRO 顺序里第一个有字段的基类提供前缀（mi_guard.cpp）。
+        set_layout_base(*cls, base, extra_bases);
+        // 3.9：非 layout base 的方法碰字段 + 字段确实挪位 → 类定义处明确报错。
         check_mi_layout(c, cls.get(), base, extra_bases, open);
         if (base) {
-            cls->base_fields = base->n_fields();
             cls->has_field_defaults = base->has_field_defaults;
             if (base->is_open()) cls->open = true;
         }

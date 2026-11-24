@@ -511,6 +511,9 @@ private:
     void mark_self_field(const Attribute& a);
     void check_mi_layout(const ClassDef& c, const ClassInfo* self, ClassInfo* base,
                          const std::vector<ClassInfo*>& extra_bases, bool open);
+    // 选出 layout base（MRO 顺序第一个有字段的基类）并设置 base_fields。
+    void set_layout_base(ClassInfo& cls, ClassInfo* base,
+                         const std::vector<ClassInfo*>& extra_bases);
     // 接收者是不是类本身（`C.x` / @classmethod 里的 `cls.x`），而不是实例
     bool is_class_receiver(const Attribute& a);
     // 裸名字是不是类本身（构造）而不是装着实例的变量

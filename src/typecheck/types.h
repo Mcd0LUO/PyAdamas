@@ -412,6 +412,11 @@ struct ClassInfo {
     // 多重继承的附加基类：主基类提供字段布局，附加基类只能复用
     // 已有字段；方法按 C3 MRO 解析。
     std::vector<ClassInfo*> extra_bases;
+    // 提供字段前缀的基类（0.504）：MRO 顺序里第一个有字段的基类。它的字段
+    // 在子类里的偏移与它自己类里**完全一致**，所以它的方法体按声明类布局算
+    // 偏移是对的 —— 「mixin 在前、状态基类在后」因此不需要 adjustor thunk。
+    // null = 没有任何基类带字段（无前缀）。
+    ClassInfo* layout_base = nullptr;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
     std::vector<MethodInfo> methods;  // 只含本类声明的方法（含属性访问器）
     std::vector<ClassAttrInfo> class_attrs;  // 只含本类声明的类属性
@@ -486,12 +491,20 @@ struct ClassInfo {
     int field_index(const std::string& n) const {
         for (size_t i = 0; i < fields.size(); ++i)
             if (fields[i].name == n) return base_fields + static_cast<int>(i);
-        return base ? base->field_index(n) : -1;
+        if (base)
+            if (int i = base->field_index(n); i >= 0) return i;
+        // 字段前缀来自 layout base（无字段时退回主基类，行为与 0.503 一致）。
+        if (layout_base && layout_base != base) return layout_base->field_index(n);
+        return -1;
     }
     const FieldInfo* field(const std::string& n) const {
         for (auto& f : fields)
             if (f.name == n) return &f;
-        return base ? base->field(n) : nullptr;
+        if (base)
+            if (const FieldInfo* f = base->field(n)) return f;
+        // layout base 的字段也在本类布局里（非主基类提供前缀时）。
+        if (layout_base && layout_base != base) return layout_base->field(n);
+        return nullptr;
     }
     // 类属性沿 MRO 解析：子类读到的就是声明者那一份，没有拷贝。
     const ClassAttrInfo* class_attr(const std::string& n) const {
