@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.493] - 2026-11-24
+
+> fix(runtime)：**`re.match` 不锚定**（语义 bug：含元字符的模式下 `match` 等价于 `search`）。
+>
+> 根因：`rt_re.c::find_from` 的「首字节剪枝」在 `mode != 0`（match/fullmatch）时**也推进起点** ——
+> `a.c`.match("xabc") 的首字节 `a` 在第 1 位，剪枝把 s0 推到 1 后就匹配了。纯字面量模式走
+> `memcmp` 快路径，所以 `re.match("abc", "xabc")` 碰巧是对的，掩盖了这个 bug。
+> 修法：`mode != 0` 时只判断起点首字节是否命中集合，**不推进**（不命中直接返回 0）。
+>
+> 复核对拍（`tests/run/573_re_anchors.py`，16 个模式 × 14 个主语 × match/search/fullmatch
+> = 224 行）：与 CPython **3.14.4 逐字节相同**，覆盖 `.`/`[]`/`*`/`+`/`{m,n}`/`\A`/`\Z`/`\z`/
+> `^`/`$`/`|`/分组。`\A`/`\Z`/`\z` 本来就是锚点（`parse_escape` 已实现，本轮复核确认，没有代码改动）；
+> `search` 语义不变。
+>
+> 边界：`Pattern.match(s, pos[, endpos])` 的 `pos`/`endpos` **仍不支持**（`Pattern.*` 只收 1 个参数，
+> 编译期报错），写进 [docs/compatibility.md](docs/compatibility.md)。`fnmatch` 编译期前置 `^` + `end()`
+> 的绕法仍然正确，未改动（`tests/run/572_fnmatch_anchor.py`、`539_fnmatch_accept.py` 全过）。
 ## [0.492] - 2026-11-24
 
 > perf(stdlib)：**标准库第二轮全量扫描**——54 个模块逐个过（`docs/stdlib-round2.md`），12 个文件改动，5 个可测收益。

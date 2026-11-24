@@ -112,6 +112,15 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 所以 `from lib import take; take(1.5)` 目前仍会放行。方向是「check 比 build 宽」，
 符合「宁可漏报不可误杀」，但要知道这条边界：跨模块校验收紧要等接口序列化带上成员表。
 
+### `re` 的锚点与 `pos`/`endpos`（0.493 定口径）
+
+- `Pattern.match(s)` / `re.match(pat, s)` 从 **offset 0** 起匹配（等价隐式 `\A`），`search` 才扫描；
+  `fullmatch` 另要求消费到串尾。`\A` / `\Z` / `\z` 是锚点（0.493 复核，与 CPython 3.14 一致），
+  `^` / `$` 仍是行首/行尾。
+- **不支持** `Pattern.match(s, pos)` / `search(s, pos, endpos)` 这类带位置参数的写法：`Pattern.*`
+  与模块级 `re.*` 都只收 1 个文本参数，多传是编译期错误（不是运行期 TypeError）。要偏移请先切片。
+- `Match` 对象的 `str()`/`repr()` 还没有 CPython 的 `<re.Match object; span=(0, 3), match='abc'>`
+  形式（打印出来是对象地址）；`group`/`groups`/`span`/`start`/`end` 这些取数接口是好的。
 ### 二进制模式 file 的 read/write 语义（0.484 定口径，pya-lsp 缺口 1）
 
 `open(path, "rb")` 返回的 file 在**运行期按字节读写**，但值类型是 **str**：

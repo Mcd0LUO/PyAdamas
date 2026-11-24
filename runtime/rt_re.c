@@ -1797,8 +1797,15 @@ static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int6
         } else if (an->first_kind == 1 && s0 < len) {
             // 首字节剪枝：把 s0 推到下一个「首字节可能在集合里」的起点。
             // 每个被跳过的起点都由首字节集判定必然在第一条消费指令上失败。
-            while (s0 < len && !((fb[s[s0] >> 3] >> (s[s0] & 7)) & 1)) s0++;
-            if (s0 > len) break;
+            // **mode != 0（match/fullmatch）不能推进起点**：那等于把 match
+            // 变成 search（0.493 修的语义 bug —— `a.c`.match("xabc") 曾返回
+            // 匹配，因为首字节 'a' 在第 1 位，剪枝把 s0 推到了 1）。
+            if (mode != 0) {
+                if (!((fb[s[s0] >> 3] >> (s[s0] & 7)) & 1)) return 0;
+            } else {
+                while (s0 < len && !((fb[s[s0] >> 3] >> (s[s0] & 7)) & 1)) s0++;
+                if (s0 > len) break;
+            }
         }
         caps_fill(caps, ncap, -1);
         c.s = s;
