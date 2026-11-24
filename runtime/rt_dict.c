@@ -360,10 +360,10 @@ static void dict_reserve(PyAdamasDict* d, int64_t n) {
     int64_t nic = d->icap > 0 ? d->icap : 8;
     while (nic < need) nic *= 2;
     if (nic > d->icap) {
-        free(d->index);
-        d->index = (int32_t*)calloc((size_t)nic, sizeof(int32_t));
-        if (!d->index) panic_c("out of memory");
-        d->icap = nic;
+        /* dst 可能已有条目（pa_dict_update 对非空表直接调用这里）：
+           扩容必须把旧条目重哈希进新表。只 calloc 新表会让旧键全部
+           查不到 —— set 并集会出现重复元素（504_container_methods）。 */
+        dict_reindex(d, nic);
     }
 }
 
@@ -418,6 +418,16 @@ void dict_destroy(void* p) {
     // rec_memo 的模块级 memo={} 推成 dict[unknown,unknown]，0.285 的
     // (0,0) 跳过从不命中，每轮 25 项白走链游 + 探测（dict_destroy 13%）。
     if (d->key_own == 2 && d->val_own == 2 && !d->saw_heap) return;
+    /* ord_len == len 时 order[] 是存活项的完整快照：按数组独立加载，
+       比沿 next 链逐项追逐少一串依赖加载（小字典收益明显）。 */
+    if (d->ord_len == d->len) {
+        for (int64_t i = 0; i < d->len; ++i) {
+            PyAdamasDictEntry* e = &d->entries[d->order[i]];
+            pa_own_dec(d->key_own, e->key);
+            pa_own_dec(d->val_own, e->val);
+        }
+        return;
+    }
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_dec(d->key_own, e.key);
@@ -432,6 +442,14 @@ void dict_gc_release(void* p) {
     if (d->key_own == 0 && d->val_own == 0) return;
     // 0.302：同 dict_destroy —— 纯标量的 unknown dict 无引用可 unref。
     if (d->key_own == 2 && d->val_own == 2 && !d->saw_heap) return;
+    if (d->ord_len == d->len) {
+        for (int64_t i = 0; i < d->len; ++i) {
+            PyAdamasDictEntry* e = &d->entries[d->order[i]];
+            pa_own_gc_unref(d->key_own, e->key);
+            pa_own_gc_unref(d->val_own, e->val);
+        }
+        return;
+    }
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_gc_unref(d->key_own, e.key);
@@ -506,10 +524,14 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     }
     // 索引按 2/3 装载（墓碑也计入），超了就重建；存活项本身超了才扩容。
     if ((d->len + d->itomb + 1) * 3 >= d->icap * 2) {
-        if ((d->len + 1) * 3 >= d->icap * 2)
-            dict_reindex(d, d->icap * 2);
-        else
+        if ((d->len + 1) * 3 >= d->icap * 2) {
+            /* 小表一次跳到 32：8 项关键字字典的装载率从 0.5 降到 0.25，
+               探针里的 hash 比较明显减少；池复用后稳态就是 32，只多 64B。 */
+            int64_t nic = d->icap * 2 < 32 ? 32 : d->icap * 2;
+            dict_reindex(d, nic);
+        } else {
             dict_reindex(d, d->icap);
+        }
         place = dict_place_slot(d, h);
     }
     d->version++;   /* 新键插入：键集合变了 */

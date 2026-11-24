@@ -1513,10 +1513,13 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // SSO 缓冲写到 data[len]（含结尾 NUL），之后只按 len 读；堆串路径
     // 还额外写 hash。短串分配在 str(int)/repr/format 上极热，省掉一次
     // memset@plt 调用。
-    if (kind != PYADAMAS_RC_LIST && kind != PYADAMAS_RC_STR)
+    // DICT 也不清零：pa_dict_new 会写满全部字段，这里只需保证 entries
+    // 为 NULL（新块/无缓冲池命中时它据此走 malloc 分支）。
+    if (kind != PYADAMAS_RC_LIST && kind != PYADAMAS_RC_STR &&
+        kind != PYADAMAS_RC_DICT)
         memset(p, 0, (size_t)alloc_size);
-    // dict 池命中：把寄存的缓冲写回 payload（memset 刚清零）。entries
-    // 非空是 pa_dict_new 识别「带缓冲池命中」的判据；新块 memset 后恒空。
+    // dict 池命中：把寄存的缓冲写回 payload。entries 非空是 pa_dict_new
+    // 识别「带缓冲池命中」的判据；否则显式置空。
     if (kind == PYADAMAS_RC_DICT && pooled && dict_last_got.entries) {
         PyAdamasDict* d = (PyAdamasDict*)p;
         d->entries = dict_last_got.entries;
@@ -1524,6 +1527,8 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         d->index = dict_last_got.index;
         d->cap = dict_last_got.cap;
         d->icap = dict_last_got.icap;
+    } else if (kind == PYADAMAS_RC_DICT) {
+        ((PyAdamasDict*)p)->entries = NULL;
     }
     // size 用调用方请求的字节数（不含 RC 头），和 ASan 报的口径一致，
     // 方便两边对照。alloc_size 是池化后的容量，会偏大。
