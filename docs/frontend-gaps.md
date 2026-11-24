@@ -5,6 +5,20 @@
 > [frontend-fixes.md](frontend-fixes.md)（0.498）、[compatibility.md](compatibility.md)（基线段）、
 > [numeric-types-design.md](numeric-types-design.md)（unknown 表示）。
 
+## 0. 统一采集（0.507 起）
+
+这个数字被三个代理各自量过，口径来回漂（628/626 个文件、默认口径 495/496/499 三个版本）。现在统一成一条命令：
+
+```bash
+bash tools/frontend_baseline.sh                 # 默认 /usr/lib/python3.14 + build/lead/pyadamas
+bash tools/frontend_baseline.sh <stdlib 目录> <pyadamas 路径>
+```
+
+输出四个口径：syntax / default（当前默认，strict names）/ old（--no-imports --lenient-names）/ imports（opt-in，会误杀）。
+
+**0.507 实测（626 个 .py）**：syntax **621/626**、default **494/626（78.9%）**、old **499/626**、imports **162/626**。
+0.502 之前 --imports 会因循环 import 的 UAF 崩溃，那个 155 的下界已作废。
+
 ## 1. 基线数字（CPython 3.14.4 标准库，628 个 `.py`）
 
 | 口径 | 通过 | 说明 |

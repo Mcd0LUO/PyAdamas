@@ -476,7 +476,7 @@ unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增�
 >
 > ```bash
 > PA=build/lead/pyadamas
-> find /usr/lib/python3.14 -name '*.py' -type f | xargs -P8 -I{} sh -c '$0 check "$1" >/dev/null 2>&1 && echo ok' $PA {} | wc -l
+> bash tools/frontend_baseline.sh   # 四个口径一次输出   # '$0 check "$1" >/dev/null 2>&1 && echo ok' $PA {} | wc -l
 > ```
 >> **0.486 重测（本机 CPython 3.14.4）**：628 个 `.py`（去 `test/` 560 个）。
 > 语法通过 **623/628（99.2%）**。类型通过按口径分三行（**默认口径是第二行**）：
