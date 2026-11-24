@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.505] - 2026-11-25
+
+> feat(typecheck)：**多继承的布局前缀选择**——「mixin 在前、状态基类在后」的写法现在正确且被允许。
+>
+> 0.503 的护栏把「非主基类的方法访问自有字段」变成明确报错，但把一类**常见且本该正确**的写法也挡住了：
+> `class C(Mixin, State)`（mixin 无字段、状态基类在后）。本版让 **layout base = MRO 里第一个带字段的基类** 提供布局前缀：
+>
+> - `ClassInfo::layout_base` 按 MRO 顺序取第一个有字段的基类（没有就退化成无前缀，与 0.503 相同）；
+> - 字段偏移一律相对 layout base 计算；**`field()`/`field_index()` 也走 layout_base 链**——否则子类 `self.x = ...` 会被当成新字段补出第二个槽，
+>   方法体读到没赋值的那个（实测就是 `9 0`）；
+> - 接口导出顺序改成**运行期布局顺序**（layout_base 链 → 本类）。
+>
+> **接口结论：不需要 bump 格式版本**。字段**偏移不进接口**（`encode_module_interface` 只写名字/类型/默认值），
+> 导入方的 `field_index` 就是编码列表里的位置、解码端 `base_fields` 留 0 按收到顺序压平；只要「导出顺序 = 运行期布局顺序」两边就一致（已在 `module.cpp` 注释里写明）。module format 14 不动。
+>
+> **语义修复实证**：`ThreadingUDPServer(ThreadingMixIn, UDPServer)` 之前 `s.sock`/`s.bind()` 得到 `9 0`（读到错误槽），现在 `9 9` 与 CPython 一致；
+> `Combo(Mixin, State)` 输出 `11 m`（改前要么被拒要么读错）。
+>
+> **语料**：标准库默认口径 **496 → 496**（没有净增——被拒的 5 个文件里 2 个转为「既有的其他错误」、3 个是**两个状态基类**的字段交错，前缀选择原理上解决不了，要 adjustor thunk）；
+> 本仓库 **898 个 `.py`：780 → 780，零新拒绝**。六形态回归 `tests/run/mi_layout_base.py` 与 CPython 逐字节一致；`04_containers`/`09_class`/`19_comprehension` 的 asm 与 master 逐字节相同。
+>
+> **判负**：「两个状态基类、字段交错」的形态（`xmlrpc/server.py`、`urllib/request.py`、`xml/dom/expatbuilder.py`）没有硬上，
+> 需要 adjustor thunk（[mi-layout.md](mi-layout.md) §3 B 的另一半），留作后续。
+>
+> 闸门：套件 **498** / difftest **468** / check_size **PASS** / ctest 9/9。
 ## [0.504] - 2026-11-25
 
 > fix(runtime)：**修掉保守 GC 模式的 heap-use-after-free**（3.10）。根因不是「收集触发点」，也不是「没扫寄存器」，
