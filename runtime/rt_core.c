@@ -1466,6 +1466,13 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h->prev = NULL;
         h->next = NULL;
         h->marked = PYADAMAS_RC_UNTRACKED;
+    } else if (kind == PYADAMAS_RC_STR && gc_untracked_leaves) {
+        // exact-RC 默认模式：str 是叶子（与 rc_leaf_untracked 的判定一致），
+        // 直接置 UNTRACKED。rc_link 里必然走到同一分支，这里内联掉那次
+        // 函数调用 —— 40_map / str(int) / repr / format 分配字符串数千次。
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PYADAMAS_RC_UNTRACKED;
     } else {
         h->marked = 0;
         rc_link(h);
@@ -1502,7 +1509,12 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // pa_tuple_new_filled）都显式写满全部 6 个字段；data 缓冲只读
     // [0, len)，append/filled 先写后读，池块里的陈旧内容永远不会被
     // 读到。省掉每次列表/元组分配的一次 memset（queue_sim 热路径）。
-    if (kind != PYADAMAS_RC_LIST) memset(p, 0, (size_t)alloc_size);
+    // STR 同样不清零：str_alloc_raw 显式写 pub/len/chash/data，
+    // SSO 缓冲写到 data[len]（含结尾 NUL），之后只按 len 读；堆串路径
+    // 还额外写 hash。短串分配在 str(int)/repr/format 上极热，省掉一次
+    // memset@plt 调用。
+    if (kind != PYADAMAS_RC_LIST && kind != PYADAMAS_RC_STR)
+        memset(p, 0, (size_t)alloc_size);
     // dict 池命中：把寄存的缓冲写回 payload（memset 刚清零）。entries
     // 非空是 pa_dict_new 识别「带缓冲池命中」的判据；新块 memset 后恒空。
     if (kind == PYADAMAS_RC_DICT && pooled && dict_last_got.entries) {

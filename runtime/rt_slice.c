@@ -315,10 +315,14 @@ PyAdamasStr* pa_bytes_from_list(PyAdamasList* items) {
     return str_seal_n(s, n);  /* bytes：pub == 字节数 */
 }
 
-/* bytes(n)：n 个零字节。rc_alloc 已把 payload 清零。 */
+/* bytes(n)：n 个零字节。 */
 PyAdamasStr* pa_bytes_zeros(int64_t n) {
     if (n <= 0) return str_new_bytes("", 0);
-    return str_seal_n(str_alloc_raw(n), n);
+    PyAdamasStr* s = str_alloc_raw(n);
+    /* str_alloc_raw 不清零 payload（契约：调用方负责填满字符区），
+       零字节缓冲区在这里显式清零。 */
+    memset((char*)s->data, 0, (size_t)n);
+    return str_seal_n(s, n);
 }
 
 /* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
