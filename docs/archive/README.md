@@ -13,6 +13,7 @@
 
 | 文件 | 内容 | 来源 |
 |---|---|---|
+| [changelog-0.100-0.199.md](changelog-0.100-0.199.md) | 0.100–0.199 的变更记录 | 原 `CHANGELOG.md` |
 | [changelog-0.41-0.99.md](changelog-0.41-0.99.md) | 0.41–0.99 的变更记录 | 原 `CHANGELOG.md` |
 | [changelog-0.40.md](changelog-0.40.md) | 0.40 及更早的变更记录 | 原 `docs/changelog-archive.md` |
 | [roadmap-0.6-0.38.md](roadmap-0.6-0.38.md) | 0.6–0.38 的路线图逐版本记录 | 原 `docs/roadmap.md` |

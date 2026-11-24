@@ -45,6 +45,7 @@ set(PYADAMAS_SOURCES
   src/syntax/expr.cpp
   src/syntax/match.cpp
   src/typecheck/typecheck.cpp
+  src/typecheck/annotation.cpp
   src/typecheck/stmt.cpp
   src/typecheck/stmt_forms.cpp
   src/typecheck/expr.cpp
@@ -160,6 +161,7 @@ src/opt/intloop.cpp
   src/cimport/cimport.cpp
   src/cimport/cdecl.cpp
   src/cimport/cdecl_parse.cpp
+  src/cimport/cdecl_eval.cpp
   src/backend/eh_emit.cpp
 )
 

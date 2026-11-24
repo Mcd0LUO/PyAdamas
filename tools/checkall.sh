@@ -351,25 +351,38 @@ gate_bench_modes() {
     return 0
 }
 
-gate_simd() {
-    local t0 rc=0 n bin val
+# [6] 向量化自检（0.483）：原来的「SIMD 变体」闸门跑 PYADAMAS_SIMD=1，而那个开关在
+# 0.480 已随特化模板整段删除（设了就 rc=2）——闸门会红在一个「设计上已不存在」的变体上。
+# 换成验「通用向量化真的生效」：同一程序默认 vs PYADAMAS_VECT=0，默认的指令数必须显著更少。
+# 只打印量级，失败才算红；它同时是 PYADAMAS_VECT 默认值（开）的回归。
+gate_vect() {
+    local t0 rc=0 n on off b_on b_off
     t0=$(timer_start)
-    echo "──── [6] SIMD 变体指令数（PYADAMAS_SIMD=1，仅打印）────"
+    echo "──── [6] 向量化自检（默认 vs PYADAMAS_VECT=0）────"
+    insns() {
+        MALLOC_ARENA_MAX=1 taskset -c "$PIN_CPU" perf stat -e instructions:u -x, -- "$1" \
+            >/dev/null 2>"$PERF_TMP/v.perf" || return 1
+        awk -F, '$3 == "instructions:u" {print $1; exit}' "$PERF_TMP/v.perf"
+    }
     for n in matmul spectral_norm; do
-        bin="$PERF_TMP/simd-$n"
-        if ! PYADAMAS_SIMD=1 "$BIN" build --rebuild -O2 -o "$bin" "$ROOT/bench/compare/$n.py" >/dev/null 2>&1; then
-            echo "  $n: 编译失败"; rc=1; continue
+        b_on="$PERF_TMP/vect-on-$n"; b_off="$PERF_TMP/vect-off-$n"
+        if ! "$BIN" build --rebuild -O2 -o "$b_on" "$ROOT/bench/compare/$n.py" >/dev/null 2>&1; then
+            echo "  $n: 默认编译失败"; rc=1; continue
         fi
-        if ! MALLOC_ARENA_MAX=1 taskset -c "$PIN_CPU" perf stat -e instructions:u -x, -- "$bin" >/dev/null 2>"$PERF_TMP/simd-$n.perf"; then
-            echo "  $n: perf 失败"; rc=1; continue
+        if ! PYADAMAS_VECT=0 "$BIN" build --rebuild -O2 -o "$b_off" "$ROOT/bench/compare/$n.py" >/dev/null 2>&1; then
+            echo "  $n: VECT=0 编译失败"; rc=1; continue
         fi
-        val=$(awk -F, '$3 == "instructions:u" {print $1; exit}' "$PERF_TMP/simd-$n.perf")
-        echo "  $n (SIMD=1): $val instructions"
-        case "$val" in
-            ''|*[!0-9]*) echo "  $n: 指令数非法"; rc=1 ;;
+        on=$(insns "$b_on") || { echo "  $n: perf 失败"; rc=1; continue; }
+        off=$(insns "$b_off") || { echo "  $n: perf 失败"; rc=1; continue; }
+        case "$on$off" in
+            ''|*[!0-9]*) echo "  $n: 指令数非法"; rc=1; continue ;;
         esac
+        echo "  $n: 默认 $on / VECT=0 $off（省 $(( (off - on) * 100 / off ))%）"
+        if [ "$on" -ge "$off" ]; then
+            echo "  $n: 向量化未生效（默认不比关掉少）"; rc=1
+        fi
     done
-    record "simd-variants" "$(timer_end "$t0")" "$rc" "打印量级" "PYADAMAS_SIMD=1 $BIN build --rebuild -O2 -o /tmp/simd_mm bench/compare/matmul.py"
+    record "vect-variants" "$(timer_end "$t0")" "$rc" "默认 vs VECT=0" "PYADAMAS_VECT=0 $BIN build --rebuild -O2 -o /tmp/v0 bench/compare/matmul.py"
     return 0
 }
 
@@ -426,7 +439,7 @@ case "$MODE" in
         gate_difftest
         gate_size
         gate_bench_modes
-        gate_simd
+        gate_vect
         gate_git
         compare_perf
         ;;

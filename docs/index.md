@@ -43,10 +43,38 @@
 [heap-slot-promotion.md](heap-slot-promotion.md)、[ivsr-negative-result.md](ivsr-negative-result.md) 是**有意保留的负面结论**
 （方案未落地或已回退），不要当成待办去「补完」。
 
-变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.41–0.99 归档在
+变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.100–0.199 归档在
+[archive/changelog-0.100-0.199.md](archive/changelog-0.100-0.199.md)，0.41–0.99 见
 [archive/changelog-0.41-0.99.md](archive/changelog-0.41-0.99.md)，0.40 及更早见
 [archive/changelog-0.40.md](archive/changelog-0.40.md)），参与开发的规矩见
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+
+### 其余设计与落地记录（按主题，避免主表过长）
+
+- **数值与表示**：[numeric-types-design.md](numeric-types-design.md)（定宽整数 / 类型标签的设计）、
+  [numeric-types-landing.md](numeric-types-landing.md)（P1 定宽整数落地）、
+  [type-tags-landing.md](type-tags-landing.md)（P2 unknown 运行期标签）、
+  [p3-tagged-union-design.md](p3-tagged-union-design.md)、[p3-1b-landing.md](p3-1b-landing.md)、
+  [p2-container-tag-eval.md](p2-container-tag-eval.md)、[unknown-repr-design.md](unknown-repr-design.md)
+- **后端与优化**：[borrow-loop-design.md](borrow-loop-design.md)（借用细化）、
+  [ra-opt-design.md](ra-opt-design.md)（callee-saved 提升增强）、[intloop-design.md](intloop-design.md)、
+  [inline-devirt-design.md](inline-devirt-design.md)、[simd-vectorization-design.md](simd-vectorization-design.md)
+  （特化模板，0.480 已删）、[vect-planner-design.md](vect-planner-design.md)、
+  [vectorization-generalization.md](vectorization-generalization.md)
+- **并发与运行时**：[concurrent-cycle-gc-design.md](concurrent-cycle-gc-design.md)（B 路线设计）、
+  [gc-concurrent-mark-design.md](gc-concurrent-mark-design.md)（阶段 1 落地）、
+  [go-concurrent-gc-study.md](go-concurrent-gc-study.md)、[vthread-design.md](vthread-design.md)（虚拟线程原型）、
+  [memory-debug.md](memory-debug.md)（ASan/canary/guard 实战）、[ir-verify.md](ir-verify.md)
+- **构建 / 速度 / 模块化**：[compile-speed.md](compile-speed.md)、[compile-speed-throughput.md](compile-speed-throughput.md)、
+  [modularization.md](modularization.md)
+- **互操作与生态**：[cpybridge-design.md](cpybridge-design.md)（CPython 桥，仅作逃生口）、
+  [cffi-design.md](cffi-design.md)、[package-management-design.md](package-management-design.md)、
+  [lang-gaps-landing.md](lang-gaps-landing.md)、[native-stdlib-cookbook.md](native-stdlib-cookbook.md)、
+  [stdlib-batch1.md](stdlib-batch1.md) ～ [stdlib-batch7.md](stdlib-batch7.md)
+- **语料 / 流程 / 历史**：[daily-corpus.md](daily-corpus.md)（日常语料口径）、
+  [iteration-roadmap.md](iteration-roadmap.md)、[optimization-roadmap.md](optimization-roadmap.md)、
+  [nightly-roadmap.md](nightly-roadmap.md)、[overnight-plan.md](overnight-plan.md)、
+  [HANDOFF.md](HANDOFF.md)（当前交接快照）、[strfix-rc-early-return.md](strfix-rc-early-return.md)
 
 ## 按角色选读
 

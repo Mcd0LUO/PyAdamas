@@ -63,12 +63,12 @@
 | 3.6 | ~~**包管理 P0 切片**~~ **P0-a 已完成（0.473）** | `pyadamas.toml`（最小 TOML 子集）/ `pyadamas.lock`（SHA-256 树哈希）/ `resolve` / `--locked` / 锁派生 ModuleMap 全部落地，`tests/pkg` 56 项 + ctest | 六条验收全过（见 [package-management-design.md](package-management-design.md) 附录「落地记录（P0-a）」）。**P0-b 剩余**：版本进 mangling 与接口坐标（需一次 ABI bump，会改符号/汇编，单独一版）、`check --imports` 接包映射、本地模块与包同名报冲突、provider 侧 `modules` 声明 |
 | 3.7 | ~~**修 `from pkg import sub` 后调用子模块函数的 SIGSEGV**~~ **已修（0.477）**：根因是子模块别名登记时漏发 `import.module`，init 未跑 → 函数全局为 0 → `call 0`；修法是登记前 `ensure_module_init(child)`。回归 `tests/modules/from_pkg_sub/` | 最小复现：`pkg/__init__.py` + `pkg/sub.py`（`def hi() -> int: return 7`），`from pkg import sub; print(sub.hi())` → **rc=139**；而 `import pkg.sub as s; s.hi()`、`from pkg.sub import hi; hi()`、`from pkg import sub`（不调用）都正常。0.473 之前的基线同样崩 | 先加 `tests/run` 回归（当前会崩，先写成 fail 用例或等修复后加），ASan 下定位 `src/lower/import.cpp` 的绑定/降级路径；修复后套件与 difftest 全绿 |
 
-## 4. P3 —— 工程债（穿插做，不单独占版本）
+## 4. P3 —— 工程债（0.483 结账）
 
-1. **拆两个超限文件**：`typecheck/typecheck.cpp`（1227）、`cimport/cdecl_parse.cpp`（1271）。规矩是清单只能删不能加。
-2. **CHANGELOG 轮转**：0.100–0.199 归档到 `docs/archive/`，同步 index 与交叉链接。
-3. **文档地图扩容**：`docs/` 下已有 60+ 篇，地图只挂了约 30 篇；`numeric-types-landing.md`、`type-tags-landing.md`、`borrow-loop-design.md`、`compile-speed.md` 等仍未挂（`big-landing`/`testing`/`package-management-design` 已补）。
-4. **`tools/checkall.sh` 的 git 闸门**：多代理会话默认只提示（`CHECKALL_STRICT_GIT=0`），提交前应显式跑一次 `CHECKALL_STRICT_GIT=1`。
+1. ~~拆两个超限文件~~ **已完成（0.483）**：`typecheck/typecheck.cpp` 1227 → 1017（注解解析拆到 `typecheck/annotation.cpp`）、`cimport/cdecl_parse.cpp` 1271 → 1116（常量表达式求值拆到 `cimport/cdecl_eval.cpp`）。**`tests/check_size.sh` 首次全绿**（全仓库 0 超限，`ALLOW_FILES` 仍为空）。12 基准 `instructions:u` 与 0.482 逐项 ±0.00%，证明拆 TU 不改代码生成。
+2. ~~CHANGELOG 轮转~~ **已完成（0.483）**：0.100–0.199（97 版本 / 2183 行）→ `docs/archive/changelog-0.100-0.199.md`；根 CHANGELOG 7753 行 / 282 版本，末尾留指针，`archive/README.md` 与 `docs/index.md` 同步。
+3. ~~文档地图扩容~~ **已完成（0.483）**：主表之外新增「其余设计与落地记录（按主题）」，把此前未挂的 30+ 篇按六个主题分组挂上；新增开关登记表 `experiment-switches.md` 也在地图里。
+4. **提交前跑 `CHECKALL_STRICT_GIT=1`**：作为流程约定保留（多代理会话默认只提示）。0.483 提交前已按此验证工作区干净；闸门本身不改代码。
 
 ## 5. 明确不做
 

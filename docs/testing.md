@@ -18,7 +18,7 @@ bash tools/checkall.sh --write-baseline  # !! 人工确认后才用：覆盖基�
 
 | 模式 | 闸门 | 用途 |
 |---|---|---|
-| --full（默认） | 1 增量构建 + 2 套件 + 3 difftest + 4 check_size + 5 12基准x3档输出 + 6 SIMD 变体 + 7 git 状态 + 8 性能基线比对（LSP 冒烟 0.469 起已迁出） | 提交前 / CI |
+| --full（默认） | 1 增量构建 + 2 套件 + 3 difftest + 4 check_size + 5 12基准x3档输出 + 6 向量化自检（默认 vs `VECT=0`，原来的 SIMD 变体闸门随 0.480 删特化改成这个）+ 7 git 状态 + 8 性能基线比对（LSP 冒烟 0.469 起已迁出） | 提交前 / CI |
 | --quick | 2 套件 + 3 difftest + 4 check_size（可用 CHECKALL_SKIP_BUILD=1 跳过构建） | 日常快速回归 |
 | --perf | 只跑性能基线的采集与比对 | 排查性能变化 / 验证告警 |
 
