@@ -28,40 +28,51 @@ def _is_safe(c: str) -> bool:
 
 
 def quote(s: str) -> str:
-    """按 CPython shlex.quote 的规则给单个词加 shell 引号。"""
+    """按 CPython shlex.quote 的规则给单个词加 shell 引号。
+
+    缓冲用 list[str] + join：原先逐字符 `out = out + s[i]` 是 O(n) 次分配
+    的二次曲线（n=100k 时约 0.19s）。
+    """
     if s == "":
         return "''"
+    n: int = len(s)
     safe: bool = True
     i: int = 0
-    while i < len(s):
+    while i < n:
         if not _is_safe(s[i]):
             safe = False
             break
         i += 1
     if safe:
         return s
-    out: str = "'"
+    parts: list[str] = ["'"]
     i = 0
-    while i < len(s):
-        if s[i] == "'":
+    while i < n:
+        c: str = s[i]
+        if c == "'":
             # CPython 的写法是 '"'"，即 单引号-双引号-单引号-双引号-单引号。
-            out = out + "'" + chr(34) + "'" + chr(34) + "'"
+            parts.append("'" + chr(34) + "'" + chr(34) + "'")
         else:
-            out = out + s[i]
+            parts.append(c)
         i += 1
-    return out + "'"
+    parts.append("'")
+    return "".join(parts)
 
 
 def join(parts: list[str]) -> str:
-    """把词列表拼成可用 split 还原的 shell 命令行字符串。"""
-    out: str = ""
+    """把词列表拼成可用 split 还原的 shell 命令行字符串。
+
+    缓冲用 list[str] + join（逐次 `out = out + ...` 是二次曲线）。
+    """
+    out: list[str] = []
     i: int = 0
-    while i < len(parts):
+    n: int = len(parts)
+    while i < n:
         if i > 0:
-            out = out + " "
-        out = out + quote(parts[i])
+            out.append(" ")
+        out.append(quote(parts[i]))
         i += 1
-    return out
+    return "".join(out)
 
 
 def split(s: str) -> list[str]:

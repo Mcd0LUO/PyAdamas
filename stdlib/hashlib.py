@@ -91,11 +91,13 @@ def _pad(data: list[int], nbytes: int, little: bool) -> list[int]:
 
 
 def _hexdigest(digest: bytes) -> str:
+    """摘要转小写 hex（list[str] + join；逐字节拼接是二次曲线）。"""
     chars = "0123456789abcdef"
-    out = ""
+    parts: list[str] = []
     for b in digest:
-        out = out + chars[b >> 4] + chars[b & 15]
-    return out
+        parts.append(chars[b >> 4])
+        parts.append(chars[b & 15])
+    return "".join(parts)
 
 
 class MD5:

@@ -176,10 +176,8 @@ def _decompress_members(data: bytes, detailed: bool) -> bytes:
         data = data[k:]
     if len(parts) == 1:
         return parts[0]
-    result = b""
-    for p in parts:
-        result = result + p
-    return result
+    # b"".join 一次分配；此前逐段 `result = result + p` 是二次曲线
+    return b"".join(parts)
 
 
 def decompress(data: bytes) -> bytes:
