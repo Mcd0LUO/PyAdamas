@@ -71,6 +71,10 @@ difftest 是提速主力（172s → 19s，9 倍）；套件只有 1.4 倍（单�
 570/571；re 锚点修复又占了 573），每次都要重命名并改文档引用，收益为零。
 `PYADAMAS_TEST_FILTER` 按 basename glob 匹配，名字本身就能当过滤器，不需要序号。
 
+两条命名约束（工具按名字分支，别踩）：
+- **不要以 `f<数字>` 开头**（`f80_…` 是反例组的命名约定，`tools/difftest.sh` 会跳过）；
+- 不要叫 `180_codepoint_perf` 这类打印 wall-clock 的名字——difftest 会跳过它们。
+
 ## 并发安全（多人同时跑时必读）
 
 1. difftest 必须独占：它用共享的 /tmp/pyadamas-diff-cases 和 modcache。两个 difftest 并发会互相污染，出假 timeout。checkall.sh 已内置 flock /tmp/pyadamas-difftest.lock，不需要手动加。

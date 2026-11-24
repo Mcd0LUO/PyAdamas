@@ -83,10 +83,12 @@ LIST=$WORK/list.txt
 i=0
 for f in tests/run/*.py; do
     name=$(basename "$f" .py)
-    # f*：反例组（预期编译失败）；180_codepoint_perf 打印 wall-clock
-# 时间，-O0/-O2 计时天然不同，不适合做输出比对。233_json_perf 只钉
-# 正确性（不打印时间），参与差分。
-case "$name" in f*) continue ;; 180_codepoint_perf) continue ;; esac
+    # f<数字>*：反例组命名（预期编译失败；真正的反例都在 tests/fail/，
+    # 这里只是防御）。**不能写成 f***：2026-11-25 起新增用例不再编号，
+    # 描述性名字可能以 f 开头（fnmatch_anchor 就被误跳过过一次）。
+    # 180_codepoint_perf 打印 wall-clock 时间，-O0/-O2 计时天然不同，不适合
+    # 做输出比对。233_json_perf 只钉正确性（不打印时间），参与差分。
+case "$name" in f[0-9]*) continue ;; 180_codepoint_perf) continue ;; esac
     match "$f" || continue
     i=$((i+1))
     printf '%s\t%s\n' "$i" "$f" >> "$LIST"
