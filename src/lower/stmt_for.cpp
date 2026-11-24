@@ -1100,12 +1100,30 @@ void Lowerer::lower_for_seq(For& f) {
                           pre.begin(), pre.end());
         }
     }
-    // 列表/元组按 0..len-1 遍历；循环体没有调用/del/切片赋值时
-    // 长度不会变，元素下标可以免检查。生成器帧可能跨 yield 挂起，
-    // 直接跳过。
+    // 列表/元组按 0..len-1 遍历，元素下标的边界检查可以免掉：
+    //   - 循环体无副作用：长度不会变，整个循环的守卫都成立；
+    //   - 有副作用：取元素紧跟在条件分支之后，中间只有循环自己的索引槽
+    //     读和一句空操作的 rc_cleanup（loop_mark 之后没有临时值）。此刻
+    //     i < len(seq) 刚被条件证明，用户代码还没有机会改容器；下一轮
+    //     条件会重读 len，与 CPython 迭代器的语义一致。
+    // 生成器帧可能跨 yield 挂起，直接跳过。
+    bool body_load_first = load_blk >= 0;
+    if (body_load_first) {
+        const auto& pre = st_->fn->blocks[static_cast<size_t>(load_blk)].insts;
+        for (size_t k = 0; k < load_pos && k < pre.size(); ++k) {
+            const Inst& p = pre[k];
+            const bool idx_load = p.op == IrOp::LoadSlot && p.idx == idx;
+            const bool noop_clean = p.op == IrOp::CallRt &&
+                                    static_cast<RtFn>(p.imm) == RtFn::RcCleanup;
+            if (!idx_load && !noop_clean) {
+                body_load_first = false;
+                break;
+            }
+        }
+    }
     if (opts_.opt_level >= 1 && load_blk >= 0 && !st_->is_generator &&
         (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
-        side_effect_seq_ == se_before_body) {
+        (side_effect_seq_ == se_before_body || body_load_first)) {
         auto& insts = st_->fn->blocks[load_blk].insts;
         if (load_pos < insts.size()) insts[load_pos].op = IrOp::IndexLoadUnchecked;
     }
