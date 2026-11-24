@@ -345,6 +345,12 @@ enum class RtFn : uint16_t {
     RandGRandint,      // (i64 a, i64 b) -> i64
     RandGChoice,       // (list*) -> i64（借用）
     RandGUniform,      // (f64 a, f64 b) -> f64
+    RandGNormalvariate,  // (f64 mu, f64 sigma) -> f64
+    RandGGammavariate,   // (f64 alpha, f64 beta) -> f64
+    RandGBetavariate,    // (f64 alpha, f64 beta) -> f64
+    RandGLognormvariate, // (f64 mu, f64 sigma) -> f64
+    RandGParetovariate,  // (f64 alpha) -> f64
+    RandGWeibullvariate, // (f64 alpha, f64 beta) -> f64
     RandGShuffle,      // (list*) -> void
     OsMkdir,           // (str* path) -> void
     OsRmdir,           // (str* path) -> void

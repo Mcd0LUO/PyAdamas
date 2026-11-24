@@ -994,6 +994,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeSleep:
         case RtFn::TimeLocaltime:
         case RtFn::TimeGmtime:
+        case RtFn::RandGParetovariate:
         case RtFn::AsyncTimeoutNew:
             gen_rt_f1(in);
             break;
@@ -1007,6 +1008,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MathRemainder:
         case RtFn::MathIsclose:
         case RtFn::RandGUniform:
+        case RtFn::RandGNormalvariate:
+        case RtFn::RandGGammavariate:
+        case RtFn::RandGBetavariate:
+        case RtFn::RandGLognormvariate:
+        case RtFn::RandGWeibullvariate:
             gen_rt_f2(in);
             break;
         case RtFn::MathFma:

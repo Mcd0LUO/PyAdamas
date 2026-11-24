@@ -1721,6 +1721,13 @@ int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k);
    小端字节），返回 bytes（+1）。 */
 PyAdamasStr* pa_random_randbytes(int64_t n);
 double pa_random_gauss(PyAdamasRandom* r, double mu, double sigma);
+/* 分布函数（0.515）：与 CPython 3.14 Lib/random.py 逐行一致，同种子逐字节相同。 */
+double pa_random_gnormalvariate(double mu, double sigma);
+double pa_random_ggammavariate(double alpha, double beta);
+double pa_random_gbetavariate(double alpha, double beta);
+double pa_random_glognormvariate(double mu, double sigma);
+double pa_random_gparetovariate(double alpha);
+double pa_random_gweibullvariate(double alpha, double beta);
 double pa_random_expovariate(PyAdamasRandom* r, double lambd);
 double pa_random_triangular(PyAdamasRandom* r, double low, double high, double mode);
 PyAdamasList* pa_random_sample(PyAdamasRandom* r, PyAdamasList* seq, int64_t k);
