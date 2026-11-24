@@ -95,11 +95,35 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
     const IRParam& selfp = st_->fn->params.front();
     VReg self = load_slot(selfp.slot, selfp.ty);
-    // 多继承（0.510）：super() 的 delta **不在调用点加** —— SuperVCall 的运行期
-    // 分派用这个 self 指针去查对象所属类（pa_super_lookup 读 vtable），挪了指针
-    // 就查不到（实测 `'super' object has no attribute`）。正确做法是给运行期
-    // 分派带一个 adjust 参数，或者让 super 走 vtable（槽里已经是 thunk）。
-    // 本轮的结论与证据见 docs/mi-layout.md；这里保持未调整。
+    // 多继承（0.510，方案 2）：super 的静态解法。declaring 是 MRO 里「owner 之后
+    // 第一个定义该方法的类」，编译期就能定；若它是带字段的非 layout 基类（块偏移
+    // > 0），直接在调用点把 self 挪到该块起点再**直调**它的真实实现。
+    // 不能走「先挪 self 再 SuperVCall」：运行期分派用 self 指针查对象所属类。
+    if (declaring && declaring != owner) {
+        int block = mi_block_offset(owner, declaring);
+        auto dcid = class_ids_.find(declaring);
+        if (block > 0 && dcid != class_ids_.end() && m->slot >= 0 &&
+            m->slot < static_cast<int>(mod_.classes[static_cast<size_t>(dcid->second)].vtable.size())) {
+            int tfidx = mod_.classes[static_cast<size_t>(dcid->second)].vtable[static_cast<size_t>(m->slot)];
+            if (tfidx >= 0 && tfidx < static_cast<int>(mod_.funcs.size()) &&
+                !mod_.funcs[static_cast<size_t>(tfidx)]->mi_thunk &&
+                mod_.funcs[static_cast<size_t>(tfidx)]->env_slot < 0) {
+                Inst ad;
+                ad.op = IrOp::Bin;
+                ad.bop = BinKind::Add;
+                ad.a = self;
+                ad.b = const_int(8 * block);
+                VReg adj = def(t_int(), std::move(ad));
+                Inst cd;
+                cd.op = IrOp::CallDirect;
+                cd.idx = Operand::func(tfidx);
+                cd.args.push_back(adj);
+                for (VReg av : args) cd.args.push_back(av);
+                TypePtr srt = m->call_sig->ret ? m->call_sig->ret : t_none();
+                return def_heap(srt, std::move(cd));
+            }
+        }
+    }
     Inst sv;
     sv.op = IrOp::SuperVCall;
     sv.a = self;
