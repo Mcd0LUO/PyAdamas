@@ -419,6 +419,8 @@ enum class RtFn : uint16_t {
     RegexFindAll,          // (regex*, str* text) -> list*
     RegexSubStr,           // (str* pat, str* repl, str* text, i64 count, i64 flags) -> str*
     RegexSub,              // (regex*, str* repl, str* text, i64 count) -> str*
+    RegexSubnStr,          // (str* pat, str* repl, str* text, i64 count, i64 flags) -> tuple*
+    RegexSubn,             // (regex*, str* repl, str* text, i64 count) -> tuple*
     RegexSubFn,            // (regex*, i64 closure, str* text, i64 count) -> str*
     RegexSplitStr,         // (str* pat, str* text, i64 maxsplit, i64 flags) -> list*
     RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*

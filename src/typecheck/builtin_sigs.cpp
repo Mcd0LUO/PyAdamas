@@ -516,6 +516,13 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
                {"count", pyadamas::t_int()},
                {"flags", pyadamas::t_int()}},
               2, pyadamas::t_str());
+        re_fn("subn",
+              {{"pattern", pyadamas::t_str()},
+               {"repl", pyadamas::t_str()},
+               {"string", pyadamas::t_str()},
+               {"count", pyadamas::t_int()},
+               {"flags", pyadamas::t_int()}},
+              2, pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::t_int()}));
         re_fn("split",
               {{"pattern", pyadamas::t_str()},
                {"string", pyadamas::t_str()},

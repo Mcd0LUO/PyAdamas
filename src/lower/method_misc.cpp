@@ -126,6 +126,18 @@ VReg Lowerer::lower_method_regex(Attribute& at, Call& c, VReg recv) {
         push_temp(l);
         return l;
     }
+    if (at.attr == "subn") {
+        if (c.args.size() < 2 || c.args.size() > 3) {
+            err(c.line, c.col, "subn() takes two or three arguments");
+            return const_none();
+        }
+        VReg repl = expr(*c.args[0]);
+        VReg text = expr(*c.args[1]);
+        VReg count = c.args.size() == 3 ? int_at(2) : const_int(0);
+        VReg t = call_runtime(RtFn::RegexSubn, mk_tuple({t_str(), t_int()}), {recv, repl, text, count});
+        push_temp(t);
+        return t;
+    }
     if (at.attr == "sub") {
         if (c.args.size() < 2 || c.args.size() > 3) {
             err(c.line, c.col, "sub() takes two or three arguments");

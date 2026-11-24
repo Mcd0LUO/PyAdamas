@@ -502,6 +502,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexFindAll: return "pa_re_findall";
         case RtFn::RegexSubStr: return "pa_re_sub_str";
         case RtFn::RegexSub: return "pa_re_sub";
+        case RtFn::RegexSubnStr: return "pa_re_subn_str";
+        case RtFn::RegexSubn: return "pa_re_subn";
         case RtFn::RegexSubFn: return "pa_re_sub_fn";
         case RtFn::RegexSplitStr: return "pa_re_split_str";
         case RtFn::RegexSplit: return "pa_re_split";

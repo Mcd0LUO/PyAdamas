@@ -909,6 +909,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::StrPercentFormat:
         case RtFn::RegexSearchStr:
         case RtFn::RegexSub:
+        case RtFn::RegexSubn:
+        case RtFn::RegexSubnStr:
         case RtFn::RegexSubFn:
         case RtFn::RegexSplitStr:
         case RtFn::ListSlice:
