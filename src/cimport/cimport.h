@@ -32,6 +32,8 @@ enum class CKind : uint8_t {
     BufF64,   // list[float] -> double*
     BufI64,   // list[int] -> long*
     BufBytes, // bytes -> uint8_t*
+    // 0.536：pa_buffer 的连续 data 指针（data 在对象 +8）。
+    BufBuffer,
     // P1 收尾：窄/无符号 C 类型，PyAdamas 侧映射到定宽 TyKind（i8/i16/
     // u8/u16/u64）。追加在末尾，既有枚举值不变。既有 int/int32/uint32
     // 仍映射到默认 int（改它们会动既有程序的提升语义，不做）。

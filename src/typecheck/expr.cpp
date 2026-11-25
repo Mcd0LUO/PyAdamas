@@ -1068,6 +1068,10 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("list index must be int, got '{}'", type_name(idx)));
                 return obj->sub[0];
+            case TyKind::Buffer:  // 0.536：连续内存按下标读写
+                if (!is_unknown(idx) && !is_int_like(idx))
+                    err(line, col, std::format("buffer index must be int, got '{}'", type_name(idx)));
+                return obj->sub.empty() ? t_unknown() : obj->sub[0];
             case TyKind::Range:
                 if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("range index must be int, got '{}'", type_name(idx)));

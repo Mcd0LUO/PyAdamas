@@ -105,6 +105,14 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 line("movq 16(%r10), %r10");
                 line("1:");
                 emit2("movq", "%r10", reg);
+            } else if (k == CKind::BufBuffer) {
+                // 0.536：pa_buffer 的 data 在 +8（{magic, data, len, elem_kind}）。
+                emit2("movq", src, "%r10");
+                line("testq %r10, %r10");
+                line("je 1f");
+                line("movq 8(%r10), %r10");
+                line("1:");
+                emit2("movq", "%r10", reg);
             } else if (k == CKind::BufBytes) {
                 // bytes 的 data 在 +24（PyAdamasStr 的第四个机器字）。
                 emit2("movq", src, "%r10");
@@ -287,6 +295,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
             } else {
                 switch (ex.ret) {
                     case CKind::None:
+                    case CKind::BufBuffer:  // 0.536：buffer 只做实参，不能作返回类型
                         break;
                     case CKind::Float:
                         emit2("movsd", "%xmm0", dst);

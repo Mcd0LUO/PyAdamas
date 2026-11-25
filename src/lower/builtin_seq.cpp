@@ -20,6 +20,9 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         if (t && t->kind == TyKind::Deque) {
             return call_runtime(RtFn::DequeLen, t_int(), {v});
         }
+        if (t && t->kind == TyKind::Buffer) {  // 0.536：元素个数
+            return call_runtime(RtFn::BufferLen, t_int(), {v});
+        }
         if (t && t->kind == TyKind::Class) {
             err(c.line, c.col,
                 std::format("len() of '{}' which has no __len__",
@@ -129,6 +132,21 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         return const_none();
     }
 
+    // 0.536：连续内存缓冲区。`buffer(n)` = float64，`buffer_i32/f32(n)` = 32 位。
+    if (name == "buffer" || name == "buffer_i32" || name == "buffer_f32") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, std::format("{}() takes exactly 1 argument", name));
+            return const_none();
+        }
+        VReg n = expr(*c.args[0]);
+        int64_t kind = name == "buffer_i32" ? 1 : (name == "buffer_f32" ? 2 : 0);
+        TypePtr bt = mk_buffer(name == "buffer_i32" ? t_int() : t_float());
+        // 0.537（f32 方案①）：静态元素宽度记在 celem 上，32 位 buffer 只能传给
+        // 裸 `ptr`（不能冒充 ptr[float]/ptr[int]，否则按 8 字节步长读会越界）。
+        bt->celem = name == "buffer" ? CKind::Float
+                    : (name == "buffer_f32" ? CKind::Float32 : CKind::Int32);
+        return call_runtime(RtFn::BufferNew, bt, {n, const_int(kind)});
+    }
     if (name == "range") {
         if (c.args.empty() || c.args.size() > 3) {
             err(c.line, c.col, "range() takes 1 to 3 arguments");

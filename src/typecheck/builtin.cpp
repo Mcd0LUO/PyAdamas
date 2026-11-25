@@ -133,13 +133,33 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     std::format("sleep() expects milliseconds (int), got '{}'", type_name(a[0])));
             return t_none();
         }
+        // 0.536：连续内存缓冲区（RC 管理，见 runtime/rt_buffer.c）。`buffer(n)`
+        // 是 float64；`buffer_i32(n)` / `buffer_f32(n)` 是 32 位宽度。
+        if (n == "buffer" || n == "buffer_i32" || n == "buffer_f32") {
+            if (a.size() != 1)
+                {
+                TypePtr b = mk_buffer(n == "buffer_i32" ? t_int() : t_float());
+                b->celem = n == "buffer" ? CKind::Float
+                          : (n == "buffer_f32" ? CKind::Float32 : CKind::Int32);
+                return b;
+            }
+            if (!is_unknown(a[0]) && !is_int_like(a[0]))
+                err(c.line, c.col,
+                    std::format("'{}' size must be int, got '{}'", n, type_name(a[0])));
+            {
+                TypePtr b = mk_buffer(n == "buffer_i32" ? t_int() : t_float());
+                b->celem = n == "buffer" ? CKind::Float
+                          : (n == "buffer_f32" ? CKind::Float32 : CKind::Int32);
+                return b;
+            }
+        }
         if (n == "len") {
             if (a.size() != 1) return t_int();
             if (!is_unknown(a[0]) && a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&
                 a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Dict && a[0]->kind != TyKind::Tuple &&
                 a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Range &&
                 a[0]->kind != TyKind::Class && a[0]->kind != TyKind::Deque &&
-                a[0]->kind != TyKind::StructTime)
+                a[0]->kind != TyKind::StructTime && a[0]->kind != TyKind::Buffer)
                 err(c.line, c.col,
                     std::format("object of type '{}' has no len()", type_name(a[0])));
             return t_int();

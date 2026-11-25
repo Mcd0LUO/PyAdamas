@@ -44,6 +44,7 @@ enum class TyKind : uint8_t {
     Bytes,  // b"..."：运行时和 str 同一套表示，类型上区分
     List,
     Range,   // range 对象：惰性序列，sub[0] 是元素类型（int）
+    Buffer,  // 0.536：RC 管理的连续内存（runtime pa_buffer）；sub[0] 是元素类型
     Set,
     Dict,
     Tuple,
@@ -844,6 +845,11 @@ inline TypePtr mk_deque(TypePtr e) {
     t->sub.push_back(std::move(e));
     return t;
 }
+inline TypePtr mk_buffer(TypePtr e) {  // 0.536：连续内存（float64/int64/i32/f32）
+    auto t = new_ty(TyKind::Buffer);
+    t->sub.push_back(std::move(e));
+    return t;
+}
 inline TypePtr mk_range(TypePtr e) {
     auto t = new_ty(TyKind::Range);
     t->sub.push_back(std::move(e));
@@ -903,6 +909,7 @@ inline TypePtr ckind_type(CKind k) {
         case CKind::BufF64:
         case CKind::BufI64:
         case CKind::BufBytes:
+        case CKind::BufBuffer:
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32: return t_int();

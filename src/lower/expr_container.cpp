@@ -30,6 +30,19 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         return call_runtime(RtFn::ListGet, t_int(), {obj, si});
     }
 
+    // 0.536：连续内存缓冲区。只支持下标；切片明确报错，不静默降级。
+    if (ot && ot->kind == TyKind::Buffer) {
+        if (s.slice->kind == ExprKind::Slice) {
+            err(s.line, s.col, "buffer does not support slicing");
+            return const_none();
+        }
+        VReg si = coerce(expr(*s.slice), tc_.type_of(s.slice.get()), t_int());
+        TypePtr et = ot->sub.empty() ? t_float() : ot->sub[0];
+        if (et && et->kind == TyKind::Float)
+            return call_runtime(RtFn::BufferGetF64, t_float(), {obj, si});
+        return call_runtime(RtFn::BufferGetI64, t_int(), {obj, si});
+    }
+
     if (s.slice->kind == ExprKind::Slice) {
         auto& sl = static_cast<SliceExpr&>(*s.slice);
         constexpr int64_t kNone = std::numeric_limits<int64_t>::min();

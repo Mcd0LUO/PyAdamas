@@ -765,9 +765,12 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
                 else if (e == TyKind::Int) k = CKind::BufI64;
             } else if (aty->kind == TyKind::Bytes) {
                 k = CKind::BufBytes;
+            } else if (aty->kind == TyKind::Buffer) {
+                k = CKind::BufBuffer;
             }
         }
-        if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes) {
+        if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes ||
+            k == CKind::BufBuffer) {
             cargs.push_back(static_cast<uint8_t>(k));
             args.push_back(v);
             continue;

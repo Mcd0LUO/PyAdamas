@@ -1,0 +1,6 @@
+# 0.536：buffer ↔ C 连续内存互操作
+cmodule("cbuflib")
+link("c")
+
+def memset(p: ptr[float], v: int, n: int) -> ptr[float]: pass
+def memcpy(dst: ptr[float], src: ptr[float], n: int) -> ptr[float]: pass

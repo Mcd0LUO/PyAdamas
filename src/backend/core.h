@@ -467,6 +467,7 @@
         void gen_rt_f3(const Inst& in);
         void gen_rt_i1f1(const Inst& in);
         void gen_rt_i1f2(const Inst& in);
+        void gen_rt_i2f1(const Inst& in);  // (int, int, double)
         void gen_rt_i1f3(const Inst& in);
         void gen_rt_f1i1(const Inst& in);
         void gen_rt_i4opt5(const Inst& in);

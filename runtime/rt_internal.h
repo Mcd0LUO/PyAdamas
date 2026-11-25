@@ -404,6 +404,10 @@ enum {
        同一套路（探针 + 头 kind）。payload：JSONNULL 不用；JSONBOOL 存 0/1。 */
     PYADAMAS_RC_JSONNULL = 10,
     PYADAMAS_RC_JSONBOOL = 11,
+    /* 0.536（buf 阶段 1）：RC 管理的连续内存。payload = {magic, data, len,
+       elem_kind}；data 用 malloc/calloc 分配、RC 归零时 free。无堆出边
+       （叶子），可进 GC 根、不参与环（本身不成环）。见 runtime/rt_buffer.c。 */
+    PYADAMAS_RC_BUFFER = 12,
 };
 
 typedef struct PyAdamasRc {
@@ -572,6 +576,18 @@ PyAdamasStr* pa_big_str(PyAdamasBig* a);         /* 十进制（repr 同形） *
 PyAdamasStr* pa_big_to_base(PyAdamasBig* a, int64_t base);  /* 2/8/10/16 */
 PyAdamasStr* pa_big_fmt(PyAdamasBig* a, PyAdamasStr* spec); /* format()（rt_format.c） */
 
+/* 0.536（buf 阶段 1）：RC 管理的连续内存。elem_kind：0=8 字节标量，
+   1=int32，2=float32。返回的对象由 RC 管理，不需要（也不能）手工 free。 */
+void* pa_buffer_new(int64_t n, int64_t elem_kind);
+void* pa_buffer_data(void* p);
+/* GC 清扫路径：只释放 data，不触碰 RC 头。 */
+void pa_buffer_release_data(void* p);
+int64_t pa_buffer_len(void* p);
+int64_t pa_buffer_elem_kind(void* p);
+int64_t pa_buffer_get_i64(void* p, int64_t i);
+void pa_buffer_set_i64(void* p, int64_t i, int64_t v);
+double pa_buffer_get_f64(void* p, int64_t i);
+void pa_buffer_set_f64(void* p, int64_t i, double v);
 PyAdamasComplex* pa_complex_new(double re, double im);
 PyAdamasComplex* pa_complex_add(PyAdamasComplex* a, PyAdamasComplex* b);
 PyAdamasComplex* pa_complex_sub(PyAdamasComplex* a, PyAdamasComplex* b);

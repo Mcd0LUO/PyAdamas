@@ -312,6 +312,13 @@ void AsmGen::gen_rt_i1f1(const Inst& in) {
         emit_arg(1, true, 0, src_mop(in.args[1]));
     }
 
+// (int, int, double)：0.537 buffer 写入用 —— 前两个走整型寄存器，第三个走 xmm0。
+void AsmGen::gen_rt_i2f1(const Inst& in) {
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 1, src_mop(in.args[1]));
+        emit_arg(2, true, 0, src_mop(in.args[2]));
+    }
+
 void AsmGen::gen_rt_i1f2(const Inst& in) {
         emit_arg(0, false, 0, src_mop(in.args[0]));
         emit_arg(1, true, 0, src_mop(in.args[1]));
@@ -616,6 +623,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DequePop:
         case RtFn::DequePopleft:
         case RtFn::DequeLen:
+        case RtFn::BufferLen:
+        case RtFn::BufferData:
         case RtFn::DequeMaxlen:
         case RtFn::DequeClear:
         case RtFn::DequeToList:
@@ -800,6 +809,15 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MethodCall0:        // P4：(obj, method)
             gen_rt_i2(in);
             break;
+        case RtFn::BufferGetI64:       // 0.536：(buffer*, i64 i)
+        case RtFn::BufferGetF64:
+            gen_rt_i2(in);
+            break;
+        case RtFn::BufferSetF64: {     // 0.537：(buffer*, i64 i, f64 v)
+            gen_rt_i2f1(in);
+            break;
+        }
+            break;
         case RtFn::FileSeek:
         case RtFn::RegexSearch:
         case RtFn::RegexFindAllGroupsStr:
@@ -811,6 +829,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListSet:
         case RtFn::ListInsert:   /* 0.303：(list*, i, v, heap) */
         case RtFn::DictSet:
+        case RtFn::BufferNew:
         case RtFn::ListContains:
         case RtFn::ListContainsI64:
         case RtFn::ListContainsStr:
@@ -865,6 +884,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DateNew:
         case RtFn::BigPowMod:    /* (big*, big*, big*) */
         case RtFn::ListAppend:   /* (list*, v, heap) */
+        case RtFn::BufferSetI64: /* 0.536：(buffer*, i64 i, v) */
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
         case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
         // P3 tag 版（IR 实参 {op,a,b}）：gen_any_tagged 整段发射。

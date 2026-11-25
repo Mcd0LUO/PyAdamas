@@ -114,6 +114,19 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 if (elem == CKind::Int) return e == TyKind::Int ? 1 : -1;
                 return -1;
             }
+            // 0.536：pa_buffer 的连续内存同样按元素类型匹配（float64/i32/f32）。
+            // 无类型 ptr 直接接受；宽度不匹配按 -1 报错，不静默重解释。
+            if (ty->kind == TyKind::Buffer) {
+                if (opaque) return 1;
+                if (ty->sub.empty() || !ty->sub[0]) return 0;
+                // 0.537（f32 方案①）：元素宽度必须与 ptr[T] 的 T 一致；32 位 buffer
+                // 只接受**裸 ptr**（调用方自己给正确字节数），否则 8 字节步长读越界。
+                if (elem == CKind::None) return 1;
+                if (ty->celem == CKind::Float32 || ty->celem == CKind::Int32) return -1;
+                if (elem == CKind::Float) return ty->celem == CKind::Float ? 1 : -1;
+                if (elem == CKind::Int) return 1;
+                return -1;
+            }
             if (ty->kind == TyKind::Bytes) return (opaque || elem != CKind::None) ? -1 : 1;
             return 0;
         };
@@ -434,6 +447,7 @@ TypePtr TypeChecker::builtin_value_type(const std::string& n) {
 bool TypeChecker::is_builtin_callable(const std::string& n) {
         static const std::unordered_set<std::string> names = {
             "print",  "len",    "range",  "abs",   "min",     "max",    "sum",
+            "buffer", "buffer_i32", "buffer_f32",
             "sorted", "reversed", "enumerate", "zip", "int",  "float",  "str",
             "bool",   "list",   "dict",   "tuple", "set",     "ord",    "chr",
             "repr",   "any",    "all",    "round", "isinstance", "input", "type",
