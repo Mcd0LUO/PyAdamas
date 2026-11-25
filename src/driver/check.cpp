@@ -176,8 +176,16 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
             return check_load(ctx, path, dep);
         });
         tc->set_lenient_imports(true);
-        tc->set_lang_gaps(std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
-                          std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0");
+        // 0.555：与 build 同口径 —— 源码出现 dataclass 时按需打开（=0 强制关）。
+        const char* lg_env = std::getenv("PYADAMAS_LANG_GAPS");
+        const bool lg_forced_off = lg_env && std::string_view(lg_env) == "0";
+        const bool lg_env_on = lg_env && std::string_view(lg_env) != "0";
+        // 只对项目文件自动开（标准库/CPython Lib 保持原口径，见 build.cpp 同一段注释）。
+        const bool project_file = path.find("/python3.") == std::string::npos &&
+                                  !path_under_stdlib(path);
+        tc->set_lang_gaps(lg_env_on ||
+                          (!lg_forced_off && project_file &&
+                           src->find("dataclass") != std::string::npos));
         tc->check(*mod);
         ctx.keep_alive.push_back(tc);
         auto info = check_build_info(*tc, name);

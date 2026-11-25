@@ -93,6 +93,8 @@ struct Program {
     // traceback / dataclass 编译期展开。开启时强制 type_tags（CLASS tag=11
     // 等精确堆子类标签是 P4 的表示基础）。改变 IR 与代码生成结果，参与缓存失效。
     bool lang_gaps = false;
+    // 显式关掉（PYADAMAS_LANG_GAPS=0）：自动探测就不生效。
+    bool lang_gaps_off = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
     // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期
@@ -116,6 +118,9 @@ CheckLookup load_check_lookup(const std::string& entry_path,
                                bool strict_native = false);
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p);
+// 0.555：程序级按需开关的探测（实现见 program_opts.cpp）。
+bool program_wants_type_tags(const Program& p);
+bool program_wants_lang_gaps(const Program& p);
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);
 bool link_program(Program& p, const std::string& output);
 // --asan 时改用插桩版运行时（rt_asan.o），让 RC/GC 内部的越界/UAF 也能被

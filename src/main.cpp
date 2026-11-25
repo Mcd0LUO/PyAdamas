@@ -122,8 +122,21 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
     // star_import_/dynamic_globals_ 放行），标准库基线复测通过后才默认打开。
     // --lenient-names 保留为逃生口（诊断口径回归时用）。
     fe.tc.set_strict_module_names(strict_names);
-    fe.tc.set_lang_gaps(std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
-                        std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0");
+    {
+        // 0.555：与 build 同口径 —— 源码出现 dataclass 时按需打开 lang_gaps。
+        const char* lg_env = std::getenv("PYADAMAS_LANG_GAPS");
+        const bool lg_off = lg_env && std::string_view(lg_env) == "0";
+        const bool lg_on = lg_env && std::string_view(lg_env) != "0";
+        // 只对**项目文件**自动开：标准库/CPython Lib 提到 dataclass 很常见，
+        // 给它们开 lang_gaps 会改变诊断口径（626 基线会掉）。
+        const std::string sd = pyadamas::stdlib_dir();
+        const bool project_file =
+            path.find("/python3.") == std::string::npos &&
+            (sd.empty() || path.rfind(sd, 0) != 0);
+        fe.tc.set_lang_gaps(lg_on ||
+                            (!lg_off && project_file &&
+                             source.find("dataclass") != std::string::npos));
+    }
     fe.tc.check(*fe.mod);
     if (!fe.tc.diags().empty()) {
         for (const auto& d : fe.tc.diags()) report(path, source, d.line, d.col, d.msg);
@@ -635,8 +648,10 @@ int main(int argc, char** argv) {
         // P4 语言缺口（默认关）：PYADAMAS_LANG_GAPS=1 开启，参与缓存失效。
         // 异常类当值 / file 协议 / traceback / dataclass（设计 §3/§4）。
         // CLASS tag=11 等精确标签是 P4 的表示基础，所以强制带上 type_tags。
-        prog.lang_gaps = std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
-                         std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0";
+        // 三态：=1 强制开、=0 强制关、未设=按需自动开（prepare_program 扫到 dataclass 才开）。
+        const char* lg_env = std::getenv("PYADAMAS_LANG_GAPS");
+        prog.lang_gaps = lg_env && std::string_view(lg_env) != "0";
+        prog.lang_gaps_off = lg_env && std::string_view(lg_env) == "0";
         if (prog.lang_gaps) prog.type_tags = true;
         prog.verbose = verbose;
         prog.opt = opt_level;

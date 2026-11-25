@@ -90,6 +90,10 @@ test_extra_env() {
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: lang-gaps'; then
         extra="PYADAMAS_LANG_GAPS=1"
     fi
+    # 显式关门控（0.555：lang_gaps 现在按需自动开，要测「关掉时」的行为必须显式关）。
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: no-lang-gaps'; then
+        extra="$extra PYADAMAS_LANG_GAPS=0"
+    fi
     # 整数循环优化（仿射 BCE / 跳转线程化，默认关）：带这个指令的用例
     # 必须打开门控编译，否则门控里的错代码一次都跑不到。
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: loop-opt'; then

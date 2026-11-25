@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.555] - 2026-11-26
+
+> feat(driver)：**`@dataclass` 按需自动开**——必填字段不再丢参（外部清单的 N9）。
+>
+> ```python
+> from dataclasses import dataclass
+> @dataclass
+> class P:
+>     x: int      # 无默认值
+>     y: int
+> p = P(1, 2)     # 修前：error: 'P' takes no arguments (no __init__)
+> print(p.x, p.y, p)   # 1 2 / P(x=1, y=2)
+> ```
+>
+> `@dataclass` 的编译期展开（合成 `__init__`/`__repr__`/`__eq__`）一直挂在 `PYADAMAS_LANG_GAPS` 门控后面，
+>而 lang_gaps 会改语义（file 协议泛化、异常类当值等），默认全开风险大。
+>
+> 修法与 0.528 的 type_tags 同一套「按需自动开」口径：**源码里出现 `dataclass` 才开**，三态控制——
+>`PYADAMAS_LANG_GAPS=1` 强制开、`=0` 强制关、未设按需。
+>
+> 关键约束（实测出来的）：**只对项目文件自动开**。标准库/CPython Lib 里提到 dataclass 很常见，
+>给它们开门控会改变诊断口径（626 基线 default 500 → 495、old 505 → 499、imports 167 → 165），
+>所以 build 与 check 两条路径都加了「项目文件」判定。
+>
+> 配套：
+>- `tests/run/dataclass_auto.py`（不设环境变量，覆盖必填字段 + 默认值 + `repr` + `__eq__`）；
+>- 测试框架新增 `# pyadamas: no-lang-gaps` 指令（显式关掉门控），`tests/fail/f79_dataclass_requires_gate.py`
+>  改用它——它测的是「门控关掉时仍然拒绝」，语义不变；
+>- `program_wants_type_tags` / `program_wants_lang_gaps` 从 `build.cpp` 拆到 `driver/program_opts.cpp`
+>  （`build.cpp` 已到 1219 行，硬限制 1200）。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（不降）。
+> 闸门：套件 **562** / difftest 509/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.554] - 2026-11-25
 
 > fix(ir)：**`ptr[float]` 作类字段跨模块**——`celem`（C 元素种类）现在进接口。
