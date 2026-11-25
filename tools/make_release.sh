@@ -24,7 +24,7 @@ mkdir -p "$DIST" "$STAGE/$NAME/bin"
 cp "$PA" "$STAGE/$NAME/bin/pyadamas"
 mkdir -p "$STAGE/$NAME/stdlib"
 tar -C stdlib --exclude='__pycache__' -cf - . | tar -C "$STAGE/$NAME/stdlib" -xf -
-cp README.md LICENSE "$STAGE/$NAME/" 2>/dev/null || true
+cp README.md LICENSE NOTICE "$STAGE/$NAME/" 2>/dev/null || true
 cat > "$STAGE/$NAME/RELEASE.txt" <<EOF
 pyadamas $VER (linux-x86_64)
 

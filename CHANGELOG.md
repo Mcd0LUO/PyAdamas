@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.525] - 2026-11-25
+
+> fix(lower)：**dunder 调用补参数 coerce**——修掉 `q + 2.0` 这类运算的静默错值（0.518 评估的 P0-A）。
+>
+> 现象（修前）：自定义类 `Q.__add__(self, o: "Q | float")`，`q + 2.0` 得到 **6.0**（CPython 8.0）、`q == 6.0` 得到 **False**。
+>
+> 根因：`dunder_call` 把实参直接塞进 `IrOp::VCall`，而 `gen_vcall` 按**实参 vreg 的静态类型**分类 ABI——
+>float 实参进 `xmm`，但被调形参是 union（unknown，整型字），于是 callee 把 double 的位模式当整数/指针读。
+>正常方法调用走 `bind_args`，那里有 `coerce(args[i], vreg_ty, want)`，dunder 这条路径漏了。
+>
+> 修法：`dunder_call` 在构造 VCall/Call 之前按 `call_sig->pos[i].ty` 逐参 `coerce`（from 取 `vreg_ty(args[i])`），
+>装饰后的 dunder 分支共用同一段逻辑。
+>
+> 对拍（`tests/run/dunder_arg_coerce.py`）：`+ - * / **`、`== != <`、`in`（`__contains__`）、str 的 `__add__` ——
+>**8 行与 CPython 逐字节一致**；原复现从 `6.0 8.0 False` 变成 `8.0 8.0 True`。
+>
+> 闸门：套件 / difftest / check_size / ctest（合并时跑一次）。
 ## [0.524] - 2026-11-25
 
 > feat(driver)：**发布包可迁移 + `dist/` 里带编译好的二进制**。
