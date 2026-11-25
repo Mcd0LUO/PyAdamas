@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.531] - 2026-11-25
+
+> perf(runtime,lower)：**`isinstance` 走整数 class id**，替掉 MRO 上的字符串比较。
+>
+> 修前：`pa_is_named_class(obj, "mod.Cls")` 沿 MRO 逐个 `strlen`+`memcmp`；深继承时每次 isinstance
+>都在做字符串比较。
+>
+> 修法：
+>- 类元数据 **7 字 → 8 字**，第 8 字 = **限定名的 FNV-1a 64**（口径 `<模块运行时名>.<类名>`，
+>  与导入方 `origin_qualname` 逐字节一致；不用模块内序号——模块分开编译/缓存，跨模块会不一致）；
+>- 新增 `pa_is_instance_of(obj, cid)`：沿 MRO 比较整数；
+>- 降级侧：**本地类**的 isinstance 发 `IsInstanceOf(obj, const cid)`；**导入类保留名字比较**
+>  （跨模块实例的 vtable 元数据由定义模块发射，导入方的镜像元数据不一定是实例实际用的那份，走 cid 会误判 False）。
+>
+> 实测（-O2）：
+>
+> | 场景 | 修前 | 修后 |
+> |---|---|---|
+> | 3 层继承 isinstance，1e7 次 | 0.19 s（19 ns/次） | **0.13 s（13 ns/次）**，1.46× |
+> | union 形参脚本，1e6 次 | 0.05 s | 0.05 s（瓶颈已不在 isinstance） |
+> | CPython 3.14 对照 | — | 2.34 s / 0.28 s |
+>
+> **布局坑（记下来）**：8 字后 `dict_off` 从 `vt[-2]` 移到 `vt[-3]`，漏改会让
+>`155_exc_value`、`156_dynamic_attr`、`250/251_argparse` 四个用例 OUTPUT DIFF。
+>
+> 新增 `tests/modules/cross_isinstance/`（`from value import Value; isinstance(x, Value)` → `True` / `2.0`），
+>正好锁住「导入类不能走 cid」的边界。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **518** / difftest 486/0 / check_size PASS / bench 36/36 / ctest 9/9；
+>单用例 ASan（`build --asan -O1` 跑 isinstance + 跨模块用例）无报告。
 ## [0.530] - 2026-11-25
 
 > perf(runtime,lower)：**`x in list` 按元素类型特化**——0.518 评估的 P2-A。
