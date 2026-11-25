@@ -699,7 +699,14 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (!u.is_entry) {
         auto bytes = read_file(u.iface_path);
         if (!bytes) return false;
-        auto info = pyadamas::decode_module_interface(*bytes, u.path);
+        // 0.540：跨模块类引用（tag 29）需要按模块名取别的模块的接口。
+        auto iface_loader = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {
+            auto it = p.units.find(name);
+            if (it != p.units.end() && it->second && it->second->info) return it->second->info;
+            if (auto b = pyadamas::builtin_module(name)) return b;
+            return nullptr;
+        };
+        auto info = pyadamas::decode_module_interface(*bytes, u.path, iface_loader);
         if (!info || (*info)->name != u.name) return false;
         (*info)->interface_hash = pyadamas::hex64(pyadamas::fnv1a64(*bytes));
         u.info = *info;
@@ -914,7 +921,13 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                    std::format("cannot encode module interface: {}", bytes.error()));
             return false;
         }
-        auto norm = pyadamas::decode_module_interface(*bytes, u.path);
+        auto iface_loader = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {
+            auto it = p.units.find(name);
+            if (it != p.units.end() && it->second && it->second->info) return it->second->info;
+            if (auto b = pyadamas::builtin_module(name)) return b;
+            return nullptr;
+        };
+        auto norm = pyadamas::decode_module_interface(*bytes, u.path, iface_loader);
         if (!norm) {
             report(u.path, u.source, 0, 0,
                    std::format("cannot decode module interface: {}", norm.error()));

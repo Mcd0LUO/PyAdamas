@@ -24,6 +24,8 @@ struct Enc {
     // 合法，接口必须能终止，不能靠拒绝。
     std::vector<const FuncInfo*> sig_stack;
     int type_depth = 0;
+    // 编码期当前模块名（判断类引用是本模块还是别的模块）。
+    std::string module_name;
 
     void u8(uint8_t v) { buf.push_back(static_cast<char>(v)); }
     void u16(uint16_t v) {
@@ -51,8 +53,18 @@ struct Enc {
 struct Dec {
     const unsigned char* p;
     const unsigned char* end;
-    // 接口里类按名字引用；类表解码完之前先登记，最后统一解析。
-    std::vector<std::pair<TypePtr, std::string>> pending_classes;
+    // 接口里类按 (归属模块, 类名) 引用；类表解码完之前先登记，最后统一解析。
+    // module 为空表示「本接口的模块」（tag 13 的旧口径）。
+    struct PendingClass {
+        TypePtr ty;
+        std::string module;
+        std::string name;
+    };
+    std::vector<PendingClass> pending_classes;
+    // 0.540：跨模块类引用（tag 29）要靠它去取别的模块的接口。
+    std::function<ModuleInfoPtr(const std::string&)> loader;
+    std::unordered_map<std::string, ModuleInfoPtr> loaded;
+    std::set<std::string> loading;  // 环保护：正在加载中的模块名
 
     void need(size_t n) {
         if (static_cast<size_t>(end - p) < n) throw std::runtime_error("truncated interface");
@@ -443,9 +455,18 @@ void enc_type(Enc& e, const TypePtr& t) {
             enc_sig(e, t->fn);
             break;
         case TyKind::Class:
-            // 类按名字引用，导入方在类表解码完后解析成 ClassInfo*。
-            e.u8(13);
-            e.str(t->cls ? t->cls->name : "");
+            // 0.540：别的模块的类按 (归属模块, 类名) 引用（tag 29）—— 只写裸名
+            // 时导入方只能在自己的类表里找，`contextlib._GeneratorContextManager`
+            // 这类必然解析失败退化成 unknown。本模块的类仍走 tag 13（逐字沿用）。
+            if (t->cls && !t->cls->origin_module.empty() &&
+                t->cls->origin_module != e.module_name) {
+                e.u8(29);
+                e.str(t->cls->origin_module);
+                e.str(t->cls->name);
+            } else {
+                e.u8(13);
+                e.str(t->cls ? t->cls->name : "");
+            }
             break;
         case TyKind::BoundMethod:
             e.u8(0);
@@ -522,10 +543,24 @@ TypePtr dec_type(Dec& d) {
         }
         case 26: return mk_class_obj(dec_type(d));
         case 13: {
-            // 类引用：先占位，等模块类表解码完再填 cls。
+            // 本模块类引用：先占位，等模块类表解码完再填 cls。
             TypePtr t = std::make_shared<Type>();
             t->kind = TyKind::Unknown;
-            d.pending_classes.emplace_back(t, d.str());
+            Dec::PendingClass pc;
+            pc.ty = t;
+            pc.name = d.str();
+            d.pending_classes.push_back(std::move(pc));
+            return t;
+        }
+        case 29: {
+            // 0.540：别的模块的类引用 —— (归属模块, 类名)，解析推迟到类表解码后。
+            TypePtr t = std::make_shared<Type>();
+            t->kind = TyKind::Unknown;
+            Dec::PendingClass pc;
+            pc.ty = t;
+            pc.module = d.str();
+            pc.name = d.str();
+            d.pending_classes.push_back(std::move(pc));
             return t;
         }
         default: throw std::runtime_error("unknown type tag in interface");
@@ -641,6 +676,7 @@ std::string module_class_method_symbol(const std::string& module, const std::str
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info) {
     try {
         Enc e;
+        e.module_name = info.name;  // 0.540：判断类引用是不是本模块的
         e.buf.append(kMagic, sizeof kMagic);
         e.u16(kModuleFormatVersion);
         e.u16(kModuleAbiVersion);
@@ -721,8 +757,9 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
     }
 }
 
-std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::string& bytes,
-                                                                  const std::string& source_path) {
+std::expected<ModuleInfoPtr, std::string> decode_module_interface(
+    const std::string& bytes, const std::string& source_path,
+    std::function<ModuleInfoPtr(const std::string&)> loader) {
     try {
         if (bytes.size() < sizeof(kMagic) + 4 + 8)
             return std::unexpected("interface too short");
@@ -733,7 +770,8 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
         uint64_t got = fnv1a64(bytes.data(), bytes.size() - 8);
         if (want != got) return std::unexpected("interface checksum mismatch");
         Dec d{reinterpret_cast<const unsigned char*>(bytes.data()),
-              reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size() - 8, {}};
+              reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size() - 8, {}, {}, {}, {}};
+        d.loader = std::move(loader);
         d.p += sizeof kMagic;
         uint16_t fmt = d.u16();
         uint16_t abi = d.u16();
@@ -819,11 +857,38 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
             ic.qualname = cls->origin_qualname;
             info->classes[name] = std::move(ic);
         }
-        for (auto& [t, cname] : d.pending_classes) {
-            auto it = info->classes.find(cname);
-            if (it == info->classes.end() || !it->second.cls) continue;
-            t->kind = TyKind::Class;
-            t->cls = it->second.cls.get();
+        for (auto& pc : d.pending_classes) {
+            const ModuleInfo* owner = info.get();
+            if (!pc.module.empty() && pc.module != info->name) {
+                // 别的模块：用 loader 取它的接口（缓存 + 环保护）。
+                auto cache_it = d.loaded.find(pc.module);
+                if (cache_it != d.loaded.end()) {
+                    owner = cache_it->second.get();
+                } else if (d.loader && !d.loading.count(pc.module)) {
+                    d.loading.insert(pc.module);
+                    auto loaded = d.loader(pc.module);
+                    d.loading.erase(pc.module);
+                    if (loaded) {
+                        d.loaded[pc.module] = loaded;
+                        owner = loaded.get();
+                    } else {
+                        owner = nullptr;
+                    }
+                } else {
+                    owner = nullptr;  // 环：对方正在加载，交给它自己解析
+                }
+            }
+            if (!owner) continue;
+            auto it = owner->classes.find(pc.name);
+            if (it == owner->classes.end() || !it->second.cls) {
+                if (std::getenv("PYADAMAS_DIAG_TYPEREF"))
+                    std::fprintf(stderr, "[typeref] unresolved class %s.%s\n",
+                                 pc.module.empty() ? info->name.c_str() : pc.module.c_str(),
+                                 pc.name.c_str());
+                continue;
+            }
+            pc.ty->kind = TyKind::Class;
+            pc.ty->cls = it->second.cls.get();
         }
         info->interface_hash = hex64(fnv1a64(bytes));
         return info;

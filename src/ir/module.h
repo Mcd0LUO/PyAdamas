@@ -70,12 +70,15 @@ struct ModuleInfo {
 #endif
 inline constexpr const char* kCompilerVersion = PYADAMAS_VERSION;
 
-inline constexpr uint16_t kModuleFormatVersion = 14;
+inline constexpr uint16_t kModuleFormatVersion = 15;  // 0.540：tag 29（跨模块类引用）
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
-std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::string& bytes,
-                                                                  const std::string& source_path);
+
+// loader：按模块名取接口（0.540 跨模块类引用 tag 29 用）。为空时只解析本模块类表。
+std::expected<ModuleInfoPtr, std::string> decode_module_interface(
+    const std::string& bytes, const std::string& source_path,
+    std::function<ModuleInfoPtr(const std::string&)> loader = nullptr);
 
 uint64_t fnv1a64(const void* data, size_t n);
 inline uint64_t fnv1a64(const std::string& s) { return fnv1a64(s.data(), s.size()); }

@@ -5,6 +5,9 @@
 
 namespace pyadamas {
 
+// driver/build.h 的内置模块表（按名字取 ModuleInfo）；只前向声明，避免反向依赖 driver。
+ModuleInfoPtr builtin_module(const std::string& name);
+
 // Align tuple elements correctly: a variadic annotation has one element
 // type, not a slot corresponding to the first item of a fixed tuple.
 static TypePtr refine_return_holes(const TypePtr& to, const TypePtr& from, int depth = 0) {
@@ -206,6 +209,35 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
                 // lru_cache 包装后签名与被装饰函数相同，类型上按恒等处理。
                 if (is_lru_cache_expr(it->get())) continue;
+                // 0.540: @contextmanager 把生成器函数包成 _GeneratorContextManager 工厂。
+                // 装饰器自己的返回类型不可表达，以前整条链退化成 unknown（同模块内靠
+                // 降级器的函数定义还能过 with，跨模块就只剩 unknown）。这里给被装饰符号
+                // 精确签名 (*args) -> _GeneratorContextManager：varargs 由 enc_sig 编码，
+                // 类引用走 tag 29（带归属模块）。
+                if (is_contextmanager_expr(it->get())) {
+                    ClassInfoPtr cm_cls;
+                    auto cit = classes_.find("_GeneratorContextManager");
+                    if (cit != classes_.end()) cm_cls = cit->second;
+                    if (!cm_cls) {
+                        if (auto mod = lookup_module_alias("contextlib")) {
+                            auto mc = mod->classes.find("_GeneratorContextManager");
+                            if (mc != mod->classes.end()) cm_cls = mc->second.cls;
+                        }
+                    }
+                    if (cm_cls) {
+                        auto fn = std::make_shared<FuncInfo>();
+                        fn->name = f.name;
+                        fn->ret = mk_class(cm_cls.get());
+                        fn->ret_known = true;
+                        fn->varargs = true;
+                        fn->vararg_name = "args";
+                        fn->vararg_ty = t_unknown();
+                        auto ft = new_ty(TyKind::Func);
+                        ft->fn = fn;
+                        cur = ft;
+                        continue;
+                    }
+                }
                 TypePtr dt = type_of(it->get());
                 if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret) {
                     cur = dt->fn->ret;
