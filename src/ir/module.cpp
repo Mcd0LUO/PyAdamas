@@ -317,7 +317,19 @@ void enc_type(Enc& e, const TypePtr& t) {
         return;
     }
     switch (t->kind) {
-        case TyKind::Unknown: e.u8(0); break;
+        // 联合（Unknown + 成员表）不能退化成裸 unknown（0.527 P0-B）：跨模块
+        // 形参的 `Value | float` 丢掉成员表后，调用点会按第一个实参反推类型，
+        // 轻则误报「used with both float and non-float values」，重则 ABI 错位。
+        // tag 25 = 联合，成员依次编码；0..24 逐字沿用，旧 modcache 解码不变。
+        case TyKind::Unknown:
+            if (!t->sub.empty()) {
+                e.u8(25);
+                e.u8(static_cast<uint8_t>(t->sub.size()));
+                for (auto& m : t->sub) enc_type(e, m);
+            } else {
+                e.u8(0);
+            }
+            break;
         // 生成器/协程/异步生成器跨模块保留元素/结果类型；其余 asyncio 对象仍按 unknown。
         case TyKind::Generator: {
             e.u8(14);
@@ -342,9 +354,13 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncEvent:
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
-        case TyKind::TypeObj:
-        // 类对象跨模块签名暂不序列化：按 unknown 处理。
+        // 类对象（构造器）跨模块保留：tag 26 + 内部 Class 引用（tag 13）。
+        // 导入方解码后拿到 ClassObj，才能正确区分「类」与「实例」。
         case TyKind::ClassObj:
+            e.u8(26);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            break;
+        case TyKind::TypeObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:
@@ -485,6 +501,22 @@ TypePtr dec_type(Dec& d) {
         }
         case 15: return mk_coroutine(dec_type(d));
         case 16: return mk_async_generator(dec_type(d));
+        case 25: {
+            uint8_t n = d.u8();
+            if (n == 0) return t_unknown();
+            // 直接构造联合，**不走 mk_union**：类引用先解码成 Unknown 占位（tag 13），
+            // mk_union / union_flatten 会把占位当成 unknown，把整个联合退化成裸
+            // unknown —— 那正是 P0-B 要修的丢信息。占位稍后由 pending_classes
+            // 原地填成 Class，成员表始终有效。
+            std::vector<TypePtr> members;
+            members.reserve(n);
+            for (uint8_t i = 0; i < n; ++i) members.push_back(dec_type(d));
+            TypePtr t = std::make_shared<Type>();
+            t->kind = TyKind::Unknown;
+            t->sub = std::move(members);
+            return t;
+        }
+        case 26: return mk_class_obj(dec_type(d));
         case 13: {
             // 类引用：先占位，等模块类表解码完再填 cls。
             TypePtr t = std::make_shared<Type>();

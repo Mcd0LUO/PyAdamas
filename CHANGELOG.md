@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.527] - 2026-11-25
+
+> fix(ir)：**模块接口保留联合类型与类对象**——0.518 评估的 P0-B。
+>
+> 修前：跨模块使用 union 形参的库会退化。`value.py` 里 `def add(self, o: "Value | float")`，
+>`main.py` 里 `a.add(2.0)` 之后 `a.add(Value(1.0))` 直接报
+>`argument 'o' of '<imported>' is used with both float and non-float values; annotate the parameter type`；
+>更糟的是退回 unknown 后 ABI 错位（静默错值）。类对象（`P = Value`）跨模块也拿不到构造器。
+>
+> 根因两处：
+>1. `enc_type` 把 `TyKind::Unknown`（联合的表示就是 Unknown + 成员表）和 `ClassObj` 都写成了 tag 0；
+>2. 解码侧 `mk_union/union_flatten` 把「类引用占位（解码时是 Unknown）」当成 unknown，把整个联合折成裸 unknown。
+>
+> 修法：
+>- 新增 tag **25 = 联合**（成员依次编码）、tag **26 = ClassObj**（内部 Class 引用仍是 tag 13）；0..24 逐字沿用，
+>  旧 modcache 解码不受影响；新编码需要 ≥0.527 的编译器读。
+>- 解码联合时**直接构造**（不经过 `mk_union`），保留类引用占位，等 `pending_classes` 原地填成 Class。
+>
+> 实测（`tests/modules/union_sig/`）：
+>```
+>pya:     5.0 4.0 / 7.0 / 9.0
+>CPython: 5.0 4.0 / 7.0 / 9.0
+>```
+> 同一模块内的 union 调用本来就是对的（0.525 的 dunder coerce），本轮只修跨模块。
+>
+> 基线：**default 499/626 不变**、old 504、`--imports` 167。
+> 闸门：套件 515（新增 module 用例）/ difftest 484/0 / check_size PASS / ctest 8/8。
 ## [0.526] - 2026-11-25
 
 > fix(lower)：**`float()` / `int()` 不再接受类实例的指针位模式**——0.518 评估的 P0-C。
