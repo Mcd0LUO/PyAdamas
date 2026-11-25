@@ -286,6 +286,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ComplexDiv: return "pa_complex_div";
         case RtFn::ComplexNeg: return "pa_complex_neg";
         case RtFn::ComplexAbs: return "pa_complex_abs";
+        case RtFn::ComplexReal: return "pa_complex_real";
+        case RtFn::ComplexImag: return "pa_complex_imag";
+        case RtFn::ComplexConj: return "pa_complex_conj";
         case RtFn::ComplexStr: return "pa_complex_str";
         case RtFn::ComplexEq: return "pa_complex_eq";
         case RtFn::ComplexTruth: return "pa_complex_truth";

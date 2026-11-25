@@ -144,6 +144,14 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));
         for (auto& kw : c.keywords) expr(*kw.value);
+        // C3（0.534）：complex.conjugate() -> complex（无参数）。
+        if (recv && recv->kind == TyKind::Complex && name == "conjugate") {
+            if (!a.empty() || !c.keywords.empty()) {
+                err(c.line, c.col, "conjugate() takes no arguments");
+                return t_complex();
+            }
+            return t_complex();
+        }
 
         auto argc = [&](size_t lo, size_t hi) {
             if (a.size() < lo || a.size() > hi) {

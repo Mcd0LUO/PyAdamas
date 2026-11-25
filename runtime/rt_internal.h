@@ -579,6 +579,10 @@ PyAdamasComplex* pa_complex_mul(PyAdamasComplex* a, PyAdamasComplex* b);
 PyAdamasComplex* pa_complex_div(PyAdamasComplex* a, PyAdamasComplex* b);
 PyAdamasComplex* pa_complex_neg(PyAdamasComplex* a);
 double pa_complex_abs(PyAdamasComplex* a);
+/* 0.534：real/imag（f64）与 conjugate（新 complex）。 */
+double pa_complex_real(PyAdamasComplex* a);
+double pa_complex_imag(PyAdamasComplex* a);
+PyAdamasComplex* pa_complex_conj(PyAdamasComplex* a);
 PyAdamasStr* pa_complex_str(PyAdamasComplex* a);
 int64_t pa_complex_eq(PyAdamasComplex* a, PyAdamasComplex* b);
 int64_t pa_complex_truth(PyAdamasComplex* a);
