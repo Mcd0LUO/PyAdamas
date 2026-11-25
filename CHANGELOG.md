@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.520] - 2026-11-25
+
+> feat(runtime)：**`time.struct_time`**——`localtime`/`gmtime`/`strptime` 现在返回**带 `tm_*` 属性的对象**，同时**完整保留旧的 tuple 语义**。
+>
+> 上一轮卡在这里的原因：`523/524/522` 三个用例在用 `len(t)`、`gmtime(0)[:6]` 切片、`strftime(fmt, t)` 的 tuple 形态，
+>直接换成对象会把它们打坏。本版两头都占：
+>
+> - 新增 `TyKind::StructTime`（照 `StatResult` 的路子，**没有新 RC kind**）；运行期就是 9 个 int 的 list（`tm_year..tm_isdst`），
+>   `t.tm_year` 在降级层映射成 `ListGet(t, 常量下标)`；
+> - **len**：`len(t)` → 9；**下标**：`t[i]`/负下标 → int（`ListGet`，越界走 list 语义）；
+> - **切片**：`t[:6]` → `tuple[int, ...]`（`ListSlice` + `mk_tuple_rest(int)`），`gmtime(0)[:6] == (1970,1,1,0,0,0)` 与改动前一致；
+> - **`strftime(fmt, t)`** 接受 `StructTime`；`assignable` 增加「`StructTime` 可赋给 `tuple`」，让 `time.mktime(time.localtime(...))` 继续成立；
+> - 新增 **`time.strptime(s, fmt)`**（C 的 `strptime`，失败抛 `ValueError`，文本与 CPython 一致）。
+>
+> **不可变**：`t.tm_year = 1` / `t[0] = 1` 在**编译期**拒绝，消息固定：
+>`'time.struct_time' object is immutable (assign to a variable first)`（属性写与下标写两条路径都覆盖，回归 `tests/strict/time_struct_time_immutable.py`）。
+>
+> 对拍（`tests/run/time_struct_time.py`）：`localtime(0)`/`gmtime(0)` 的 6 个 `tm_*`、`len`、`t[0]`/`t[-1]`、`t[:6]`、
+>`strftime('%Y-%m-%d', t)`、`strptime(...)` 字段——10 行与 CPython 3.14.4 逐字节相同；**522/523/524 原样通过**（一个都没改）。
+>
+> 闸门：套件 **510** / difftest **480/0** / check_size **PASS** / ctest 8/8。
 ## [0.519] - 2026-11-25
 
 > feat(typecheck)：**成员级编译期拒绝原语 `@reject("原因")`**——成员**存在但不可用**时，在调用/使用处报明确原因。
