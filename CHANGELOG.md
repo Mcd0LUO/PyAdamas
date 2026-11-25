@@ -4,6 +4,26 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.557] - 2026-11-26
+
+> fix(typecheck)：**`Optional[T]` 上的方法调用不再误报**（`T` 只要真有这个方法）。
+>
+> ```python
+> d: dict[str, int] | None = None
+> print(d.get("k"))     # 修前：error: 'dict[str, int] | None' object has no method 'get'
+> ```
+>
+> 原来只有 `Optional[Class]` 与 `Optional[Match]` 两种情况会「剥壳按内层查」，其余内置类型
+>（dict/list/str/bytes…）一律按联合类型去找方法 → 找不到 → 误报。标准库里 5 个文件是这一簇
+>（`_module_completer.py` 的 `dict|None.get`、`taskgroups.py` 的 `list|None.append`、`smtplib.py` 的
+>`bytes|None.decode` 等）。
+>
+> 修法：把剥壳条件放宽成「**内层类型真的有这个方法**」，并新增「联合接收者挑能接住这个方法的成员」
+>（多命中取第一个，返回类型可能不精确但不会误报）。运行期本来就有 `guard_not_none` 兜底：
+>`Optional` 接收者的方法调用会先检查 None，为空则给出明确 panic，不是段错误。
+>
+> 基线：syntax 621、default 500、old 505、**imports 167 → 168**（↑1）。
+> 闸门：套件 562 / difftest 509/0 / check_size PASS。
 ## [0.556] - 2026-11-26
 
 > fix(lower)：**函数值写属性给出可执行的错误信息**（外部清单的 J1）。

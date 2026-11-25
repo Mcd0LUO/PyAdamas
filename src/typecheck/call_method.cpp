@@ -1,5 +1,6 @@
 // typecheck/call_method.cpp —— 方法表与 method_call
 #include "typecheck/typecheck.h"
+#include <cstdio>
 
 #include "ir/module.h"
 
@@ -138,9 +139,24 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                                  bool self_recv) {
         // Optional[Class] 上的方法：内层类的方法表是确定的，运行时有
         // None 检查兜底，静态上直接按内层查，避免收窄不到位就误杀。
-        if (recv && recv->kind == TyKind::Optional && !recv->sub.empty() &&
-            (recv->sub[0]->kind == TyKind::Class || recv->sub[0]->kind == TyKind::Match))
+        // 0.557：Optional[T] 上的方法 —— 只要内层类型有这个方法就按内层查（原来是
+        // 只放行 Class / Match）。运行期有 guard_not_none 兜底，静态上收窄不到位不该误杀。
+        if (recv && recv->kind == TyKind::Optional && !recv->sub.empty() && recv->sub[0] &&
+            has_method(recv->sub[0], name))
             recv = recv->sub[0];
+        // 0.557：联合接收者（`dict[str, int] | None` 这类）。类型收窄做不到逐条路径成立，
+        // 运行期对 None 有 guard_not_none 兜底；静态上挑**能接住这个方法**的成员来查，
+        // 避免「本身就是 Optional」的代码被误杀（标准库基线里 5 个文件是这类）。
+        // 多命中时取第一个：方法的返回类型可能不精确，但不会误报。
+        if (recv && recv->kind == TyKind::Unknown && !recv->sub.empty()) {
+            TypePtr pick;
+            int hits = 0;
+            for (auto& m : recv->sub) {
+                if (!m) continue;
+                if (has_method(m, name)) { pick = m; ++hits; }
+            }
+            if (hits >= 1) recv = pick;
+        }
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));
         for (auto& kw : c.keywords) expr(*kw.value);
