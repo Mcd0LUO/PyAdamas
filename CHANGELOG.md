@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.518] - 2026-11-25
+
+> 一批「系统面 + 多继承性能」的落地：`os.walk` 崩溃、fd 面、`os.stat`、`sys` 身份常量、虚调用守卫看穿 thunk。
+>
+> **① fix(runtime)：`os.walk` 的 heap-use-after-free（崩溃）**
+> 根因**不是 rc**，是 **GC 视界**：walk 是 C 递归，每层把 `dirs/files/tup` 只放在 C 局部变量里；递归期间每个目录项都 `str_new`，
+> 一旦触发主收集，这些对象在根集合的四处（全局根表 / 临时值栈 / 帧记录 / 寄存器）**都看不见**，整棵 `out→tup→dirs→str` 子图被当垃圾清扫。
+> （ASan：`READ of size 8 in walk_recurse` 的 `dirs->data[i]`，freed by `gc_free_body`；先加 `pa_rc_inc` 钉住**没用**——杀它的是「看不见 → 判不可达」。）
+> 修法：改成**迭代式 + 显式栈**，`out` 与栈都用 `pa_gc_pin` 挂成根，每层构造 `dirs/files/tup` 时各自 pin、构造完 unpin。
+> 实测本仓库根目录 `n = 31511`，CPython `len(list(os.walk('.'))) = 31511`，rc=0。
+>
+> **② feat(runtime)：文件描述符面**
+> `os.open/read/write/lseek/dup/fdopen` + 8 个 `O_*` 常量；错误文本按 CPython 的 `[Errno N] strerror: 'path'` 口径（新加 `os_raise_path`），
+>常量在 `rt_os.c` 用 `_Static_assert` 对齐宿主 C 宏（换平台数值不符会**编译失败**，不会静默错）。
+> 对拍 `tests/run/os_fd.py`：open→write→lseek→read→dup→fdopen 读回→close，9 行与 CPython 3.14.4 逐字节相同（含 OSError 文本）。
+>
+> **③ feat(runtime)：`os.stat` / `os.lstat`**
+> 新增薄的 `TyKind::StatResult`（照 `subprocess.CompletedProcess` 的「一个 TyKind 一个固定属性表」通道，**没有**新增 RC kind）；
+>运行期用 10 个整数的 list 承载（顺序同 CPython 的 stat_result），属性读由降级层按名字映射成 `ListGet(obj, 常量下标)`。
+> 对拍 `tests/run/os_stat_struct.py`：`st_size`、`S_ISREG`/`S_ISDIR`、`nlink`、`uid`、OSError 文本，6 行与 CPython 逐字节相同。
+>
+> **④ feat(lowering)：`sys.prefix` / `exec_prefix` / `path`**
+> 前两个是编译期字符串快照（`/usr`，与 `sys.pysig` 的 `version`/`platform` 同口径）；`path` 是 `list[str]` 快照（3 项，**不参与导入解析**）。
+> `sys.maxsize`/`version`/`byteorder`/`version_info` 本来就有；`float_info`/`flags` 需要「内建记录对象」通道，留待后续。
+>
+> **⑤ perf(backend)：虚调用守卫看穿多继承 thunk**
+> `IRFunction` 记 `mi_thunk_target`/`mi_thunk_delta`；`gen_guarded_vcall` 收集候选时若槽里是 thunk，则**守卫比较 thunk 入口**（与运行期槽一致）、
+>**内联体取 thunk 目标的叶子**、命中后 `addq delta` 把 self 挪到目标基类的字段块。
+> 实测两状态多继承的虚调用 5M 循环 **40ms → 23ms**（单继承基准 25ms）；10 个基准 asm 与改动前逐字节相同。
+>
+> **⑥ test：`os_walk_smoke` 改成可重复跑**
+> 原用例用固定路径 `/tmp/walk_smoke` + `os.mkdir`，第二次跑就撞「目录已存在」→ 输出 DIFF；现在目录名带 pid、跑完自清理、expect 块补了结尾换行。
+>
+> 闸门：套件 **509** / difftest **479/0** / check_size **PASS** / ctest 8/8（suite 由 checkall 跑）；ASan 套件 **508 ok**（唯一失败就是上面那条用例的输出换行，已修，非内存问题）。
+> 628 默认口径 **499/626**、本仓库 907 个 `.py` **789 通过**，零新拒绝。
+>
+> **未做（已定位，下一步）**：`time.struct_time` 与现有 tuple 语义冲突（`523/524/522` 三个用例在用 `len()`/切片/`strftime` 的 tuple 形态），
+>要落地需给 `StructTime` 加下标/切片/len/strftime 四处分支（约 2–3 小时）；`os.uname`、`sys.float_info`/`flags`、`sys.modules` 同批后续。
 ## [0.517] - 2026-11-25
 
 > feat(runtime)：**`json.dump(obj, fp)` / `json.load(fp)`**（文件流版）。
