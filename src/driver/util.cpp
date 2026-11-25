@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -101,6 +102,38 @@ std::expected<std::string, std::string> make_temp(const char* suffix) {
     if (fd < 0) return std::unexpected("cannot create temporary file");
     ::close(fd);
     return std::string(buf.data());
+}
+
+
+// 运行期定位 stdlib 目录（发布版二进制要能在别的机器上跑）：
+//   1. 环境变量 PYADAMAS_STDLIB（显式覆盖）
+//   2. 编译期路径 PYADAMAS_STDLIB_DIR（开发机构建时就是仓库里的 stdlib/）
+//   3. 可执行文件旁边：<exe>/stdlib、<exe>/../stdlib、<exe>/../share/pyadamas/stdlib
+// 都找不到时返回编译期值（后续读模块会明确报错，不会静默用空表）。
+const std::string& stdlib_dir() {
+    static const std::string dir = [] {
+        std::error_code ec;
+        if (const char* env = std::getenv("PYADAMAS_STDLIB"); env && *env) {
+            if (std::filesystem::is_directory(env, ec)) return std::string(env);
+        }
+        const std::string compiled = PYADAMAS_STDLIB_DIR;
+        if (std::filesystem::is_directory(compiled, ec)) return compiled;
+#if defined(__linux__)
+        char buf[4096];
+        ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+        if (n > 0) {
+            buf[n] = 0;
+            std::filesystem::path exe_dir = std::filesystem::path(buf).parent_path();
+            for (auto cand : {exe_dir / "stdlib", exe_dir / ".." / "stdlib",
+                              exe_dir / ".." / "share" / "pyadamas" / "stdlib"}) {
+                if (std::filesystem::is_directory(cand, ec))
+                    return std::filesystem::weakly_canonical(cand, ec).string();
+            }
+        }
+#endif
+        return compiled;
+    }();
+    return dir;
 }
 
 }  // namespace pyadamas

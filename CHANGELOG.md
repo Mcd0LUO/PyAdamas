@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.524] - 2026-11-25
+
+> feat(driver)：**发布包可迁移 + `dist/` 里带编译好的二进制**。
+>
+> 之前二进制里烧死的是编译期 `PYADAMAS_STDLIB_DIR`（开发机的 `/src/.../stdlib`），拷到别的机器上就找不到模块表。
+> 现在 `stdlib_dir()`（`src/driver/util.cpp`）按顺序解析：
+>
+> 1. `PYADAMAS_STDLIB` 环境变量；
+> 2. 编译期路径（**存在时**才用）；
+> 3. 可执行文件旁边：`<exe>/stdlib`、`<exe>/../stdlib`、`<exe>/../share/pyadamas/stdlib`；
+> 4. 都没有就退回编译期值（读模块时会明确报错，不会静默用空表）。
+>
+> 全仓 5 处 `PYADAMAS_STDLIB_DIR` 的运行时使用（`check`/`build`/`modules` 的 sigs 与模块表路径）都改成 `stdlib_dir()`。
+> 实测：把 `bin/pyadamas` 与 `stdlib/` 拷到临时目录、`cwd=/tmp`、不设任何环境变量，
+>`run`/`check` 正常（`9 行 smoke` 输出与仓库内一致）。
+>
+> 新增 `tools/make_release.sh`：打包 `bin/pyadamas + stdlib/ + README/LICENSE + RELEASE.txt`，
+>生成 `dist/pyadamas-<ver>-linux-x86_64.tar.gz` 与 `.sha256`，并**解包自检**（换 cwd、无环境变量跑一个用到 stdlib 的程序）。
+> 本轮产物 `dist/pyadamas-0.524-linux-x86_64.tar.gz`（3.7M）已随仓库提交。
+>
+> 依赖：x86-64 Linux + glibc（本包在 Debian 13 / glibc 2.41 构建）+ binutils 的 `as`/`ld`。
 ## [0.523] - 2026-11-25
 
 > fix(driver/check)：**默认解析项目内的跨模块导入**——`check` / `types` 不再把导入的符号压成 unknown。

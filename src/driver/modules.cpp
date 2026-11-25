@@ -4,6 +4,7 @@
 // 模块表查询、import 源解析、AST import 扫描、原生+扩展接口合并。
 // 接口声明见 driver/modules.h。
 #include "driver/modules.h"
+#include "driver/util.h"
 
 #include <cctype>
 #include <cstdio>
@@ -42,7 +43,7 @@ namespace {
 // 都不做的假模块（静默错误）。这里一律硬失败并说清楚原因。
 bool path_under_sigs_dir(const std::string& p) {
     static const std::string root =
-        canonical_path((std::filesystem::path(PYADAMAS_STDLIB_DIR) / "sigs").string());
+        canonical_path((std::filesystem::path(pyadamas::stdlib_dir()) / "sigs").string());
     return p.size() > root.size() && p.compare(0, root.size(), root) == 0 &&
            p[root.size()] == '/';
 }
@@ -273,11 +274,11 @@ bool is_native_module(const ModuleEntry* e) { return e && e->kind == ModuleKind:
 // 表里登记的 stdlib 源路径（source 为相对 stdlib/ 的路径）。
 std::string module_source_path(const ModuleEntry& e) {
     return canonical_path(
-        (std::filesystem::path(PYADAMAS_STDLIB_DIR) / std::string(e.source)).string());
+        (std::filesystem::path(pyadamas::stdlib_dir()) / std::string(e.source)).string());
 }
 
 std::string stdlib_relative_path(const std::string& path) {
-    const std::string root = canonical_path(PYADAMAS_STDLIB_DIR);
+    const std::string root = canonical_path(pyadamas::stdlib_dir());
     if (path.size() > root.size() + 1 && path.compare(0, root.size(), root) == 0 &&
         path[root.size()] == '/')
         return path.substr(root.size() + 1);
@@ -285,7 +286,7 @@ std::string stdlib_relative_path(const std::string& path) {
 }
 
 bool path_under_stdlib(const std::string& path) {
-    static const std::string root = canonical_path(PYADAMAS_STDLIB_DIR);
+    static const std::string root = canonical_path(pyadamas::stdlib_dir());
     return path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
            path[root.size()] == '/';
 }
@@ -319,7 +320,7 @@ bool validate_module_table() {
         std::error_code ec;
         for (const auto& e : kModuleTable) {
             if (!e.source.empty()) {
-                auto p = std::filesystem::path(PYADAMAS_STDLIB_DIR) / std::string(e.source);
+                auto p = std::filesystem::path(pyadamas::stdlib_dir()) / std::string(e.source);
                 if (!std::filesystem::is_regular_file(p, ec)) {
                     std::fprintf(stderr,
                                  "error: module table: source for '%s' not found: %s\n",

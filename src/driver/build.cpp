@@ -1026,7 +1026,7 @@ bool load_program(const std::string& entry_path, const std::vector<std::string>&
     if (!validate_module_table()) return false;
     p.include_dirs = include_dirs;
     // 随编译器分发的标准库源码目录：导入方同目录与用户 -I 优先，最后落这里。
-    p.include_dirs.emplace_back(PYADAMAS_STDLIB_DIR);
+    p.include_dirs.emplace_back(pyadamas::stdlib_dir());
     auto unit = std::make_unique<ModuleUnit>();
     unit->key = "@entry";
     unit->name = "__entry__";

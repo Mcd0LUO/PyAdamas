@@ -13,4 +13,7 @@ void report(const std::string& path, const std::string& source, int line, int co
 std::string shell_quote(const std::string& s);
 std::expected<std::string, std::string> make_temp(const char* suffix);
 
+// 运行期定位 stdlib 目录（环境变量 → 编译期路径 → 可执行文件旁边）。
+const std::string& stdlib_dir();
+
 }  // namespace pyadamas

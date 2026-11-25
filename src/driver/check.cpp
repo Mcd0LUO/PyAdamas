@@ -223,7 +223,7 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
     // 强制解析会在真实代码上大面积误杀（0.523 实测：626 文件默认口径 499 → 223）。
     if (!ctx.strict_all && entry) {
         std::string src = std::string(entry->source);
-        const std::string stdlib_dir = PYADAMAS_STDLIB_DIR;
+        const std::string stdlib_dir = pyadamas::stdlib_dir();
         const bool in_compiler_stdlib =
             src == stdlib_dir ||
             (src.size() > stdlib_dir.size() && src.compare(0, stdlib_dir.size(), stdlib_dir) == 0 &&
@@ -291,7 +291,7 @@ CheckLookup load_check_lookup(const std::string& entry_path,
     auto ctx = std::make_shared<CheckCtx>();
     ctx->strict_all = strict_all;
     ctx->include_dirs = include_dirs;
-    ctx->include_dirs.emplace_back(PYADAMAS_STDLIB_DIR);
+    ctx->include_dirs.emplace_back(pyadamas::stdlib_dir());
     std::string entry = canonical_path(entry_path);
     auto lookup = [ctx, entry](const std::string& name) -> ModuleInfoPtr {
         return check_load(*ctx, entry, name);
