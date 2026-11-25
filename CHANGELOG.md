@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.526] - 2026-11-25
+
+> fix(lower)：**`float()` / `int()` 不再接受类实例的指针位模式**——0.518 评估的 P0-C。
+>
+> 修前：`float(Value(3.0))` 编译通过，输出 `107287860196448.0`（把对象指针按 double 读）；CPython 抛 `TypeError`。
+> IR 上它是一条 `convert`（`%18 = convert %15 ; float`），既不走 `lower_builtin_text`，也不走 `convert_to` 的显式分支。
+>
+> 修法：`convert_to` 末尾的 `IrOp::Convert` 兜底前拦一道——目标 `float`/`int` 且源是
+>`Class`/`List`/`Dict`/`Set`/`Tuple`/`None`/`Bytes` 时，先试 `__float__`/`__int__`/`__index__`（走 0.525 修好的
+>dunder coerce 路径），没有协议就编译期报错，文本对齐 CPython：
+>
+> ```
+> float() argument must be a string or a real number, not 'Value'
+> int() argument must be a string, a bytes-like object or a real number, not 'Value'
+> ```
+>
+> 对拍：反例 `tests/strict/float_class_rejected.py`、`int_class_rejected.py` 被拒；
+> 正例 `tests/run/convert_numeric.py`（`float(1)`/`float(True)`/`float("1.5")`/`int(3.9)`/`int("42")`）5 行与 CPython 逐字节一致。
+> 已知既有差异（非本轮引入）：`x: float = 1` 我们按标注转成 `1.0`，CPython 保持 `int 1`。
+>
+> 闸门：套件 / difftest / check_size / ctest（合并时跑一次）。
 ## [0.525] - 2026-11-25
 
 > fix(lower)：**dunder 调用补参数 coerce**——修掉 `q + 2.0` 这类运算的静默错值（0.518 评估的 P0-A）。
