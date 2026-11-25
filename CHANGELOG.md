@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.549] - 2026-11-25
+
+> test(modules)：**补 7 个类型 tag 的跨模块用例**（0.548 的 tag 有实现、缺验收）。
+>
+> | 用例 | 打印的稳定字段 |
+> |---|---|
+> | `popen_xmod` | `Popen(["true"]).wait()` → `0` |
+> | `struct_time_xmod` | `time.gmtime(0)` → `1970 1 1` |
+> | `uname_xmod` | `os.uname()` 的 `sysname` 非空、`machine == machine` |
+> | `float_info_xmod` | `sys.float_info.max > 0`、`dig > 0` |
+> | `sys_flags_xmod` | `sys.flags.optimize >= 0` |
+> | `stat_xmod` | `os.stat(__file__).st_size >= 0` |
+> | `completed_process_xmod` | `subprocess.run(["true"]).returncode` → `0` |
+>
+> 全部**只打印稳定字段**（不打印随机/环境相关的值），所以可重复对拍。
+>
+> 两个踩到的坑（写用例时注意）：`len(uname_result)` 不支持（用字段判空代替）；
+>`os.stat("dmod.py")` 在套件里会失败——模块用例是在**临时目录**里跑的，必须用 `__file__`。
+>
+> 基线：syntax 621、default 500、old 505、imports **167**（不降）。
+> 闸门：套件 **556** / difftest 506/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.548] - 2026-11-25
 
 > feat(ir)：**交叉模块类型 tag 31–45**——15 个内置类型跨模块可带类型身份（不再是 unknown）。
