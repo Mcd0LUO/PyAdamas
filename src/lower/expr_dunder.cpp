@@ -352,6 +352,31 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
             return def(t_bool(), std::move(in));
         }
     }
+    // P0-C：非数值源 → 数值目标**不发 Convert**（那会把指针位模式当数值 = 静默错值）。
+    // 类实例先试 __float__/__int__/__index__ 协议；没有就按 CPython 的文本报错。
+    if (to->kind == TyKind::Float || to->kind == TyKind::Int) {
+        bool non_num = from && (from->kind == TyKind::Class || from->kind == TyKind::List ||
+                                from->kind == TyKind::Dict || from->kind == TyKind::Set ||
+                                from->kind == TyKind::Tuple || from->kind == TyKind::None ||
+                                from->kind == TyKind::Bytes);
+        if (non_num) {
+            if (from->kind == TyKind::Class) {
+                const char* dn = to->kind == TyKind::Float ? "__float__" : "__int__";
+                VReg r = dunder_call(v, from, dn, {}, to);
+                if (r == kNoReg && to->kind == TyKind::Int)
+                    r = dunder_call(v, from, "__index__", {}, to);
+                if (r != kNoReg) return r;
+            }
+            err(cur_line_, 1,
+                to->kind == TyKind::Float
+                    ? std::format("float() argument must be a string or a real number, not '{}'",
+                                  type_name(from))
+                    : std::format("int() argument must be a string, a bytes-like object or a "
+                                  "real number, not '{}'",
+                                  type_name(from)));
+            return v;
+        }
+    }
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;
