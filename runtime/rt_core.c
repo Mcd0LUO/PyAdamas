@@ -852,6 +852,9 @@ static void list_inline_pool_put(PyAdamasRc* h) {
 static void rc_leaf_free(PyAdamasRc* h, void* p) {
     if (rc_stats_on) stat_rc_free++;
     if (__builtin_expect(pa_diag_rc_on != 0, 0)) pa_diag_rc_free(p, (int32_t)h->kind);
+    // __del__ 必须在 rc_unlink **之前** 调：inst_vtable 需要对象仍在 RC 索引里
+    // （rc_index_has）。放在后面会让 vtable 查不到、__del__ 静默不执行。
+    if (pa_has_del_classes && h->kind == PYADAMAS_RC_INSTANCE) pa_instance_call_del(p);  /* 0.539 */
     rc_unlink(h);
     if (h->dtor) h->dtor(p);
     if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
@@ -2097,6 +2100,7 @@ void pa_rc_dec_slow(void* p) {
         // 但函数调用本身（call/ret + 寄存器保存）已经付了。exact-RC 模式下
         // 字符串/range/struct 全是 untracked leaf —— bench_rc_gen 的 65 万次
         // 释放里绝大多数是字符串，每次省一次 61 条指令的函数调用。
+        if (pa_has_del_classes && h->kind == PYADAMAS_RC_INSTANCE) pa_instance_call_del(p);
         if (!(h->marked & PYADAMAS_RC_UNTRACKED)) rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);

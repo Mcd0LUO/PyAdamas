@@ -1435,6 +1435,10 @@ void* pa_class_method(void* cls, int64_t slot);
 /* unknown 域 dunder 分派：vtable 元数据第 7 字指向常量表 [__eq__, __lt__, __hash__, -1]。
    which: 0=__eq__ / 1=__lt__ / 2=__hash__；返回方法代码地址，没有实现返回 NULL。 */
 void* pa_instance_dunder_fn(void* obj, int64_t which);
+/* 0.539：RC 归零释放实例前调用 __del__（异常打一行吞掉）。 */
+void pa_instance_call_del(void* p);
+/* 程序里是否存在带 __del__ 的类（codegen 强定义时置 1）。 */
+extern int64_t pa_has_del_classes;
 PyAdamasStr* pa_class_name(void* cls);
 PyAdamasStr* pa_class_repr(void* cls);
 int64_t pa_isinstance_class(void* obj, void* cls);

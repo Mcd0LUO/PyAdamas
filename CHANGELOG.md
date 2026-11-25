@@ -4,6 +4,46 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.539] - 2026-11-25
+
+> feat(runtime,lower)：**支持用户类 `__del__`**（RC 归零、释放前调用一次）。
+>
+> ```python
+> class V:
+>     def __init__(self, x: int) -> None:
+>         self.x = x
+>     def __del__(self) -> None:
+>         print("destroyed", self.x)
+> v: V = V(1)
+> print("before")     # before → destroyed 1（与 CPython 一致）
+> ```
+>
+> 实现：类元数据 dunder 表从 `[eq, lt, hash, -1]` 扩成 `[eq, lt, hash, del_slot]`（第 5 个 `.quad`，
+>无实现填 -1），`pa_instance_dunder_fn` 的 `which` 上限 2 → 3；释放路径（`rc_leaf_free` 与
+>`pa_rc_dec_slow`）在 dtor 之前调用 `__del__`。
+>
+> 异常兜底走 **C 侧 handler**：`pa_handler_push()` + `setjmp(h->env)`，捕获后
+>`pa_exc_type_name/message` 取内容、`pa_exc_clear()` 清 pending、`pa_handler_leave(h)` 收尾；
+>往 stderr 打一行 `__del__ raised <类型>: <消息>` 后**继续释放、不终止程序**。
+>
+> 实现时踩到并修掉的两个问题（值得记）：
+>1. **必须在 `rc_unlink` 之前调用**：`inst_vtable` 依赖 `rc_index_has`，对象一旦从 RC 索引摘掉，
+>   查 vtable 会得 NULL，`__del__` 静默不执行（第一版就是这个症状）；
+>2. **不能无条件查**：每个实例释放都做一次 dunder 查表，`binary_trees` 实测 **+8.3%**。
+>   改成程序级开关：codegen 发现「有类实现 `__del__`」时发射强符号 `pa_has_del_classes = 1`，
+>   覆盖 runtime 的弱定义；没有 `__del__` 的程序只多一次全局读 → 12 基准回到 0.00%。
+>
+> 保证与不保证（写进 `docs/language.md`）：
+>- 保证：RC 归零会调用；`__del__` 里读字段、`del self.x` 合法；异常打一行吞掉；同一对象至多一次；
+>- **不保证**：GC 环回收**不调用**（与 CPython 的 PEP 442 不同）；`__del__` 里触发另一个对象析构时，
+>  那一次的 `__del__` 会被跳过（`in_del_call` 防重入的代价）。
+>
+> 回归 `tests/run/del_method.py`（正常释放 / `__del__` 读字段 / 抛异常不终止 / 互相引用不崩），
+>与 CPython 的可比部分逐字节一致。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **528** / difftest 496/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8；
+>**全量 ASan 套件 528 ran ok、零 sanitizer 报告**。
 ## [0.538] - 2026-11-25
 
 > feat(typecheck)：**`del <name>` 之后在同一块内再读会报错**（保守版）。

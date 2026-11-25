@@ -112,6 +112,7 @@ std::string AsmGen::gen(const IRModule& m) {
         dbg_on_ = !m.source_path.empty();
         dbg_entries_.clear();
         dbg_seq_ = 0;
+        bool has_del_class = false;  // 0.539：有 __del__ 的类存在时给运行期一个强符号
         global_labels_.resize(m.globals.size());
         for (size_t i = 0; i < m.globals.size(); ++i)
             global_labels_[i] = m.globals[i].symbol.empty()
@@ -366,12 +367,13 @@ std::string AsmGen::gen(const IRModule& m) {
                 quad_dec(emit_.out, emit_.line_buf, static_cast<int64_t>(c.own_slots.size()));
                 for (int s : c.own_slots)
                     quad_dec(emit_.out, emit_.line_buf, s);
-                // dunder 槽表：[__eq__, __lt__, __hash__, -1]；unknown 域据此分派。
+                if (c.del_slot >= 0) has_del_class = true;
+                // dunder 槽表：[__eq__, __lt__, __hash__, __del__]；unknown 域据此分派。
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvtdun", static_cast<int64_t>(i)));
                 quad_dec(emit_.out, emit_.line_buf, c.eq_slot);
                 quad_dec(emit_.out, emit_.line_buf, c.lt_slot);
                 quad_dec(emit_.out, emit_.line_buf, c.hash_slot);
-                quad_dec(emit_.out, emit_.line_buf, -1);
+                quad_dec(emit_.out, emit_.line_buf, c.del_slot);   // 0.539: __del__（-1 = 无）
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lcname", static_cast<int64_t>(i)));
                 emit_.line_buf = "\t.asciz \"";
                 emit_.line_buf += asm_escape(c.qualname);
@@ -398,6 +400,14 @@ std::string AsmGen::gen(const IRModule& m) {
                     quad_sym(emit_.out, emit_.line_buf, entry_ref(static_cast<int>(i)));
                 emit_.out += "\t.quad 0\n";
             }
+        }
+
+        // 0.539：程序里只要有类实现了 __del__，就给运行时一个强符号覆盖弱定义
+        // （rt_del.c 的 pa_has_del_classes），释放路径据此短路；没有 __del__ 的
+        // 程序只多一次全局读，实测 binary_trees 不退化。
+        if (has_del_class) {
+            emit_.out += "\t.data\n\t.align 8\n\t.globl pa_has_del_classes\n";
+            emit_.out += "pa_has_del_classes:\n\t.quad 1\n";
         }
 
         if (dbg_on_) {

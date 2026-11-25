@@ -1,5 +1,6 @@
 // lower/class.cpp —— 类属性、类定义与构造包装
 #include "lower/impl.h"
+#include <cstdio>
 
 #include "opt/opt.h"
 
@@ -363,6 +364,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
         mod_.classes[cid].eq_slot = slot_of("__eq__");
         mod_.classes[cid].lt_slot = slot_of("__lt__");
         mod_.classes[cid].hash_slot = slot_of("__hash__");
+        mod_.classes[cid].del_slot = slot_of("__del__");
     }
 
     // P4（lang_gaps）：把本类声明的普通方法按「限定名.方法名→槽」登记进

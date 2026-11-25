@@ -58,7 +58,7 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
    调用点是 C 运行时 → 编译方法，方法内的 raise 走展开器（ASan 全量覆盖）。 */
 void* pa_instance_dunder_fn(void* obj, int64_t which) {
     const int64_t* vt = inst_vtable(obj);
-    if (!vt || which < 0 || which > 2) return NULL;
+    if (!vt || which < 0 || which > 3) return NULL;  /* 0.539: 第 4 项是 __del__ */
     const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 8)[6];
     if (!tab) return NULL;
     int64_t slot = tab[which];

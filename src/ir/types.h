@@ -343,6 +343,8 @@ struct IRClass {
     // 域据此按「实例 → vtable → 槽」分派 __eq__/__lt__/__hash__
     // （typed 域仍走编译期槽号的直接 VCall，不受影响）。
     int eq_slot = -1;
+    // 0.539：__del__ 的槽号（-1 = 没有实现），释放路径据此调用。
+    int del_slot = -1;
     int lt_slot = -1;
     int hash_slot = -1;
 };
