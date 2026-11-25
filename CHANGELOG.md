@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.535] - 2026-11-25
+
+> feat(lower)：**局部变量绑定的方法可以直接调用**（B1 最小范围），并带健全性护栏。
+>
+> ```python
+> xs: list[float] = [1.0]
+> push = xs.append        # 以前：build 报 attribute access is only supported as a method call
+> push(2.0)               # 现在：正常，[1.0, 2.0]
+> ```
+>
+> 表示是**纯编译期**的：降级器每个函数记 `名字 → 那条 <recv>.<method> 的 AST`，不产生值、不占槽、
+>不新增堆对象种类；调用点命中登记就走一次普通方法调用。
+>
+> **健全性护栏（版本号）**：`assign_to` 每写一次名字或 `self.field` 就 +1；绑定点记下接收者与当时版本，
+>调用点版本不一致就**报错**而不是重放：
+>
+> ```python
+> push = xs.append
+> xs = ys
+> push(2.0)   # error: bound method's receiver 'xs' was reassigned after binding; call the method directly instead
+> ```
+>
+> 没有这条护栏时重放会在调用点重新求值接收者，静默改成对新对象的调用（CPython 调的是原对象）——
+>属于我们这轮一直在清的静默错值。
+>
+> 边界（继续报错，不猜）：存进容器 / 返回 / 作为参数传递 / 接收者 unknown 或联合 / 方法名不唯一。
+>回归：`tests/run/bound_method.py`（list.append、str.upper、用户类方法、重新赋值切对象，4 行与 CPython 一致）、
+>`tests/strict/bound_method_reassigned.py`（健全性反例，期望 build 拒绝）。
+>
+> 628 口径：default 499/626、old 504、`--imports` 167（不降；那 15 个把方法引用存变量的 stdlib 文件
+>都超出「局部变量 + 直接调用」的范围，因此没有新增通过）。
+> 闸门：套件 **523** / difftest 491/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 9/9。
 ## [0.534] - 2026-11-25
 
 > feat(runtime,lower)：**内置 `complex` 补 `.real` / `.imag` / `.conjugate()`**（`temp-proj/PITFALLS.md` 的 C3）。
