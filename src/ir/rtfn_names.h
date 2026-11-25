@@ -151,6 +151,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::IsInstanceClass: return "pa_isinstance_class";
         case RtFn::ObjClassId: return "pa_obj_class_id";
         case RtFn::IsNamedClass: return "pa_is_named_class";
+        case RtFn::IsInstanceOf: return "pa_is_instance_of";
         case RtFn::SuperLookup: return "pa_super_lookup";
         case RtFn::IsException: return "pa_is_exc";
         case RtFn::IsSeq: return "pa_is_seq";

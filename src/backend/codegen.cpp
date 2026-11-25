@@ -2,6 +2,7 @@
 #include "backend/impl.h"
 #include "backend/codegen.h"
 #include "backend/eh_emit.h"
+#include "ir/module.h"  // fnv1a64：类元数据的稳定 cid（0.531）
 
 #include <cctype>
 #include <cstdio>
@@ -285,6 +286,10 @@ std::string AsmGen::gen(const IRModule& m) {
                     quad_sym2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.out += "\t.quad 0\n";  // 导入类没有动态属性槽
                     emit_.out += "\t.quad 0\n";  // 导入类没有 dunder 槽表（实例 metadata 走定义模块那份）
+                    // 第 8 个字：跨模块稳定的类 id（限定名的 FNV-1a 64，0.531）——
+                    // 定义模块与导入方各算一次，天然一致。
+                    emit_.out += std::format("\t.quad {}\n",
+                                             static_cast<long long>(fnv1a64(e.qualname)));
                     raw_label2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.line_buf = "\t.asciz \"";
                     emit_.line_buf += asm_escape(e.qualname);
@@ -301,6 +306,12 @@ std::string AsmGen::gen(const IRModule& m) {
                 // 第 6 个字：动态属性槽偏移（0 = 没有）；第 7 个字：dunder 槽表指针。
                 quad_dec(emit_.out, emit_.line_buf, c.dict_off);
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lvtdun", static_cast<int64_t>(i)));
+                // 第 8 个字：跨模块稳定的类 id（限定名的 FNV-1a 64，0.531）。
+                // 与导入方同一个口径：`<模块运行时名>.<类名>`（导入侧用
+                // origin_qualname / 「模块名.类名」构造，两边必须逐字节一致）。
+                emit_.out += std::format("\t.quad {}\n",
+                                         static_cast<long long>(fnv1a64(
+                                             m.runtime_name + "." + c.name)));
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));

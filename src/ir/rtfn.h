@@ -111,7 +111,8 @@ enum class RtFn : uint16_t {
     ClassRepr,    // (class*) -> str*
     IsInstanceClass, // (obj*, class*) -> i64
     ObjClassId,   // (obj*) -> i64
-    IsNamedClass, // (obj*, str* qualname) -> i64  跨模块类模式按限定名匹配
+    IsNamedClass,
+    IsInstanceOf,   // (obj, i64 cid) -> bool  按 FNV-1a 64 类 id 沿 MRO 比较（0.531） // (obj*, str* qualname) -> i64  跨模块类模式按限定名匹配
     SuperLookup,  // (obj*, i64 after_cid, i64 slot, str* name) -> fnptr
     IsException,  // (obj*, str* type) -> i64
     IsSeq,        // (i64) -> i64  运行期值是不是 list/tuple

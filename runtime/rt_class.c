@@ -41,7 +41,7 @@ static const int64_t* inst_vtable(void* obj) {
 int64_t pa_isinstance(void* obj, int64_t class_id) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 7;
+    const int64_t* meta = vt - 8;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -59,7 +59,7 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
 void* pa_instance_dunder_fn(void* obj, int64_t which) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt || which < 0 || which > 2) return NULL;
-    const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 7)[6];
+    const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 8)[6];
     if (!tab) return NULL;
     int64_t slot = tab[which];
     if (slot < 0) return NULL;
@@ -71,15 +71,32 @@ void* pa_instance_dunder_fn(void* obj, int64_t which) {
 int64_t pa_obj_class_id(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return -1;
-    return (vt - 7)[1];   /* 元数据第 1 个字是类编号 */
+    return (vt - 8)[1];   /* 元数据第 1 个字是类编号 */
 }
 
+
+/* 跨模块稳定的类 id 比较（0.531）：元数据第 8 个字是限定名的 FNV-1a 64，
+   定义模块与导入方各算一次、天然一致；沿 MRO 做**整数**比较，取代
+   pa_is_named_class 的 strlen+memcmp。 */
+int64_t pa_is_instance_of(void* obj, int64_t cid) {
+    if (!cid) return 0;
+    const int64_t* vt = inst_vtable(obj);
+    if (!vt) return 0;
+    const int64_t* mro = (const int64_t*)(uintptr_t)(vt - 8)[0];
+    if (!mro) return 0;
+    int64_t n = mro[0];
+    for (int64_t i = 1; i <= n; ++i) {
+        const int64_t* m = (const int64_t*)(uintptr_t)mro[i];
+        if (m && m[7] == cid) return 1;
+    }
+    return 0;
+}
 /* 跨模块类模式：类编号只在模块内唯一，用「模块名.类名」比较。 */
 int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     if (!qualname) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 7;
+    const int64_t* meta = vt - 8;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -214,7 +231,7 @@ void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
         pa_raise_c("AttributeError", "'super' object has no attribute");
         return NULL;
     }
-    const int64_t* meta = vt - 7;
+    const int64_t* meta = vt - 8;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     int64_t n = mro ? mro[0] : 0;
     int found = 0;
@@ -259,7 +276,7 @@ int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
     if (h->kind == PYADAMAS_RC_INSTANCE) {
         const int64_t* vt = *(const int64_t**)obj;
         if (!vt) return 0;
-        const int64_t* meta = vt - 7;
+        const int64_t* meta = vt - 8;
         const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
         if (!mro || mro[0] < 1) return 0;
         const int64_t* m = (const int64_t*)(uintptr_t)mro[1];
@@ -332,7 +349,9 @@ int64_t pa_is_str(void* obj) {
 static void** attr_slot(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return NULL;
-    int64_t off = vt[-2];  // 元数据第 6 字（dict_off）：7 字元数据块 = vt[-7..-1]，偏移取 vt[-2]
+    // 元数据第 6 字（dict_off）：0.531 起是 **8** 字元数据块（vt[-8..-1]，第 8 字是类 id），
+    // 所以 dict_off 在 vt[-3]。
+    int64_t off = vt[-3];
     if (off <= 0) return NULL;
     return (void**)((char*)obj + off);
 }
