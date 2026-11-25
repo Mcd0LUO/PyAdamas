@@ -1099,7 +1099,16 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
             default:
                 // 类名下标是泛型参数（`MyList[int]`、`Generic[T]`），
                 // 我们不做泛型，返回 unknown 比判死有用
-                if (obj->kind == TyKind::Class) return t_unknown();
+                if (obj->kind == TyKind::Class) {
+                    // A1：类实例下标 `b[i]` 的类型取 `__getitem__` 的返回标注。
+                    // 以前一律 unknown，导致 `print(b[1])` / `str(b[1])` / 容器字面量
+                    // 把 float 结果按机器字（double 位模式）处理 —— 静默错值。
+                    if (obj->cls) {
+                        if (const MethodInfo* gi = obj->cls->method("__getitem__"))
+                            if (gi->call_sig && gi->call_sig->ret) return gi->call_sig->ret;
+                    }
+                    return t_unknown();
+                }
                 err(line, col, std::format("'{}' object is not subscriptable", type_name(obj)));
                 return t_unknown();
         }

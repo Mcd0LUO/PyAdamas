@@ -9,6 +9,15 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         return;
     }
     if (!ty) ty = t_unknown();
+    // 静态类型推不出来、但 **vreg 自己的类型已知**时按 vreg 走（A1 静默错值）：
+    // 类实例下标 `b[1]` 的类型来自 `__getitem__` 的返回标注，`tc_.type_of` 在
+    // 这里给的是 unknown，于是 float 结果被 pa_print_any 当机器字打成整数位模式。
+    // 只对 **float** 兜底：unknown 域里整型与堆指针同形，把 Int 当兜底会把
+    // 字符串指针打成整数（122_gen_throw 实测）。
+    if (ty->kind == TyKind::Unknown) {
+        TypePtr vt = vreg_ty(v);
+        if (vt && vt->kind == TyKind::Float) ty = vt;
+    }
     switch (ty->kind) {
         case TyKind::None: call_void(RtFn::PrintNone, {}); break;
         case TyKind::Bool: call_void(RtFn::PrintBool, {v}); break;
@@ -162,6 +171,10 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
 // print(..., file=f)：值先按 Print 的类型规则转成字符串，再写到文件。
 void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
     if (!ty) ty = t_unknown();
+    if (ty->kind == TyKind::Unknown) {  // 与 print_value 同一兜底（只认 float）
+        TypePtr vt = vreg_ty(v);
+        if (vt && vt->kind == TyKind::Float) ty = vt;
+    }
     VReg f = load_slot(print_file_slot_, t_file());
     switch (ty->kind) {
         case TyKind::List: print_seq(v, ty, false, true, line, col); return;
