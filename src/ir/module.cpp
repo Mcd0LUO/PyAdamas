@@ -386,35 +386,16 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
-        // 0.544：值/句柄类型各有 tag（30..45），不再退化成 unknown。
-        // 0.544 修正：Deque **不**跨模块（tag 30 停用）。开它会让
-        //   已排除的假设（0.549 调查）：
-        //   - 编解码不对称：❌ 最小用例 `d: deque[int]` 全局 + `def f(x: deque[int])`
-        //     跨模块正常工作（`len(d)` / `f(d)` 都对），enc/dec 的 tag 30 + 元素类型
-        //     是严格对称的；
-        //   - `isinstance(x, (types.CoroutineType, collections.abc.Coroutine))`：❌ 单独
-        //     复现**不**触发（ok），必须整文件 `check --imports asyncio/coroutines.py`；
-        //   - **依赖链二分（0.551）**：把 tag 30 打开后逐个 `check --imports` 直接依赖：
-        //     `collections/__init__.py` / `inspect.py` / `os.py` / `sys/__init__.py` /
-        //     `types.py` 都没有 isinstance 报错（只有各自的无关错误，如
-        //     `_collections_abc.py:89 sys._getframe` 未建模）；只有
-        //     `asyncio/coroutines.py` 复现 ⇒ 与该文件的 import 图无关，是**文件自身**
-        //     的 `_COROUTINE_TYPES` 元组在 tag 30 打开后元素类型退化。
-        //   - **决定性实验（0.551）**：enc 开 tag 30、但 dec 的 `case 30` 改成
-        //     `return t_unknown()`（或不消费元素类型）→ `asyncio/coroutines.py` **ok**。
-        //     说明字节流**没有错位**，问题在**解成真正的 Deque 类型之后**：
-        //     该文件的 `_COROUTINE_TYPES` tuple 元素在 check 的类型合并里被 Deque 参与
-        //     后不再是「类」。这是**类型检查侧**（join/assignable 与 tuple 元素推断）
-        //     的问题，不是编解码问题。下一步从 `_COROUTINE_TYPES` 的静态类型入手。
-        //   - 仍然成立的现象：只有 `asyncio/coroutines.py` 报「second argument must be a
-        //     class」，怀疑与 asyncio 的 import 图里某个模块的接口在 Deque tag 开启后
-        //     解出的类表被破坏有关（下一步：对 asyncio 的 import 做子集二分）。
-        // `asyncio/coroutines.py` 的 `isinstance(obj, _COROUTINE_TYPES)` 报
-        // 「second argument must be a class」——该文件里 tuple 元素类型
-        // （`types.CoroutineType` / `collections.abc.Coroutine`）经 imports 接口
-        // 解析后不再是类。根因待查，先保持 unknown（与 0.543 之前一致）。
-        case TyKind::Deque:
             e.u8(0);
+            break;
+        // 0.544：值/句柄类型各有 tag（30..45），不再退化成 unknown。
+        case TyKind::Deque:
+            // 0.551 修正：Deque 必须**单独**一个 case。0.548 把它接在上面那串
+            // fall-through 的末尾，于是 TypeObj/Exception/Complex 等全都写成了
+            // tag 30 + 一个元素类型，解码侧按 Deque 消费 → 接口整体错位
+            // （types.NoneType 这类 TypeObj 全变成 Deque）。
+            e.u8(30);
+            enc_type(e, t->sub.empty() ? t_unknown() : t->sub[0]);
             break;
         case TyKind::DateTime: e.u8(31); break;
         case TyKind::TimeDelta: e.u8(32); break;
@@ -604,7 +585,7 @@ TypePtr dec_type(Dec& d) {
             return t;
         }
         // 0.544：值/句柄类型 tag 30..45（与 enc_type 一一对应）。
-        case 30: return mk_deque(dec_type(d));
+        case 30: { return mk_deque(dec_type(d)); }
         case 31: return new_ty(TyKind::DateTime);
         case 32: return new_ty(TyKind::TimeDelta);
         case 33: return new_ty(TyKind::Path);

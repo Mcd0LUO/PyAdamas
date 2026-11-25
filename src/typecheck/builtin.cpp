@@ -1,5 +1,6 @@
 // typecheck/builtin.cpp —— 内置函数调用的类型分派
 #include "typecheck/typecheck.h"
+#include <cstdio>
 
 namespace pyadamas {
 

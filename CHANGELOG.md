@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.553] - 2026-11-25
+
+> fix(ir)：**Deque 跨模块 tag（30）恢复可用**——根因是 fall-through 落错 case，不是编解码不对称。
+>
+> ```python
+> # dmod.py: from collections import deque; d: deque[int] = deque(); d.append(1)
+> #          def total(x: deque[int]) -> int: ...
+> # main.py: import dmod; print(len(dmod.d), dmod.total(dmod.d))
+> ```
+>
+> 0.548 把 tag 30 加进了 `enc_type` 的一串 **fall-through** case 末尾（`TypeObj` / `AsyncTimeout` /
+>`AsyncTaskGroup` / `AsyncSemaphore` / `Exception` / `Complex` 共用同一个 `e.u8(0); break;`）。
+>插在 Deque 之前的那些 kind 于是**全部写成了 tag 30 + 一个元素类型**，而解码侧把 30 当 Deque 消费一个元素
+>—— 接口整体错位：`types.NoneType`、`types.CoroutineType`、`_collections_abc.*` 这些 `TypeObj` 全被解成
+>`Deque`，于是 `asyncio/coroutines.py:46` 的 `isinstance(obj, _COROUTINE_TYPES)` 报「第二个参数不是类」。
+>
+> 修法：给 Deque **单独**一个 case（`e.u8(30)` + 元素类型 + `break`），把 `TypeObj` 那组恢复成 `e.u8(0); break;`。
+>
+> 这也解释了之前所有「矛盾」的实验结论：
+>- 单个 `d: deque[int]` 用例能过（它确实编码正确）；
+>- dec 侧改成 `t_unknown()`（不消费元素）就能过（错位消失）；
+>- 只影响 `asyncio/coroutines.py`（它的 `import types` 会把 `types` 模块的 `TypeObj` 全局全部解坏）。
+>
+> 回归 `tests/modules/deque_xmod/`：跨模块读 `d[0]`、遍历、在对方模块追加后重算、本方构造再传入。
+>
+> 基线：syntax 621、default 500、old 505、imports **167**（不降）。
+> 闸门：套件 **560** / difftest 508/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.552] - 2026-11-25
 
 > fix(driver/check)：**项目代码导入编译器 stdlib 时按完整接口解析**——`check -I .` 与 `run` 的口径终于一致。
