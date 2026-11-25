@@ -12,6 +12,8 @@
 
     // 通用循环向量化开关（PYADAMAS_VECT，默认关）。
     bool vect_enabled_ = false;
+    // PYADAMAS_VECT_FASTFLOAT：浮点归约用 packed 累加（快、不保序）。
+    bool vect_fastfloat_ = false;
 
     // 通用循环向量化入口（backend/vect.cpp）：gen_block 在特化 matcher 未命中
     // 后调用。识别可数 for + 逐元素 map/reduction，匹配成功发「守卫 + SSE2

@@ -240,6 +240,8 @@ struct Manifest {
     int ra_opt = -1;
     // 通用循环向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int vect = -1;
+    // 浮点归约 packed 累加开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int vect_fastfloat = -1;
     // AVX2 4-lane 开关（PYADAMAS_AVX2）。-1 = 旧清单没有这一行：缓存必然
     // 失效一次（否则切换开关会命中另一条路径的 mod.s）。
     int avx2 = -1;
@@ -329,6 +331,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.vect = static_cast<int>(*o);
+        } else if (tag == "vectff") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.vect_fastfloat = static_cast<int>(*o);
         } else if (tag == "avx2") {
             std::string v;
             ss >> v;
@@ -409,6 +417,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "raopt " << (p.ra_opt ? 1 : 0) << "\n";
     out << "vect " << (p.vect ? 1 : 0) << "\n";
+    out << "vectff " << (p.vect_fastfloat ? 1 : 0) << "\n";
     out << "avx2 " << avx2_emit_tag() << "\n";
     out << "loopopt " << p.loop_opt << "\n";
     out << "inlineopt " << (p.inline_opt ? 1 : 0) << "\n";
@@ -669,6 +678,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->ra_opt != (p.ra_opt ? 1 : 0)) return false;
     if (m->vect != (p.vect ? 1 : 0)) return false;
+    if (m->vect_fastfloat != (p.vect_fastfloat ? 1 : 0)) return false;
     if (m->avx2 != avx2_emit_tag()) return false;
     if (m->loop_opt != p.loop_opt) return false;
     if (m->inline_opt != (p.inline_opt ? 1 : 0)) return false;
@@ -971,7 +981,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
                                         p.zero_cost_exc, skip_idx,
                                         p.ra_opt, p.inline_opt,
-                                        p.type_tags, p.vect, p.needs_dynamic_big);
+                                        p.type_tags, p.vect, p.needs_dynamic_big,
+                                        p.vect_fastfloat);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {

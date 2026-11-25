@@ -146,11 +146,9 @@ bool VectPlanner::try_loop(const Block& b) {
         }
     }
 
-    // reduction 槽（可多个并行）：float/int，体块内恰一写一读，写值 = 读值 +
-    // expr（或 expr + 读值）或读值 - expr（float 减号归约），读在写前（SSA 必然），
-    // 无其它循环内读；外部读允许（终值要维护）。各累加器独立向量寄存器，出口
-    // 各自写回（float 保序提取，int paddq 模 2^64 + 水平求和）。expr 含另一 acc
-    // 的读 → loads!=1 或 classify Acc → 保守拒绝（跨累加器依赖不证）。
+    // reduction 槽（可多个并行）：体块内恰一写一读，写值 = 读值 ± expr，读在写前；
+    // 各累加器独立向量寄存器，出口各自写回（float 保序或 packed，int paddq 水平求和）。
+    // expr 含另一 acc 的读 → loads!=1 或 classify Acc → 保守拒绝（跨累加器依赖不证）。
     using Red = VRed;                   // 定义在 opt/vect_planner.h（4-lane 也要读）
     using Access = VAccess;             // 同上：下标访问描述只有一份
     for (auto& [slot, info] : L.si) {
@@ -700,7 +698,12 @@ bool VectPlanner::try_loop(const Block& b) {
     }
     // int reduction 出口水平求和 scratch：先占保证不与任何 IACC 冲突
     //（多 int acc 时旧 xmm0/1 择一可能撞上另一个 IACC）。
-    if (L.any_int_red) { L.HSCR = L.take(kMRegNone); if (L.HSCR == kMRegNone) return false; }
+    // 浮点 packed 累加在入口清高 lane、出口水平求和也要 scratch（与 int 共用）。
+    bool any_float_red = false;
+    for (const Red& r : L.reds) if (r.is_float) any_float_red = true;
+    if (L.any_int_red || (gen_.vect_fastfloat() && any_float_red)) {
+        L.HSCR = L.take(kMRegNone); if (L.HSCR == kMRegNone) return false;
+    }
 
     // 临时值线性扫描：按体块顺序，VecF/VecI 生产者分配 xmm，操作数末次使用后释放。
     for (size_t i = 0; i < L.BI.size(); ++i) {
@@ -842,7 +845,12 @@ bool VectPlanner::try_loop(const Block& b) {
     // 循环期间保持不变），见发射处的 CallRt 分支。
     for (const Red& r : L.reds) {
         if (r.is_float) {
-            if (r.acc_stack) gen_.emit2(MOp::kMovsd, r.loc, r.XT);
+            if (r.acc_stack) gen_.emit2(MOp::kMovsd, r.loc, r.XT);  // 内存装载清零高 lane
+            else if (gen_.vect_fastfloat()) {                       // 寄存器 acc：显式清高 lane
+                gen_.emit2(MOp::kPxor, L.HSCR, L.HSCR);
+                gen_.emit2(MOp::kMovsd, r.XT, L.HSCR);
+                gen_.emit2(MOp::kMovapd, L.HSCR, r.XT);
+            }
         } else {
             // int acc 必须装载槽的**当前值**进低 lane（高 lane 自动清 0）：
             // 循环前累加器可能非 0（t=49; for...: t+=n）。pxor 清 0 + 出口覆盖写
@@ -1119,7 +1127,10 @@ bool VectPlanner::try_loop(const Block& b) {
                 if (!rp) return false;                    // 不应发生
                 MReg re = L.xmm_of(rp->expr);
                 if (re == kMRegNone) return false;
-                if (rp->is_float) {
+                if (rp->is_float && gen_.vect_fastfloat()) {
+                    // packed 累加：acc[0..1] += expr[0..1]，两条独立链；不保序（默认关）。
+                    gen_.emit2(MOp::kAddpd, re, rp->XT);
+                } else if (rp->is_float) {
                     // 保序提取累加：acc += e0; acc += e1（或 acc -= e0; acc -= e1，
                     // 减号归约按同一 lane 顺序 subsd → 与标量逐位一致）。
                     // expr 被共享（末次使用晚于本 store）→ scratch 副本提取，
@@ -1167,7 +1178,14 @@ bool VectPlanner::try_loop(const Block& b) {
     // 出口：各 int reduction 水平求和写回槽（标量尾/cond/end 读最新）。
     // HSCR 先占且不与任何 IACC 冲突；逐个求和写回，相互独立。
     for (const Red& r : L.reds) {
-        if (r.is_float) continue;
+        if (r.is_float) {
+            if (gen_.vect_fastfloat()) {  // packed 出口：acc.lo += acc.hi
+                gen_.emit2(MOp::kMovhlps, r.XT, L.HSCR);
+                gen_.emit2(MOp::kAddsd, L.HSCR, r.XT);
+                if (r.acc_stack) gen_.emit2(MOp::kMovsd, r.XT, r.loc);
+            }
+            continue;
+        }
         gen_.emit2(MOp::kMovhlps, r.IACC, L.HSCR);
         gen_.emit2(MOp::kPaddq, L.HSCR, r.IACC);
         gen_.emit2(MOp::kMovq, r.IACC, kRax);

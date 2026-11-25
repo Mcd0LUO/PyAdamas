@@ -221,6 +221,9 @@ public:
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
 
         void set_vect(bool v) { vect_enabled_ = v; }  // PYADAMAS_VECT，默认关，参与缓存失效
+        // PYADAMAS_VECT_FASTFLOAT=1：浮点归约用 packed 累加（快、不保序）。
+        void set_vect_fastfloat(bool v) { vect_fastfloat_ = v; }
+        bool vect_fastfloat() const { return vect_fastfloat_; }
         void set_inline_opt(bool v) { inline_opt_ = v; }  // PYADAMAS_INLINE_OPT，默认关
         // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关，docs/numeric-types-design.md §2）：
         // 在 P3 shadow tag 之上追加 NONE/BOOL 与精确堆子类 tag，解锁

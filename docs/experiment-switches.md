@@ -9,6 +9,7 @@
 ## 1. 结账表
 
 | 开关 | 默认 | 读取位置 | 结论 | 证据 / 理由 |
+| `PYADAMAS_VECT_FASTFLOAT=1` | 浮点归约用 packed 累加（`addpd`），**不保序**：与标量逐位结果可能差最后几位。默认关（0.522）。 | 热循环归约 **28ms → 23ms（−18%）**；内存受限场景 ~3% | 需要与 `-O0` 逐位一致时**不要开**（difftest 会红） |
 |---|---|---|---|---|
 | `PYADAMAS_RA_OPT` | **关** | `main.cpp`（`prog.ra_opt`；manifest 行 `raopt`） | **保持 opt-in** | 0.475 两窗各 15 轮：realistic 合计 −0.2%（逐例 \|Δ\|<0.7%，obj_dispatch +0.2%）、classic 合计 +1.8%（**反号**）。asm 真正变化的只有 3 例：nqueens **+8.5%**（p25 +7.0%，回退方向）、fasta +4.8%（p25 +20.9%）、dict_wordfreq −0.7%；其余 15 例 asm 逐字节相同。0.470 的入口私有全局提升之后 obj_dispatch 上收益已归零。**触发条件**：出现「同块跨调用、活跃区间长」的新热循环，或 call graph 分析落地后重测；`docs/ra-opt-design.md` §6 |
 | ~~`PYADAMAS_RA_SPLIT`~~ | **已删除** | `main.cpp`：设了非 0 值直接 `error` 退出（rc=2） | **删代码（已完成）** | `docs/regalloc.md` §已否决：三轮实现均 +27~28%。已按清单删除 `assign_slot_regs_split`、`slot_loc_/slot_reload_in_/slot_spill_out_` 及其在 `block.cpp` 的 5 处使用、`spill_placement.{cpp,h}`、`Program.rc_split` 与 manifest 行 `rcsplit`。**验收**：默认路径 12 基准 asm 逐字节不变（删前/删后 `cmp` 全同）；只剩一条 rc=2 报错文案，防止 A/B 脚本误以为在跑另一条分配路径 |

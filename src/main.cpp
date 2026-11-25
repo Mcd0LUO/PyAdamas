@@ -585,6 +585,9 @@ int main(int argc, char** argv) {
         // PYADAMAS_VECT=0 显式关。参与缓存失效。
         const char* vect_env = std::getenv("PYADAMAS_VECT");
         prog.vect = !vect_env || std::string_view(vect_env) != "0";
+        // 浮点归约 packed 累加（默认关）：快但不保序，与标量逐位结果可能不同。
+        const char* ff_env = std::getenv("PYADAMAS_VECT_FASTFLOAT");
+        prog.vect_fastfloat = ff_env && std::string_view(ff_env) != "0";
         // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
         // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
         // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
@@ -641,7 +644,8 @@ int main(int argc, char** argv) {
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
                     false, prog.ra_opt,
-                    prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big);
+                    prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big,
+                    prog.vect_fastfloat);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

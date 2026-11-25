@@ -800,7 +800,8 @@ void AsmGen::emit_eh_tables() {
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
                          bool zero_cost_exc, bool index_readonly,
                          bool ra_opt,
-                         bool inline_opt, bool type_tags, bool vect, bool needs_dynamic_big) {
+                         bool inline_opt, bool type_tags, bool vect, bool needs_dynamic_big,
+                         bool vect_fastfloat) {
     AsmGen g;
     // Erased big keys (and UNK shadow tags) rely on the live RC index, even
     // if the module that creates the BigInt has no local dynamic operations.
@@ -811,6 +812,7 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index,
     g.set_inline_opt(inline_opt);
     g.set_type_tags(type_tags);
     g.set_vect(vect);
+    g.set_vect_fastfloat(vect_fastfloat);
     return g.gen(m);
 }
 

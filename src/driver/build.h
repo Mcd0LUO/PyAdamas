@@ -69,6 +69,9 @@ struct Program {
     // 通用循环自动向量化（PYADAMAS_VECT，默认开）：改变代码生成结果，
     // 必须写进模块缓存清单参与失效。
     bool vect = false;
+    // 浮点归约用 packed 累加（PYADAMAS_VECT_FASTFLOAT=1，默认关）：��度快，
+    // 但**不保序**——与标量逐位结果可能不同，故默认关且参与缓存失效。
+    bool vect_fastfloat = false;
     // 整数循环优化（PYADAMAS_LOOP_OPT，默认 0 全关）：改变 IR 优化结果，
     // 同样必须写进模块缓存清单参与失效。位掩码见 opt/opt.h。
     int loop_opt = 0;

@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.522] - 2026-11-25
+
+> perf(backend)：**浮点归约接通 packed 累加**（`addpd`），新增开关 `PYADAMAS_VECT_FASTFLOAT=1`（默认关）。
+>
+> 问题（用户实测发现）：`PYADAMAS_VECT=1` 下浮点归约的 asm 是 **`mulpd` 算出两个 lane、再用两条 `addsd` 写进同一个累加器**——
+>依赖链没断，所谓 2-lane 是「假并行」，所以 `VECT=1` 与 `VECT=0` 计时几乎一样（浮点 ~10 GB/s vs 整数 40 GB/s 的一个来源）。
+>
+> 根因不是「没有 AVX2」，而是**浮点归约这条路径为了保序**（与标量逐位一致）主动做了 lane 提取 + 两次标量加。
+> 本版把 packed 累加接通：
+>
+> - 累加器在循环里保持 **packed 两 lane**，每轮一条 `addpd expr, acc`（两条 lane 各自累加，依赖链断成两条）；
+> - 入口：栈上 acc 用 `movsd` 装载（高 lane 天然清零）；寄存器提升的 acc 用 `pxor + movsd + movapd` 清高 lane；
+> - 出口：`movhlps` + `addsd` 做**水平求和**写回（`acc.lo += acc.hi`）；
+> - 开关参与 modcache 键（`vectff` 行），切换开关不会命中旧产物。
+>
+> **为什么默认关**：packed 累加改变了浮点加法顺序（偶数位一组、奇数位一组，最后相加），结果可能与标量**差最后几位**，
+>而 `difftest` 要求 `-O0`/`-O2` 输出逐位一致。所以默认仍走保序路径；需要速度时显式开。
+>
+> 实测（`fsum` 热循环，8 元素 list 跑 200 万轮，L1 常驻）：
+>
+> | 模式 | 耗时 |
+> |---|---|
+> | `VECT=0`（标量） | 42ms |
+> | `VECT=1`（保序 2-lane） | 28ms |
+> | `VECT=1 + FASTFLOAT=1`（packed 累加） | **23ms（−18% vs 保序，−45% vs 标量）** |
+>
+> 内存受限场景（2000 万元素 `list[float]`，元素是装箱 float）只快 ~3%——瓶颈在指针追逐/带宽，不在依赖链，这也解释了
+>为什么之前看不出差别。默认路径（不开开关）的生成代码**逐字节不变**。
+>
+> 文档：`docs/experiment-switches.md` 增加该开关一行（含「不要与逐位对拍同时用」的警告）。
+>
+> 闸门：套件 / difftest / check_size / ctest（合并时跑一次）。
 ## [0.521] - 2026-11-25
 
 > feat(runtime)：**系统对象的最后两件**——`os.uname()` 与 `sys.float_info` / `sys.flags`。
