@@ -74,6 +74,8 @@ struct SigParam {
 struct SigFunc {
     std::string name;         // 模块内属性名（Python 里看到的名字）
     std::string rt_symbol;    // 运行期 C 符号（如 "pa_time_sleep"）
+    // @reject("msg")：成员存在但不可用，使用时报编译错误。
+    std::string reject_msg;
     RtFn fn = RtFn::ListNew;  // 由 rt_symbol 反查 rt_name() 得到
     std::vector<SigParam> pos;
     std::vector<SigParam> kwonly;
@@ -308,6 +310,14 @@ class DeclParser {
                 f.ret_specialized = true;
                 continue;
             }
+            if (dec.name == "reject") {
+                if (!dec.has_string_arg)
+                    pydecl::fail(dec.line, "@reject needs a message string argument");
+                if (!f.reject_msg.empty())
+                    pydecl::fail(dec.line, "duplicate @reject on '" + fd.name + "'");
+                f.reject_msg = dec.arg;
+                continue;
+            }
             if (dec.name != "native")
                 pydecl::fail(dec.line, "unknown decorator on '" + fd.name +
                                            "' (only @native(\"pa_symbol\") and "
@@ -506,7 +516,9 @@ inline void resolve_rt_symbols(ModuleSig& ms) {
     // 模块函数 + 原生类的构造器/方法都要做符号反查（同一个 RtFn 表）。
     std::vector<SigFunc*> all;
     all.reserve(ms.funcs.size());
-    for (auto& f : ms.funcs) all.push_back(&f);
+    // @reject 的成员没有运行期实现，不参与符号反查。
+    for (auto& f : ms.funcs)
+        if (f.reject_msg.empty()) all.push_back(&f);
     for (auto& c : ms.classes) {
         if (c.has_init) all.push_back(&c.init);
         for (auto& m : c.methods) all.push_back(&m);
@@ -683,6 +695,10 @@ inline ModuleInfoPtr module_info(const std::string& module) {
     info->name = ms->module;
     info->builtin = true;
     for (auto& f : ms->funcs) {
+        if (!f.reject_msg.empty()) {
+            info->rejects[f.name] = f.reject_msg;
+            continue;
+        }
         // 名字按硬编码惯例带模块前缀（"random.choice"）：typecheck 的
         // check_args 对 random./itertools./operator./collections./json. 前缀的
         // 函数有「返回类型随实参特化」的专用分派；不带前缀会退化成 unknown。

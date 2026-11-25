@@ -1,4 +1,5 @@
 // typecheck/stmt.cpp —— 语句类型检查：控制流、try/with、赋值与解包
+#include "driver/build.h"
 #include "typecheck/typecheck.h"
 
 #include <filesystem>
@@ -643,6 +644,10 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     }
                     auto it = mod->globals.find(at->attr);
                     if (it == mod->globals.end()) {
+                        if (auto msg = reject_message(vn->id, at->attr); !msg.empty()) {
+                            err(line, col, msg);
+                            return;
+                        }
                         err(line, col,
                             std::format("module '{}' has no attribute '{}'", vn->id, at->attr));
                         return;
