@@ -126,6 +126,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictVersion: return "pa_dict_version";
         case RtFn::DictKeyAt: return "pa_dict_key_at";
         case RtFn::ListContains: return "pa_list_contains";
+        case RtFn::ListContainsI64: return "pa_list_contains_i64";
+        case RtFn::ListContainsF64: return "pa_list_contains_f64";
+        case RtFn::ListContainsStr: return "pa_list_contains_str";
         case RtFn::ListEq: return "pa_list_eq";
         case RtFn::DictEq: return "pa_dict_eq";
         case RtFn::SetEq: return "pa_set_eq";

@@ -885,7 +885,21 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
                     for (auto& sub : rt->sub)
                         if (key_kind(sub) != ck) { ck = 3; break; }
                 }
-                flag = call_runtime(RtFn::ListContains, t_bool(), {r, l, const_int(ck)});
+                // P2-A（0.531）：元素类型静态已知时走特化入口（跳过通用 cmp_kind
+                // 分派）。判不准（unknown/联合/容器元素）保持通用路径。
+                RtFn spec = RtFn::ListContains;
+                if (rt->kind == TyKind::List && et) {
+                    if (et->kind == TyKind::Int || et->kind == TyKind::Bool)
+                        spec = RtFn::ListContainsI64;
+                    else if (et->kind == TyKind::Float)
+                        spec = RtFn::ListContainsF64;
+                    else if (et->kind == TyKind::Str)
+                        spec = RtFn::ListContainsStr;
+                }
+                if (spec == RtFn::ListContains)
+                    flag = call_runtime(spec, t_bool(), {r, l, const_int(ck)});
+                else
+                    flag = call_runtime(spec, t_bool(), {r, l});
             } else if (rt && (rt->kind == TyKind::Str || rt->kind == TyKind::Bytes)) {
                 if (lt && lt->kind != TyKind::Str && lt->kind != TyKind::Bytes &&
                     lt->kind != TyKind::Unknown) {

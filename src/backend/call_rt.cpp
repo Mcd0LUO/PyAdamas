@@ -809,6 +809,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListInsert:   /* 0.303：(list*, i, v, heap) */
         case RtFn::DictSet:
         case RtFn::ListContains:
+        case RtFn::ListContainsI64:
+        case RtFn::ListContainsStr:
         case RtFn::ListEq:
         case RtFn::DictEq:
         case RtFn::ListSortedBy:
@@ -1035,6 +1037,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MathFma:
             gen_rt_f3(in);
             break;
+        case RtFn::ListContainsF64:
         case RtFn::ListSumF64:
         case RtFn::RangeSumF64:
         case RtFn::AsyncioWaitFor:

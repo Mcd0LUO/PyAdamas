@@ -1234,6 +1234,10 @@ PyAdamasStr* pa_int_to_base(int64_t v, int64_t base);
 double pa_round_f64(double x, int64_t ndigits);
 int64_t pa_round_i64(int64_t v, int64_t ndigits);
 int64_t pa_str_eq(PyAdamasStr* a, PyAdamasStr* b);
+/* 按元素类型特化的 list 成员查找（0.531）：跳过通用 cmp_kind 分派。 */
+int64_t pa_list_contains_i64(PyAdamasList* l, int64_t v);
+int64_t pa_list_contains_f64(PyAdamasList* l, double v);
+int64_t pa_list_contains_str(PyAdamasList* l, PyAdamasStr* v);
 int64_t pa_str_cmp(PyAdamasStr* a, PyAdamasStr* b);
 /* 字符串方法派发：op 序号与 src/ir/ir.h 的 StrOp 一致；未用的参数传 0。 */
 int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
