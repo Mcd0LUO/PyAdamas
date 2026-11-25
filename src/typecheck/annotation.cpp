@@ -55,6 +55,18 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             // 0.542：`buf: buffer` 这类标注（与内置 `buffer(n)` 返回同一个类型）。
             // 漏了它会静默退化成 unknown：字段读回是 unknown，`w.buf[i] = v` 走
             // 列表下标写路径 → 段错误 / 堆损坏。
+            // 0.543：补全「有运行期实现但注解不认」的内置类型名。以前这些一律
+            // 退化成 unknown，于是构造出来的值调方法/读字段都在降级期报
+            // 「method/attribute is only supported ...」。
+            //   deque（元素类型未知，deque[int] 走下标分支）
+            //   datetime / date（同一个 TyKind::DateTime）
+            //   timedelta / Path / range / Popen
+            if (id == "deque" || id == "Deque") return mk_deque(t_unknown());
+            if (id == "datetime" || id == "date") return new_ty(TyKind::DateTime);
+            if (id == "timedelta") return new_ty(TyKind::TimeDelta);
+            if (id == "Path") return new_ty(TyKind::Path);
+            if (id == "range") return mk_range(t_int());
+            if (id == "Popen") return t_popen();
             if (id == "buffer") {
                 auto bt = mk_buffer(t_float());
                 bt->celem = CKind::Float;
@@ -128,6 +140,8 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                                         args.size() > 2 ? args[2] : nullptr);
                 return mk_async_generator(inner);
             }
+            if ((base == "deque" || base == "Deque") && args.size() == 1)
+                return mk_deque(args[0] ? args[0] : t_unknown());
             if (base == "Queue" && args.size() == 1)
                 return mk_async_queue(args[0]);
             if (base == "Union") {
@@ -201,6 +215,10 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                         if (mod->name == "random" && at->attr == "Random") return t_random();
                         if (mod->name == "subprocess" && at->attr == "CompletedProcess")
                             return t_completed();
+                        if (mod->name == "subprocess" && at->attr == "Popen") return t_popen();
+                        // 0.543：`re.Pattern` / `re.Match` 的 dotted 注解。
+                        if (mod->name == "re" && at->attr == "Pattern") return t_regex();
+                        if (mod->name == "re" && at->attr == "Match") return t_match();
                         // B3b（0.533）：asyncio 原语的内建类型。标注成 unknown 会让
                         // `async with` 在**降级**阶段被拒（前端放行、后端报错），
                         // 而不标注反而能过 —— 标注了更差。
