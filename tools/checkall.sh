@@ -288,6 +288,13 @@ gate_suite() {
     passed=$(grep -c 'ran ok' "$logfile" || true)
     failed=$(grep -cE 'FAILED|OUTPUT DIFF|MISSING RESULT|WRONG:|MISSED|COMPILED|NOT MARKED|CACHE MISS|SECOND RUN' "$logfile" || true)
     record "suite" "$(timer_end "$t0")" "$rc" "$passed ran ok / $failed 失败" "PYADAMAS_TEST_JOBS=$JOBS $asan_env bash tests/run_tests.sh $BUILD_DIR $BIN"
+    # 失败时**直接把用例名打出来**：summary 只有总数，翻几百行 "ran ok" 找那一行太费劲。
+    if [ "$rc" -ne 0 ] || [ "$failed" -gt 0 ]; then
+        echo "  ── 失败用例 ──"
+        grep -E 'FAILED|OUTPUT DIFF|MISSING RESULT|WRONG:|MISSED|COMPILED|NOT MARKED|CACHE MISS|SECOND RUN' "$logfile"             | sed 's/^/    /' | head -20
+        echo "    完整日志：$logfile"
+        return 0
+    fi
     rm -f "$logfile"
     return 0
 }

@@ -19,6 +19,7 @@ cmake -S . -B build/lead -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build bu
 
 # 闸门：一次跑完 build / suite / difftest / check_size
 bash tools/checkall.sh --quick                 # 日常合并用这个
+# 失败时 checkall 会直接打印「失败用例」清单（不用翻几百行 ran ok）
 bash tools/checkall.sh --full                  # 发版/大改：+ 12 基准 perf + 向量化自检 + git 状态
 ctest --test-dir build/lead                    # 9 项（含 import 检查、traceback、opt 档位、progcache、pkg、gc_conservative）
 ```
