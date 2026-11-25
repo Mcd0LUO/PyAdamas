@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.548] - 2026-11-25
+
+> feat(ir)：**交叉模块类型 tag 31–45**——15 个内置类型跨模块可带类型身份（不再是 unknown）。
+>
+> | tag | 类型 | | tag | 类型 |
+> |---|---|---|---|---|
+> | 31 | `DateTime` | | 39 | `UnameInfo` |
+> | 32 | `TimeDelta` | | 40 | `FloatInfo` |
+> | 33 | `Path` | | 41 | `SysFlags` |
+> | 34 | `Regex` | | 42 | `StatResult` |
+> | 35 | `Match` | | 43 | `CompletedProcess` |
+> | 36 | `Popen` | | 44 | `Random` |
+> | 37 | `Buffer`（元素类型 + 宽度） | | 45 | `Range` |
+> | 38 | `StructTime` | | | |
+>
+> 跨模块用例（`tests/modules/*_xmod/`）：datetime、timedelta、path、range、buffer、regex、match、random
+>——**句柄类都真的在导入侧调了方法**，不是只赋值。
+>
+> **tag 30（Deque）被停用**：打开它会让 `check --imports /usr/lib/python3.14/asyncio/coroutines.py` 从 ok 变成
+>`isinstance() second argument must be a class or builtin type`（`_COROUTINE_TYPES` 那个 tuple 的元素类型在导入方
+>不再是类）。二分定位到 tag 30 单点；按「不为一个文件放宽 isinstance 检查」的原则，Deque 跨模块退回 unknown
+>——**同模块内的 `deque` / `deque[T]` 注解仍然可用**（0.544 的成果保留）。
+>
+> 仍保持 unknown 的（注释清单已写进 `enc_type`）：`File`、`DYLIB`、`VThread`、`Chan`（跨模块传裸句柄不安全），
+>`Struct`/`StructPtr`（走 0.543 的 27/28），`.cpya` 的 `c_struct`（布局由 C 头决定）。
+>
+> 接口格式版本 **17**（0.543 的 struct 段漏 bump 已在 0.547 补成 16，本次再进到 17）。
+>
+> 基线：syntax 621、default **500**、old **505**、imports **167**（与 0.544 持平，不降）。
+> 闸门：套件 **549** / difftest 506/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.547] - 2026-11-25
 
 > feat(typecheck)：**默认参数支持常量表达式**（编译期折叠）。
