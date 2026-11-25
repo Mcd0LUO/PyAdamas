@@ -554,6 +554,9 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::StatResult:
         case TyKind::StructTime:
+        case TyKind::UnameInfo:
+        case TyKind::FloatInfo:
+        case TyKind::SysFlags:
         case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:
@@ -611,6 +614,9 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::StatResult:
         case TyKind::StructTime:
+        case TyKind::UnameInfo:
+        case TyKind::FloatInfo:
+        case TyKind::SysFlags:
         case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:

@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 static void os_raise(const char* what, int err) {
@@ -604,6 +605,25 @@ static PyAdamasList* stat_fill(const char* path, int follow) {
 
 PyAdamasList* pa_os_stat(PyAdamasStr* path) { return stat_fill(path->data, 1); }
 PyAdamasList* pa_os_lstat(PyAdamasStr* path) { return stat_fill(path->data, 0); }
+
+/* os.uname()（0.520）：5 个字符串放进 list 承载（sysname/nodename/release/version/machine），
+   属性读由降级层映射成 ListGet(obj, 常量下标)。 */
+
+/* os.uname()（0.520）：属性按需取值（每次 uname(2)，开销可忽略）。
+   不在运行期承载 list —— 那个 list 在「赋值给变量」的路径上会被 temp 栈与
+   槽各释放一次（实测 refcount 报错），而 uname 的属性本来就该是只读快照。 */
+PyAdamasStr* pa_os_uname_field(int64_t which) {
+    struct utsname u;
+    if (uname(&u) != 0) os_raise("uname", errno);
+    const char* s = which == 0   ? u.sysname
+                    : which == 1 ? u.nodename
+                    : which == 2 ? u.release
+                    : which == 3 ? u.version
+                                 : u.machine;
+    return str_new(s, (int64_t)strlen(s));
+}
+
+int64_t pa_os_uname(void) { return 0; }  /* 占位值：属性访问走 pa_os_uname_field */
 /* ── os.system：返回 C system() 的 wait status（CPython/Unix 口径）── */
 int64_t pa_os_system(PyAdamasStr* cmd) {
     return (int64_t)system(cmd->data);

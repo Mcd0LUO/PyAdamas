@@ -70,6 +70,9 @@ enum class TyKind : uint8_t {
     CompletedProcess,  // subprocess.run() 返回的结果对象
     StatResult,        // os.stat()/lstat() 的结果对象（10 个整数属性）
     StructTime,        // time.localtime()/gmtime()/strptime() 的结果（9 个 tm_* 属性）
+    UnameInfo,         // os.uname() 的结果（5 个字符串属性）
+    FloatInfo,         // sys.float_info（11 个属性，float/int 混合；属性走原生 getter）
+    SysFlags,          // sys.flags（14 个 int 属性；值为 pyadamas 的实际值，全 0）
     Popen,        // subprocess.Popen() 返回的进程句柄
     Regex,        // re.compile() 返回的 Pattern
     Match,        // re.search()/match() 返回的 Match
@@ -774,6 +777,18 @@ inline const TypePtr& t_random() {
 }
 inline const TypePtr& t_completed() {
     static TypePtr v = new_ty(TyKind::CompletedProcess);
+    return v;
+}
+inline const TypePtr& t_float_info() {
+    static TypePtr v = new_ty(TyKind::FloatInfo);
+    return v;
+}
+inline const TypePtr& t_sys_flags() {
+    static TypePtr v = new_ty(TyKind::SysFlags);
+    return v;
+}
+inline const TypePtr& t_uname() {
+    static TypePtr v = new_ty(TyKind::UnameInfo);
     return v;
 }
 inline const TypePtr& t_struct_time() {

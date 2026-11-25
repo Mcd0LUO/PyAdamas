@@ -581,6 +581,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RandNew:
         case RtFn::RandGSeed:
         case RtFn::RandNext:
+        case RtFn::SysFloatInfoI:
+        case RtFn::SysFlagField:
+        case RtFn::OsUname:
+        case RtFn::OsUnameField:
         case RtFn::OsStat:
         case RtFn::OsLstat:
         case RtFn::OsDup:
@@ -1006,6 +1010,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeSleep:
         case RtFn::TimeLocaltime:
         case RtFn::TimeGmtime:
+        case RtFn::SysFloatInfoF:
         case RtFn::RandGParetovariate:
         case RtFn::AsyncTimeoutNew:
             gen_rt_f1(in);

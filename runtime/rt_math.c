@@ -1,6 +1,8 @@
 // rt_math.c —— math / sys / panic / pow / abs
 #include "rt_internal.h"
 
+#include <float.h>  /* DBL_* / FLT_RADIX：sys.float_info（0.520） */
+
 /* ── 数学 / 内置模块 ──────────────────────────────────────────── */
 
 double pa_math_sqrt(double x) {
@@ -337,6 +339,35 @@ PyAdamasStr* pa_sys_executable(void) {
 }
 
 void pa_sys_exit(int64_t code) { exit((int)code); }
+/* sys.float_info（0.520 B 部分）：属性走原生 getter（float 与 int 分开），值就是
+   <float.h> 的 DBL_*，与 CPython 同机同 libc，所以逐位相同。which：0=epsilon 1=max
+   2=min（f64）；0=dig 1=mant_dig 2=max_exp 3=max_10_exp 4=min_exp 5=min_10_exp
+   6=radix 7=rounds（i64）。 */
+double pa_sys_float_info_f(int64_t which) {
+    if (which == 0) return DBL_EPSILON;
+    if (which == 1) return DBL_MAX;
+    return DBL_MIN;
+}
+
+int64_t pa_sys_float_info_i(int64_t which) {
+    switch (which) {
+        case 0: return DBL_DIG;
+        case 1: return DBL_MANT_DIG;
+        case 2: return DBL_MAX_EXP;
+        case 3: return DBL_MAX_10_EXP;
+        case 4: return DBL_MIN_EXP;
+        case 5: return DBL_MIN_10_EXP;
+        case 6: return FLT_RADIX;
+        default: return 1;  /* rounds：CPython 恒为 1 */
+    }
+}
+
+/* sys.flags（0.520 B 部分）：pyadamas 没有这些开关，全部返回 0（与 pysig 的
+   dont_write_bytecode = False 一致）。 */
+int64_t pa_sys_flag_field(int64_t which) {
+    (void)which;
+    return 0;
+}
 
 static int64_t pa_recursion_limit = 1000;
 int64_t pa_sys_getrecursionlimit(void) { return pa_recursion_limit; }

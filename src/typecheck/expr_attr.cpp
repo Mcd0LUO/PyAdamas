@@ -185,6 +185,40 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
         return t_unknown();
     }
+    if (ot->kind == TyKind::FloatInfo) {
+        // sys.float_info：float 与 int 混合（与 CPython 的属性表一致）。
+        if (a.attr == "epsilon" || a.attr == "max" || a.attr == "min") return t_float();
+        static const char* kFloatInfoInts[] = {"dig",     "mant_dig",   "max_exp", "max_10_exp",
+                                              "min_exp", "min_10_exp", "radix",   "rounds"};
+        for (const char* f : kFloatInfoInts)
+            if (a.attr == f) return t_int();
+        err(a.line, a.col,
+            std::format("'sys.float_info' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
+    if (ot->kind == TyKind::SysFlags) {
+        static const char* kFlagFields[] = {"debug",           "inspect",         "interactive",
+                                           "optimize",        "dont_write_bytecode",
+                                           "no_user_site",   "no_site",         "ignore_environment",
+                                           "verbose",        "bytes_warning",   "quiet",
+                                           "hash_randomization", "isolated",    "dev_mode",
+                                           "utf8_mode"};
+        for (const char* f : kFlagFields)
+            if (a.attr == f) return t_int();
+        err(a.line, a.col,
+            std::format("'sys.flags' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
+    if (ot->kind == TyKind::UnameInfo) {
+        // os.uname()：5 个字符串属性。
+        static const char* kUnameFields[] = {"sysname", "nodename", "release", "version",
+                                            "machine"};
+        for (const char* f : kUnameFields)
+            if (a.attr == f) return t_str();
+        err(a.line, a.col,
+            std::format("'posix.uname_result' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
     if (ot->kind == TyKind::StructTime) {
         // time.struct_time：9 个整数属性（顺序 = tm_year..tm_isdst）。
         static const char* kTmFields[] = {"tm_year", "tm_mon",  "tm_mday", "tm_hour",

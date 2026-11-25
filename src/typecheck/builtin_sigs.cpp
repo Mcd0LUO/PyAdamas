@@ -92,6 +92,9 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         //     静态类型必须是 list[str]/str/file，声明成 object 会让方法调用失效；
         //   exc_info()：返回类型含 ClassObj，.pysig 注解语法表达不了。
         info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
+        // sys.float_info / sys.flags（0.520）：内建记录对象，属性走原生 getter。
+        info->globals["float_info"] = pyadamas::t_float_info();
+        info->globals["flags"] = pyadamas::t_sys_flags();
         info->globals["executable"] = pyadamas::t_str();
         // version_info：pysig 的常量语法只收标量，五元组（major, minor,
         // micro, releaselevel, serial）只能在这里声明，值在降级层按同一个

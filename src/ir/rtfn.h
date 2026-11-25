@@ -352,6 +352,11 @@ enum class RtFn : uint16_t {
     RandGParetovariate,  // (f64 alpha) -> f64
     RandGWeibullvariate, // (f64 alpha, f64 beta) -> f64
     TimeStrptime, // (str* s, str* fmt) -> list*   time.strptime → struct_time
+    SysFloatInfoF,  // (i64 which) -> f64   sys.float_info 的 epsilon/max/min
+    SysFloatInfoI,  // (i64 which) -> i64   sys.float_info 的整数属性
+    SysFlagField,   // (i64 which) -> i64   sys.flags 的字段（全 0）
+    OsUname,     // () -> i64              os.uname：占位值（属性走 OsUnameField）
+    OsUnameField, // (i64 which) -> str*     sysname/nodename/release/version/machine
     OsStat,      // (str* path) -> list*   os.stat：10 个整数（stat_result）
     OsLstat,     // (str* path) -> list*   os.lstat
     OsOpen,      // (str* path, i64 flags, i64 mode) -> i64   os.open → fd

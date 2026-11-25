@@ -221,6 +221,13 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
 
 bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
                             TypePtr& ty) {
+    // sys.float_info / sys.flags（0.520）：内建记录对象，属性访问在 expr_assign.cpp 里
+    // 直接发射原生 getter，**不使用接收者值**，所以这里给一个占位 0 即可。
+    if (module == "sys" && (member == "float_info" || member == "flags")) {
+        out = const_int(0);
+        ty = member == "float_info" ? t_float_info() : t_sys_flags();
+        return true;
+    }
     // 声明式常量（P0）：stdlib/sigs/<module>.pysig 的 const，按字面量直接产出。
     if (const auto* dc = pyadamas::nativesig::find_const(module, member)) {
         switch (dc->val.kind) {

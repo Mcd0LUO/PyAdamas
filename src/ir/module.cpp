@@ -357,6 +357,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::StatResult:
         case TyKind::StructTime:
+        case TyKind::UnameInfo:
+        case TyKind::FloatInfo:
+        case TyKind::SysFlags:
         case TyKind::Regex:
         case TyKind::Match:
         // Popen / datetime / pathlib / deque 跨模块签名暂不支持：按 unknown 处理

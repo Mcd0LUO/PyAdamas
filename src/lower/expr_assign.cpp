@@ -743,6 +743,55 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::FloatInfo) {
+                (void)expr(*a.value);
+                // 三个 float 属性是编译期常量（<float.h> 的 DBL_*，与 CPython 同 libc，
+                // 十进制字面量就是它们的最短往返表示）——直接发常量，避免 f64 返回值的
+                // 运行期调用编组（实测那条路在 asm 里 movsd 操作数不匹配）。
+                if (a.attr == "epsilon") return const_float(2.220446049250313e-16);
+                if (a.attr == "max") return const_float(1.7976931348623157e+308);
+                if (a.attr == "min") return const_float(2.2250738585072014e-308);
+                static const char* kFI[] = {"dig",     "mant_dig",   "max_exp", "max_10_exp",
+                                            "min_exp", "min_10_exp", "radix",   "rounds"};
+                for (int i = 0; i < 8; ++i)
+                    if (a.attr == kFI[i])
+                        return call_runtime(RtFn::SysFloatInfoI, t_int(), {const_int(i)});
+                err(e.line, e.col,
+                    std::format("'sys.float_info' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
+            if (ot && ot->kind == TyKind::SysFlags) {
+                (void)expr(*a.value);
+                static const char* kFL[] = {"debug",         "inspect",       "interactive",
+                                            "optimize",      "dont_write_bytecode",
+                                            "no_user_site", "no_site",       "ignore_environment",
+                                            "verbose",      "bytes_warning", "quiet",
+                                            "hash_randomization", "isolated",  "dev_mode",
+                                            "utf8_mode"};
+                for (int i = 0; i < 15; ++i)
+                    if (a.attr == kFL[i])
+                        return call_runtime(RtFn::SysFlagField, t_int(), {const_int(i)});
+                err(e.line, e.col,
+                    std::format("'sys.flags' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
+            if (ot && ot->kind == TyKind::UnameInfo) {
+                VReg uv = expr(*a.value);
+                if (opt) uv = guard_not_none(uv, std::format("attribute '{}'", a.attr));
+                static const char* kUnameFields[] = {"sysname", "nodename", "release",
+                                                    "version", "machine"};
+                (void)uv;
+                for (int i = 0; i < 5; ++i) {
+                    if (a.attr == kUnameFields[i]) {
+                        VReg s = call_runtime(RtFn::OsUnameField, t_str(), {const_int(i)});
+                        push_temp(s);
+                        return s;
+                    }
+                }
+                err(e.line, e.col,
+                    std::format("'posix.uname_result' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::StructTime) {
                 VReg tv = expr(*a.value);
                 if (opt) tv = guard_not_none(tv, std::format("attribute '{}'", a.attr));
