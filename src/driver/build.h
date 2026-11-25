@@ -85,6 +85,8 @@ struct Program {
     // 追加 NONE/BOOL/精确堆子类 tag，解锁 isinstance/repr/pprint。改变 IR
     // 与代码生成结果（也改变 tag 判定），必须参与模块缓存失效。
     bool type_tags = false;
+    // PYADAMAS_TYPE_TAGS=0：显式禁止自动开启（逃生口）。
+    bool type_tags_off = false;
     // 全图门控：无 big 的构建沿用旧 lowering 与 asm；模式参与缓存校验。
     bool needs_dynamic_big = false;
     // P4 语言缺口（PYADAMAS_LANG_GAPS，默认关）：异常类当值 / file 协议泛化 /

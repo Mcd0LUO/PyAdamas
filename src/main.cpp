@@ -619,11 +619,19 @@ int main(int argc, char** argv) {
         // 只读借用槽细化（默认关）：PYADAMAS_BORROW_OPT=1 开启，参与缓存失效。
         prog.borrow_opt = std::getenv("PYADAMAS_BORROW_OPT") != nullptr &&
                           std::string_view(std::getenv("PYADAMAS_BORROW_OPT")) != "0";
-        // 运行期类型标签（默认关）：PYADAMAS_TYPE_TAGS=1 开启，参与缓存失效。
+        // 运行期类型标签（0.528 起**默认开**）：PYADAMAS_TYPE_TAGS=0 可关。
         // 开启后 unknown 值的 tag 追加 NONE/BOOL/精确堆子类，解锁
         // isinstance/repr/pprint（docs/numeric-types-design.md §2）。
-        prog.type_tags = std::getenv("PYADAMAS_TYPE_TAGS") != nullptr &&
-                         std::string_view(std::getenv("PYADAMAS_TYPE_TAGS")) != "0";
+        //
+        // 为什么改成默认开：关着时 isinstance(x, int) 对动态值是**静默错值**——
+        // 只有 str/list/dict/float 有探针，int/bool/bytes 一律返回 False
+        // （实测 h(1) -> 0、[1,"a",2.0,3] 计数 -> 0）。这比多一个字 tag 的代价
+        // 严重得多。参与缓存失效，旧 modcache 自动失效。
+        // 三态：=1 强制开（调试用）、=0 强制关（逃生口）、未设=按需自动开
+        //（prepare_program 里扫到 isinstance(..., 内置类型) 才开，见 0.528）。
+        const char* tags_env = std::getenv("PYADAMAS_TYPE_TAGS");
+        prog.type_tags = tags_env && std::string_view(tags_env) == "1";
+        prog.type_tags_off = tags_env && std::string_view(tags_env) == "0";
         // P4 语言缺口（默认关）：PYADAMAS_LANG_GAPS=1 开启，参与缓存失效。
         // 异常类当值 / file 协议 / traceback / dataclass（设计 §3/§4）。
         // CLASS tag=11 等精确标签是 P4 的表示基础，所以强制带上 type_tags。
