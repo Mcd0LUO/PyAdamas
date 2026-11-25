@@ -284,3 +284,17 @@ push(2.0)               # build: error: attribute access is only supported as a 
   属于不可接受的新增拒绝；
 - 正确修法：降级支持 bound method 值（`(recv, slot)` 二元组 + 调用点拆包），不是一轮能安全做完的；
 - 规避写法：直接 `xs.append(2.0)`。
+
+**B1-min 实验结论（分支 `.wt/b1min` `9856751`，未合并）**：用「AST 指针 + 调用点重放」实现了
+「局部变量 + 直接调用」，`push = xs.append; push(2.0)` 可编译且对拍正确，但**接收者在调用点求值**，
+于是
+
+```python
+push = xs.append
+xs = ys
+push(2.0)      # CPython 改 xs；重放改 ys —— 静默错值
+```
+
+属于不可接受的静默分歧，未合并。628 口径收益为零（499 → 499，那 15 个文件都超出「局部变量 + 直接调用」）。
+正确做法：绑定点把接收者**求值一次并存进隐藏槽**，调用点用槽里的值；这样不新增堆对象种类、
+只多一个槽，工作量中等（要给 `lower_method_call` 一个「接收者来自槽」的入口，不能靠 `type_of` 反查）。
