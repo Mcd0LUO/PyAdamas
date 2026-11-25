@@ -4,6 +4,22 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.521] - 2026-11-25
+
+> feat(runtime)：**系统对象的最后两件**——`os.uname()` 与 `sys.float_info` / `sys.flags`。
+>
+> - **`os.uname()`**：新增 `TyKind::UnameInfo`（类型名 `posix.uname_result`，5 个字符串属性 `sysname/nodename/release/version/machine`）。
+>   与 `StatResult` 的一个有意差异：**属性按需取值**（`pa_os_uname_field(which)` 每次调 `uname(2)`），`os.uname()` 本身只返回占位值——
+>   list 承载在「赋值给变量」的路径上会被 temp 栈与槽各释放一次（实测 `refcount decrement on a freed object`），而 uname 的字段本来就是只读快照。
+> - **`sys.float_info`**：新增 `TyKind::FloatInfo`（11 个属性）。`epsilon/max/min` 是 `<float.h>` 的 `DBL_*`，与 CPython 同 libc，
+>   降级层**直接发十进制常量**（最短往返表示即逐位相同）；其余 8 个整数属性走 `pa_sys_float_info_i(which)`。
+> - **`sys.flags`**：新增 `TyKind::SysFlags`（15 个 int 属性），全 0（pyadamas 没有这些开关，与 pysig 的 `dont_write_bytecode = False` 一致）。
+>
+> 对拍：`tests/run/os_uname.py` 5 行、`tests/run/sys_float_info.py` 7 行与 CPython 3.14.4 逐字节相同；
+>`epsilon/max/min` **逐位相同**。常规 + ASan 都 ran ok。
+>
+> 基线：syntax 621/626、**default 499/626（不降）**、old 504/626、imports **165/626**（163 → +2）。
+> 闸门：套件 **512** / difftest / check_size / ctest（合并时跑）。
 ## [0.520] - 2026-11-25
 
 > feat(runtime)：**`time.struct_time`**——`localtime`/`gmtime`/`strptime` 现在返回**带 `tm_*` 属性的对象**，同时**完整保留旧的 tuple 语义**。
