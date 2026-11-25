@@ -737,7 +737,7 @@ VReg Lowerer::lower_pathlib(const std::string& member, Call& c) {
 VReg Lowerer::lower_json(const std::string& member, Call& c) {
     // dumps 收 indent= / sort_keys= / ensure_ascii= / separators= / allow_nan=，
     // 其它几个不收关键字。
-    if (!c.keywords.empty() && member != "dumps") {
+    if (!c.keywords.empty() && member != "dumps" && member != "dump") {
         err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
     }
     if (member == "dumps") {
@@ -803,6 +803,46 @@ VReg Lowerer::lower_json(const std::string& member, Call& c) {
                               {v, const_str(desc), indent, flags, seps});
         push_temp(s);
         return s;
+    }
+    if (member == "dump") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col,
+                std::format("json.dump() expects 2 positional arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg indent = const_int(INT64_MIN);
+        // 默认 flags：ensure_ascii(bit1) | allow_nan(bit2)。
+        VReg flags = const_int(6);
+        for (auto& kw : c.keywords) {
+            if (kw.arg == "indent") {
+                TypePtr kt = tc_.type_of(kw.value.get());
+                if (kt && kt->kind == TyKind::None) {
+                    indent = const_int(INT64_MIN);
+                } else {
+                    indent = coerce(expr(*kw.value), kt, t_int());
+                }
+            } else {
+                err(kw.value->line, kw.value->col,
+                    std::format("json.dump() got an unexpected keyword argument '{}'", kw.arg));
+            }
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        std::string desc;
+        if (!json_desc(vt, desc, c.args[0]->line, c.args[0]->col)) return const_none();
+        VReg v = expr(*c.args[0]);
+        VReg fp = expr(*c.args[1]);
+        call_void(RtFn::JsonDump, {v, const_str(desc), fp, indent, flags});
+        return const_none();
+    }
+    if (member == "load") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("json.load() expects 1 positional argument, got {}", c.args.size()));
+            return const_none();
+        }
+        // 返回 unknown：CPython 的 load 返回类型本来就是动态的（没有 sample 参数）。
+        VReg fp = expr(*c.args[0]);
+        return call_runtime(RtFn::JsonLoad, t_unknown(), {fp});
     }
     if (member == "loads") {
         if (c.args.size() != 2) {

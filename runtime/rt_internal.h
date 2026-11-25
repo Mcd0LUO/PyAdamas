@@ -1813,6 +1813,10 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n);
 PyAdamasStr* pa_json_dumps(int64_t value, PyAdamasStr* desc, int64_t indent,
                            int64_t flags, PyAdamasList* seps);
 int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc);
+/* 文件流版（0.517）：dump 复用 dumps 后写 fp；load 读全文走动态解析（返回 unknown）。 */
+int64_t pa_json_dump(int64_t value, PyAdamasStr* desc, PyAdamasFile* f, int64_t indent,
+                     int64_t flags);
+int64_t pa_json_load(PyAdamasFile* f);
 
 /* 动态 JSON（0.447）：不受静态 sample 约束，值在运行期按 JSON 文本自身构造。
    表示见 rt_json.c 顶部注释；null/bool 用 PYADAMAS_RC_JSONNULL/JSONBOOL 盒。

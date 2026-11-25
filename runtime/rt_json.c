@@ -1112,6 +1112,26 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
     pa_raise_c("ValueError", "json: bad type descriptor");
 }
 
+
+/* json.dump(obj, fp, indent=None)：复用 dumps 的结果串，写进文件对象。
+   返回 None。indent 用 INT64_MIN 哨兵表示 None；seps 不开放（dump 的
+   separators 关键字本轮不支持）。 */
+int64_t pa_json_dump(int64_t value, PyAdamasStr* desc, PyAdamasFile* f, int64_t indent,
+                     int64_t flags) {
+    PyAdamasStr* s = pa_json_dumps(value, desc, indent, flags, NULL);
+    pa_file_write(f, s);
+    pa_rc_dec(s);
+    return 0;
+}
+
+/* json.load(fp)：读全文后走**动态** JSON 解析（pa_json_parse），返回 unknown ——
+   与 loads 的 sample 规则不同（CPython 里 load 的返回类型本来就是动态的）。 */
+int64_t pa_json_load(PyAdamasFile* f) {
+    PyAdamasStr* text = pa_file_read(f, -1);
+    int64_t v = pa_json_parse(text);
+    pa_rc_dec(text);
+    return v;
+}
 int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc) {
     JP s = {text->data, text->data + text->len, text->data};
     int64_t v = jp_value(&s, desc->data, (size_t)desc->len);

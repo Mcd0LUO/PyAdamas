@@ -191,6 +191,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
             return RtFn::FuncReduce;
     } else if (module == "json") {
         if (member == "dumps") return RtFn::JsonDumps;
+        if (member == "dump") return RtFn::JsonDump;
+        if (member == "load") return RtFn::JsonLoad;
         if (member == "loads") return RtFn::JsonLoads;
         // 动态 JSON（0.447）：只为 from-import 登记别名；真正降级走
         // lower_json（parse/stringify 的运行时入口在那边按类型选）。
