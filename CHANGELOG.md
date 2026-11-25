@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.552] - 2026-11-25
+
+> fix(driver/check)：**项目代码导入编译器 stdlib 时按完整接口解析**——`check -I .` 与 `run` 的口径终于一致。
+>
+> ```python
+> # cmmod.py: from contextlib import contextmanager; @contextmanager def managed(...)
+> # main.py:   with cmmod.managed('x') as v: ...
+> check -I . main.py   # 修前：error: module attribute is not callable（run 正常）
+>                     # 修后：ok
+> ```
+>
+> 根因：`check_load` 对标准库模块**一律返回 nullptr**（0.523 的设计，避免用不完整的 CPython 接口大面积误杀——
+>那条红线是「626 文件 default 499 → 223」换来的），于是项目代码 `from contextlib import contextmanager` 只拿到
+>unknown，`@contextmanager` 装饰后的符号在 check 侧是 unknown、build 侧是 Func，两边口径不一致。
+>
+> 修法：把**请求方**纳入口径判断——
+>- **项目代码**（不在 stdlib / 不在 `/python3.*` 下）导入编译器自带的 `stdlib/*.py` 时，按完整接口解析；
+>- **标准库扫描**（626 文件那套，请求方也在标准库里）与 **CPython Lib** 保持 unknown，红线不变。
+>
+> 验证：13 个常见 stdlib 模块的 `import` 与 5 个 `from ... import ...` 在项目代码里 `check` 全部 ok（无误报）；
+>`tests/modules/contextlib_xmod` 的 `check -I . main.py` 从报错变为 ok。
+>
+> 尝试过但**没有采用**的修法（已记录，避免重蹈）：在 check 模式下合成 `_GeneratorContextManager` 类——
+>目标用例能过，但 default **500 → 496**、old **505 → 501**（4 个 stdlib 文件因为「装饰 dunder 方法」等被拒）。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（与 0.551 持平）。
+> 闸门：套件 558 / difftest 507/0 / check_size PASS / ctest 8/8。
 ## [0.551] - 2026-11-25
 
 > feat(typecheck)：**内置模块里用 pya 源码实现的类，注解现在能解析**（`io.StringIO` / `io.BytesIO` 等）。

@@ -211,6 +211,13 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
 pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
                                     const std::string& name) {
     if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) return it->second;
+    // 0.552：**请求方是不是项目代码**。编译器自带的 stdlib（stdlib/*.py，我们自己写的、
+    // 接口完整）在「项目代码导入它」时按完整接口解析；**标准库扫描**（626 文件那套，
+    // 请求方也在标准库里）仍保持 unknown —— 那条红线是 0.523 实测 499 → 223 换来的。
+    const bool importer_is_project = [] (const std::string& p) {
+        if (p.empty() || p.find("/python3.") != std::string::npos || path_under_stdlib(p)) return false;
+        return true;
+    }(importer);
     // CPython 桥子代理：与 build 端 program_module 同口径。
     if (name.starts_with("python.")) {
         auto m = pyadamas::builtin_module(name);
@@ -237,7 +244,11 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
             (src.size() > stdlib_dir.size() && src.compare(0, stdlib_dir.size(), stdlib_dir) == 0 &&
              src[stdlib_dir.size()] == '/');
         const bool in_python_lib = src.find("/python3.") != std::string::npos;
-        if (in_compiler_stdlib || in_python_lib) return nullptr;
+        // CPython 的 Lib 永远不解析（接口不完整，会大面积误杀）。
+        if (in_python_lib) return nullptr;
+        // 编译器自己的 stdlib：项目代码导入时按完整接口解析（contextlib/io 这类
+        // 纯 pya 模块的类才拿得到），标准库扫描时仍按 unknown。
+        if (in_compiler_stdlib && !importer_is_project) return nullptr;
     }
     if (entry && entry->kind == ModuleKind::NativePython) {
         // 我们自己的 stdlib 扩展模块（functools 等）接口还不完整（`partial`、
@@ -275,7 +286,8 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
     // unknown 处理——我们的接口对自己的 stdlib 完整，对 CPython 整个 Lib 不完整，
     // 严格解析会大面积误杀（实测 626 文件默认口径 499 → 223）。本项目自己的模块
     // 始终严格解析（跨模块调用不再退化成 unknown）。
-    if (!ctx.strict_all && (path_under_stdlib(path) || path.find("/python3.") != std::string::npos)) {
+    if (!ctx.strict_all && (path.find("/python3.") != std::string::npos ||
+                            (path_under_stdlib(path) && !importer_is_project))) {
         ctx.loaded[name] = nullptr;
         return nullptr;
     }
