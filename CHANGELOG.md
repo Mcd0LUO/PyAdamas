@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.523] - 2026-11-25
+
+> fix(driver/check)：**默认解析项目内的跨模块导入**——`check` / `types` 不再把导入的符号压成 unknown。
+>
+> 之前 `check`/`types` 默认**完全不加载 import 图**（0.486 的保守回退），于是：
+>
+> ```
+> import mod;  s: str = mod.add(1, 2)      # 不报错（mod.add 是 unknown）
+> from mod import add;  t: str = add(3, 4) # 同样漏掉
+> ```
+>
+> 现在默认加载 import 图，**但按模块来源分层**：
+>
+> | 模块来源 | 默认行为 | `--imports` |
+> |---|---|---|
+> | **本项目自己的模块**（入口同层/`include_dirs` 下的 .py） | **严格解析**（接口完整，跨模块调用拿到真实类型） | 严格 |
+> | 原生模块（`os`/`sys`/`re`…） | unknown（签名表不全，避免 0.486 的误杀） | 严格 |
+> | 我们自己的 stdlib 扩展模块（`functools` 等） | unknown（`partial`/`itertools.count` 等未建模） | 严格 |
+> | CPython 标准库（`/usr/lib/python3.*`）与我们 `stdlib/` 的纯 Python 模块 | unknown | 严格 |
+> | `--no-imports` | 整张图关掉（等价旧行为） | — |
+>
+> 实测（项目内三文件：`mod.py` 定义 `add`/`CONST`/`Box`，`main.py` 用 `mod.add`、`from mod import add`、`Box()`）：
+> `types` 现在输出 `add func(int, int) -> int` / `CONST int` / `Box Box`；写成 `s: str = mod.add(1, 2)` 会正常报 **4 处**
+> `annotated as 'str' but assigned 'int'`。原生模块仍宽松（`os.path.join` 等不误杀）。
+>
+> 基线：**default 499/626（不变）**、old 504/626、`--imports` 167/626。
+> **过程中量到的坑**（已写进代码注释）：先试「全部严格解析」会掉到 **223/626**；只跳过 CPython Lib 掉到 **302**；
+> 再跳过我们自己的 stdlib 扩展模块才回到 **499**。掉下去的那 21 个文件暴露的是我们接口的真实缺口
+>（`itertools.count`、`chain.from_iterable`、`functools.partial`），留作下一批接口表工作。
+>
+> 闸门：套件 / difftest / check_size / ctest（合并时跑一次）。
 ## [0.522] - 2026-11-25
 
 > perf(backend)：**浮点归约接通 packed 累加**（`addpd`），新增开关 `PYADAMAS_VECT_FASTFLOAT=1`（默认关）。

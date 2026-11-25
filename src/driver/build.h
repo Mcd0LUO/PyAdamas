@@ -110,7 +110,8 @@ std::string reject_message(const std::string& module, const std::string& name);
 using CheckLookup = std::function<ModuleInfoPtr(const std::string&)>;
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,
-                               std::vector<std::string>& missing);
+                               std::vector<std::string>& missing,
+                               bool strict_native = false);
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p);
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);

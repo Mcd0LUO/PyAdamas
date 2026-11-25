@@ -456,10 +456,13 @@ int main(int argc, char** argv) {
             // subprocess.check_output / sys.version_info 这类未建模成员会被误杀，
             // 违背「前端宽、后端严」）。--imports 显式开启模块属性检查。
             // 模块级未定义名字默认就报（真正的拼写错误，误报面小；--lenient-names 逃生口）。
+            // 默认加载 import 图，但**只解析本项目的模块**：原生/标准库模块在
+            // 非 --imports 时返回 nullptr（按 unknown 处理），避免 0.486 的误杀；
+            // 本地模块接口完整，跨模块调用不再退化成 unknown。--no-imports 关整张图。
             pyadamas::ModuleLookup lookup = nullptr;
-            if (resolve_imports && !no_imports) {
+            if (!no_imports) {
                 std::vector<std::string> missing;
-                lookup = pyadamas::load_check_lookup(path, include_dirs, missing);
+                lookup = pyadamas::load_check_lookup(path, include_dirs, missing, resolve_imports);
             }
             auto fe = run_frontend(path, *src, false, lookup, !lenient_names);
             if (!fe) return 1;

@@ -38,6 +38,10 @@ struct CheckCtx {
     // 依赖模块的 TypeChecker 拥有 ClassInfo；必须活到 check 结束，
     // 否则接口里的 ClassInfo* 会悬空。
     std::vector<std::shared_ptr<pyadamas::TypeChecker>> keep_alive;
+    // 原生模块与系统标准库模块是否按严格接口解析：默认 false = 保持 unknown
+    // （0.486 的「前端宽、后端严」），--imports 时为 true（成员缺失会报错）。
+    // 本项目自己的模块**始终**严格解析（接口完整，unknown 只会掩盖错误）。
+    bool strict_all = false;
 };
 
 // 把某个模块的类型检查结果压成扁平 ModuleInfo（类方法/字段按 MRO 拍平），
@@ -207,11 +211,30 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
     }
     const ModuleEntry* entry = find_module_entry(name);
     if (is_native_module(entry)) {
+        // 默认（非 --imports）：原生模块不参与解析，保持 unknown —— 0.486 的教训是
+        // 我们的原生签名表不全，严格解析会在真实代码上误杀。
+        if (!ctx.strict_all) return nullptr;
         auto m = pyadamas::builtin_module(name);
         ctx.loaded[name] = m;
         return m;
     }
+    // 系统标准库（编译器自带 stdlib 或 CPython 的 Lib 目录）里的模块：默认不解析。
+    // 我们的接口对我们的 stdlib 是完整的，但对 CPython 3.14 的整个 Lib 不完整；
+    // 强制解析会在真实代码上大面积误杀（0.523 实测：626 文件默认口径 499 → 223）。
+    if (!ctx.strict_all && entry) {
+        std::string src = std::string(entry->source);
+        const std::string stdlib_dir = PYADAMAS_STDLIB_DIR;
+        const bool in_compiler_stdlib =
+            src == stdlib_dir ||
+            (src.size() > stdlib_dir.size() && src.compare(0, stdlib_dir.size(), stdlib_dir) == 0 &&
+             src[stdlib_dir.size()] == '/');
+        const bool in_python_lib = src.find("/python3.") != std::string::npos;
+        if (in_compiler_stdlib || in_python_lib) return nullptr;
+    }
     if (entry && entry->kind == ModuleKind::NativePython) {
+        // 我们自己的 stdlib 扩展模块（functools 等）接口还不完整（`partial`、
+        // `itertools.count` 这类未建模）：非 --imports 时保持 unknown，避免误杀。
+        if (!ctx.strict_all) return nullptr;
         // 原生 + stdlib 扩展源：接口 = 原生接口 + 扩展新增名字。
         std::string path = module_source_path(*entry);
         std::error_code ec;
@@ -240,6 +263,14 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
         return nullptr;
     }
     std::string path = canonical_path(found->path);
+    // 非 --imports：**CPython 标准库**（/usr/lib/python3.x、dist-packages）里的模块按
+    // unknown 处理——我们的接口对自己的 stdlib 完整，对 CPython 整个 Lib 不完整，
+    // 严格解析会大面积误杀（实测 626 文件默认口径 499 → 223）。本项目自己的模块
+    // 始终严格解析（跨模块调用不再退化成 unknown）。
+    if (!ctx.strict_all && (path_under_stdlib(path) || path.find("/python3.") != std::string::npos)) {
+        ctx.loaded[name] = nullptr;
+        return nullptr;
+    }
     // 单一数据源：stdlib 目录里的 Python 源必须在模块表里登记。
     if (!entry && path_under_stdlib(path)) {
         ctx.missing.push_back(name);
@@ -256,8 +287,9 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
 
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,
-                               std::vector<std::string>& missing) {
+                               std::vector<std::string>& missing, bool strict_all) {
     auto ctx = std::make_shared<CheckCtx>();
+    ctx->strict_all = strict_all;
     ctx->include_dirs = include_dirs;
     ctx->include_dirs.emplace_back(PYADAMAS_STDLIB_DIR);
     std::string entry = canonical_path(entry_path);
