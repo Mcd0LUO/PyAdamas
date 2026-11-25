@@ -107,19 +107,14 @@ bash tools/frontend_baseline.sh <stdlib 目录> <pyadamas 路径>
 
 | # | 修法 | 状态 | 误杀风险 |
 |---|---|---|---|
-| 1 | **补齐原生/库接口表** | **已做**：0.500 补 36 项（missing 130→94）；0.502 修 `--imports` 的 UAF（pass 155→164）；
-|   |   | 0.511–0.517 再补 `sys.getrecursionlimit`、`re.subn`、`operator.index/length_hint/setitem/delitem`、
-|   |   | `random` 六个分布（120/120 逐字节）、`json.dump/load`；剩余 97 项按性质分类见 §8.5（都要新运行期面） | 零 |
-| 2 | **装饰器保留原签名** | **判负**（0.500：628 口径 500→496，三个装饰器真的改返回类型）；
-|   |   | 0.517 实测 `singledispatch`/`types` 在我们的 stdlib 里**不存在**，`contextmanager` 运行期已可用 →
-|   |   | 建模暂不适用（见 [decorator-modeling-design.md](decorator-modeling-design.md)） | — |
-| 3 | **`except as e` 给异常类型** | **已做**（0.500）：同类型分支解析成该类型，多类型退 `Exception` 基类 | 零 |
-| 4 | **`typing.Sequence/Iterable` 映射** | **判负**（fe5）：函数体内 `list[T]` 会改变降级层容器快速路径，
-|   |   | 实测 `sum_iter({6,7})` 输出 `0 0`（CPython 13 6）——静默错值；要落地需「协议类型」或「只在 for/下标取元素类型」 | — |
-| 5 | **`isinstance` 窄化** | **已做**（0.501）：与 `T \| None` 共用 refinement 层 | 低 |
+| 1 | 补齐原生/库接口表 | **已做**：0.500 补 36 项（missing 130→94）；0.502 修 `--imports` UAF（pass 155→164）；0.511–0.517 再补 sys/re/operator/random/json 共 12 项；剩余 97 项见 §8.5（都要新运行期面） | 零 |
+| 2 | 装饰器保留原签名 | **判负**（0.500：628 口径 500→496）；0.517 实测 `singledispatch`/`types` 在 stdlib 里不存在、`contextmanager` 运行期已可用 → 建模暂不适用 | — |
+| 3 | `except as e` 给异常类型 | **已做**（0.500） | 零 |
+| 4 | `typing.Sequence/Iterable` 映射 | **判负**（fe5）：函数体内 `list[T]` 会改变降级层容器快速路径，`sum_iter({6,7})` 输出 `0 0`（CPython 13 6） | — |
+| 5 | `isinstance` 窄化 | **已做**（0.501） | 低 |
 | 6 | 默认参数在 `def` 点求值（6 个文件） | 判负（要新机制） | — |
 | 7 | 条件导入 / `globals().update()`（4 个文件） | 判负（动态语义） | — |
-| 8 | `unknown` 下标 | **运行期分派已做**（0.498：`pa_any_index` + 0.516 的 `pa_any_setindex/delindex`）；编译期禁掉仍判负（195 处） | — |
+| 8 | `unknown` 下标 | **运行期分派已做**（0.498 `pa_any_index`；0.516 `pa_any_setindex/delindex`）；编译期禁掉仍判负（195 处） | — |
 | 9 | `unknown` 大整数下标 / bytes 标签 | 待 P2 标签默认开 | — |
 
 ## 7. 相关文档
