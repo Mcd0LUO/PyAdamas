@@ -220,36 +220,37 @@ except_e_is_exception_type.py`）；富异常类的方法面**已经**是严格�
 
 ### 8.5 仍然缺的（没有运行期实现，补类型会变成静默 0/None，所以不补）
 
-remaining 97 个成员按性质分类（都不在本轮）：
+原表 97 项，**0.511–0.517 已补 12 项**（`sys.getrecursionlimit/setrecursionlimit`、`re.subn`、
+`operator.index/length_hint/setitem/delitem`、`random.normalvariate/betavariate` 等六个分布、`json.dump/load`），
+**剩 85 项**；其中 fd / 系统对象 / sys 常量三块**进行中**（0.518 一批）。
 
-| 类 | 例子 | 要动什么 |
-|---|---|---|
-| 文件描述符/系统调用 | os `open`/`read`/`write`/`close`/`dup`/`waitpid`/`kill`/`times`/`getloadavg`/`popen`/`scandir` | 新运行期面（fd 抽象） |
-| 结构性返回值 | os `stat`/`lstat`/`uname`；time `struct_time`/`strptime` | 新 struct/namedtuple 模型 |
-| 解释器身份 | sys `prefix`/`path`/`implementaion`/`flags`/`float_info`/`modules`/`getsizeof`/`getrecursionlimit` | 运行期需要「解释器」概念 |
-| 惰性对象 | itertools `count`/`cycle`；`chain.from_iterable` | 本项目 itertools 是 eager list 模型 |
-| 类/异常对象 | collections `namedtuple`/`ChainMap`/`UserDict`；pathlib `PurePath`；datetime `time`/`timezone`/`UTC`；re `error`；asyncio `Timeout` | 运行期类工厂 |
-| 子进程面 | subprocess `call`/`check_call`/`check_output`/`getoutput`/异常类 | 运行期子进程协议 |
-| 其它 | json `dump`/`load`；re `subn`；operator `methodcaller`/`setitem`/`delitem`/`index`/`length_hint`；functools `total_ordering`/`singledispatch`；random `normalvariate`/`betavariate`；sys trace 钩子 | 各自的小实现，收益低 |
+| 类 | 例子 | 要动什么 | 状态 |
+|---|---|---|---|
+| 文件描述符/系统调用 | os `open`/`read`/`write`/`lseek`/`dup`/`fdopen`/`waitpid`/`kill`/`times`/`getloadavg`/`scandir`/`popen`、`O_*` 常量 | 新运行期面（fd 抽象） | **进行中** |
+| 结构性返回值 | os `stat`/`lstat`/`uname`；time `struct_time`/`strptime` | 新 struct/namedtuple 模型 | **进行中** |
+| 解释器身份 | sys `prefix`/`path`/`implementation`/`flags`/`float_info`/`modules`（`getsizeof` 已判负、`getrecursionlimit` 已做） | 运行期需要「解释器」概念 | **进行中（常量类）** |
+| 惰性对象 | itertools `count`/`cycle`；`chain.from_iterable` | 本项目 itertools 是 eager list 模型 | 未做 |
+| 类/异常对象 | collections `namedtuple`/`ChainMap`/`UserDict`；pathlib `PurePath`；datetime `time`/`timezone`/`UTC`；re `error`；asyncio `Timeout` | 运行期类工厂 | 未做 |
+| 子进程面 | subprocess `call`/`check_call`/`check_output`/`getoutput`/异常类 | 运行期子进程协议 | 未做 |
+| 其它 | operator `methodcaller`；functools `total_ordering`/`singledispatch`；sys trace 钩子 | 各自的小实现，收益低（`methodcaller`/`total_ordering` 已判负） | 未做 |
 
-`json.dumps` 已经是 `str`；`json.loads` 故意保持「按 sample 推断」（`json.loads(text,
-sample)` 的 sample 决定返回类型，`json.load`/`dump` 涉及文件流，未建模）。
-`os.environ` 是只读快照 dict[str,str]，写入在降级层显式报错（既有行为）。
+`json.dumps` 是 `str`；`json.loads` 保持「按 sample 推断」（`json.loads(text, sample)` 的 sample 决定返回类型）。
+`os.environ` 是只读快照 `dict[str,str]`，写入在降级层显式报错（既有行为）。
 
 ### 8.6 语料实测（改前 / 改后）
 
 | 语料 | 口径 | 改前 | 改后 | 回归 |
 |---|---|---|---|---|
-| CPython 3.14.4 标准库 628 文件 | `check --syntax` | 623 | 623 | — |
-| 同上 | `check`（默认） | 500/623 | **500/623** | 0（逐文件相同） |
-| 本仓库 889 个 `.py`（不含 build/） | `check`（默认） | 775 | **775** | 0 |
+| CPython 3.14.4 标准库 626 文件 | `check --syntax` | 621 | 621 | — |
+| 同上 | `check`（默认） | 495/626 | **499/626** | 0 新拒绝（`tools/frontend_baseline.sh` 口径） |
+| 本仓库 907 个 `.py`（不含 build/） | `check`（默认） | 780 | **789** | 0 |
 
 改前/改后用**同一份文件清单**、同一台机器分别跑 master（ec4918b 独立构建）与
 本分支的二进制，`comm` 逐文件比对：两边通过集合完全相同（没有新增拒绝，也没有
 新通过——本轮的补表只影响 `--imports`/build 模式，默认 `check` 不解析模块成员）。
 
 装饰器保留签名的两次尝试**都**会让标准库 500 → 496（4 个文件），证据见 §8.3。
-### 3.1 0.506 复测：装饰器建模 / 协议标注 / 可变参数
+### 8.7 0.506 复测：装饰器建模 / 协议标注 / 可变参数
 
 **可变参数（已满足，无改动）**：`types` 显示未标注的是 `func(*unknown)`、标注的是 `func(*int)`，
 函数体里 `*a` 声明为 `tuple[元素, ...]`（`len(a)`、`a[0]` 有边界），`**kw` 声明为
