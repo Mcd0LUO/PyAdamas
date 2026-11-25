@@ -43,7 +43,8 @@
 [heap-slot-promotion.md](heap-slot-promotion.md)、[ivsr-negative-result.md](ivsr-negative-result.md) 是**有意保留的负面结论**
 （方案未落地或已回退），不要当成待办去「补完」。
 
-变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.100–0.199 归档在
+变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.450 之前已归档：0.200–0.449 见
+[archive/changelog-0.200-0.449.md](archive/changelog-0.200-0.449.md)，0.100–0.199 见
 [archive/changelog-0.100-0.199.md](archive/changelog-0.100-0.199.md)，0.41–0.99 见
 [archive/changelog-0.41-0.99.md](archive/changelog-0.41-0.99.md)，0.40 及更早见
 [archive/changelog-0.40.md](archive/changelog-0.40.md)），参与开发的规矩见
