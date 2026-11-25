@@ -1392,6 +1392,8 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src);
 int64_t pa_isinstance(void* obj, int64_t class_id);
 int64_t pa_obj_class_id(void* obj);
 int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname);
+/* 0.531：按限定名 FNV-1a 64 做整数 MRO 比较（元数据第 8 个字）。 */
+int64_t pa_is_instance_of(void* obj, int64_t cid);
 
 /* 运行期类对象：类名当值、类装饰器、isinstance 的第二个实参。
    cid 是本模块类编号；跨模块类用 -1 + 限定名。ctor 是构造包装函数

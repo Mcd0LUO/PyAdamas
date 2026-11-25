@@ -911,6 +911,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::IsInstance:
         case RtFn::ObjClassId:
         case RtFn::IsNamedClass:
+        case RtFn::IsInstanceOf:
         case RtFn::IsException:
         case RtFn::StrEqUnknown:
         case RtFn::ComplexEqUnknown:

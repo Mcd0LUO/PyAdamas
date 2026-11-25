@@ -1,6 +1,7 @@
 // lower/builtin_reflect.cpp —— 内置函数：反射与属性
 #include "lower/impl.h"
 #include "backend/tag_defs.h"
+#include "ir/module.h"  // fnv1a64：isinstance 的稳定类 id（0.531）
 
 namespace pyadamas {
 
@@ -180,6 +181,11 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                         "isinstance() with an imported class is not supported yet");
                     return const_bool(false);
                 }
+                // 0.531：按限定名的 FNV-1a 64 做整数 MRO 比较（元数据第 8 个字），
+                // 比 pa_is_named_class 的 strlen+memcmp 便宜一个数量级。
+                // 导入类：跨模块实例的 vtable 元数据由定义模块发射，导入方的镜像
+                // 元数据不一定是实例实际用的那份 —— 这里保留限定名比较（0.531 实测：
+                // 走 cid 会在 `from value import Value` 的 isinstance 上返回 False）。
                 return call_runtime(RtFn::IsNamedClass, t_bool(),
                                     {obj(), const_str(qual)});
             }
@@ -198,8 +204,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             }
             if (!runtime) return const_bool(true);
             std::string qual = mod_.runtime_name + "." + target->name;
-            return call_runtime(RtFn::IsNamedClass, t_bool(),
-                                {obj(), const_str(qual)});
+            return call_runtime(RtFn::IsInstanceOf, t_bool(),
+                                {obj(), const_int(static_cast<int64_t>(fnv1a64(qual)))});
         };
         if (tt0 && tt0->kind == TyKind::Tuple) {
             const auto& subs = tt0->sub;
