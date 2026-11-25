@@ -50,6 +50,9 @@ struct ModuleInfo {
     // 类名单独放在 classes 里，不重复出现在 globals。
     std::map<std::string, TypePtr> globals;
     std::map<std::string, ImportedClass> classes;
+    // 0.543：跨模块导出的**用户** struct 定义（.cpya 的 c_struct 不导出）。
+    // 导入方持有这些 StructInfo（拷贝），类型里的 Type::st 指向它们。
+    std::map<std::string, std::shared_ptr<StructInfo>> structs;
 };
 
 // 11：类记录追加 is_exception_class / is_rich_exception / exc_parent。

@@ -61,6 +61,8 @@ struct Dec {
         std::string name;
     };
     std::vector<PendingClass> pending_classes;
+    // 0.543：struct 段在 globals 之后解码，globals 里的 tag 27/28 先登记、末尾回填 Type::st。
+    std::vector<std::pair<TypePtr, std::string>> pending_structs;
     // 0.540：跨模块类引用（tag 29）要靠它去取别的模块的接口。
     std::function<ModuleInfoPtr(const std::string&)> loader;
     std::unordered_map<std::string, ModuleInfoPtr> loaded;
@@ -400,9 +402,14 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::TimeDelta:
         case TyKind::Path:
         case TyKind::Deque:
-        // struct 的布局不跨模块序列化：按 unknown 处理。
+        // 0.543：用户 struct 按名字导出（27 = 值、28 = 指针）。.cpya 的 c_struct 继续按
+        // unknown —— 布局由 C 头决定，导入方不该按值语义重建。
         case TyKind::Struct:
+            if (t->st && !t->st->c_struct) { e.u8(27); e.str(t->st->name); } else e.u8(0);
+            break;
         case TyKind::StructPtr:
+            if (t->st && !t->st->c_struct) { e.u8(28); e.str(t->st->name); } else e.u8(0);
+            break;
         // dylib 句柄不跨模块传递：按 unknown 处理。
         case TyKind::DYLIB:
         // vthread handle / chan 跨模块签名暂不支持：按 unknown 处理。
@@ -542,6 +549,14 @@ TypePtr dec_type(Dec& d) {
             return t;
         }
         case 26: return mk_class_obj(dec_type(d));
+        case 27:
+        case 28: {
+            std::string nm = d.str();
+            TypePtr t = std::make_shared<Type>();
+            t->kind = tag == 27 ? TyKind::Struct : TyKind::StructPtr;
+            d.pending_structs.emplace_back(t, nm);
+            return t;
+        }
         case 13: {
             // 本模块类引用：先占位，等模块类表解码完再填 cls。
             TypePtr t = std::make_shared<Type>();
@@ -691,6 +706,21 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             e.str(name);
             enc_type(e, ty);
         }
+        // 0.543：用户 struct 定义段（globals 之后、classes 之前）。
+        e.u32(static_cast<uint32_t>(info.structs.size()));
+        for (auto& [sname, sp] : info.structs) {
+            e.str(sname);
+            e.u8(sp->c_union ? 1 : 0);
+            e.u32(static_cast<uint32_t>(sp->fields.size()));
+            for (auto& f : sp->fields) {
+                e.str(f.name);
+                enc_type(e, f.ty);
+                e.u64(static_cast<uint64_t>(f.offset));
+                e.u64(static_cast<uint64_t>(f.size));
+            }
+            e.u64(static_cast<uint64_t>(sp->size));
+            e.u64(static_cast<uint64_t>(sp->align));
+        }
         e.u32(static_cast<uint32_t>(info.classes.size()));
         for (auto& [name, ic] : info.classes) {
             const ClassInfo& c = *ic.cls;
@@ -769,8 +799,9 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
         std::memcpy(&want, bytes.data() + bytes.size() - 8, 8);
         uint64_t got = fnv1a64(bytes.data(), bytes.size() - 8);
         if (want != got) return std::unexpected("interface checksum mismatch");
-        Dec d{reinterpret_cast<const unsigned char*>(bytes.data()),
-              reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size() - 8, {}, {}, {}, {}};
+        Dec d;
+        d.p = reinterpret_cast<const unsigned char*>(bytes.data());
+        d.end = d.p + bytes.size() - 8;
         d.loader = std::move(loader);
         d.p += sizeof kMagic;
         uint16_t fmt = d.u16();
@@ -785,6 +816,25 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
         for (uint32_t i = 0; i < n; ++i) {
             std::string name = d.str();
             info->globals[name] = dec_type(d);
+        }
+        // 0.543：用户 struct 段（两遍：先建占位登记进 info->structs，再填字段）。
+        uint32_t ns = d.u32();
+        for (uint32_t i = 0; i < ns; ++i) {
+            auto sp = std::make_shared<StructInfo>();
+            sp->name = d.str();
+            sp->c_union = d.u8() != 0;
+            uint32_t nf = d.u32();
+            for (uint32_t k = 0; k < nf; ++k) {
+                StructFieldInfo f;
+                f.name = d.str();
+                f.ty = dec_type(d);
+                f.offset = static_cast<int64_t>(d.u64());
+                f.size = static_cast<int64_t>(d.u64());
+                sp->fields.push_back(std::move(f));
+            }
+            sp->size = static_cast<int64_t>(d.u64());
+            sp->align = static_cast<int64_t>(d.u64());
+            info->structs[sp->name] = std::move(sp);
         }
         uint32_t nc = d.u32();
         for (uint32_t i = 0; i < nc; ++i) {
@@ -857,6 +907,12 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
             ic.qualname = cls->origin_qualname;
             info->classes[name] = std::move(ic);
         }
+        for (auto& [t, sname] : d.pending_structs) {
+            auto it = info->structs.find(sname);
+            if (it == info->structs.end() || !it->second) continue;
+            t->st = it->second.get();
+        }
+
         for (auto& pc : d.pending_classes) {
             const ModuleInfo* owner = info.get();
             if (!pc.module.empty() && pc.module != info->name) {

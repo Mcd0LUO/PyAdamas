@@ -204,7 +204,16 @@ public:
     // 值类型 struct 表：名字 → 编译期布局（字段偏移/大小/总大小）。
     StructInfo* struct_info(const std::string& n) const {
         auto it = structs_.find(n);
-        return it == structs_.end() ? nullptr : it->second;
+        if (it != structs_.end()) return it->second;
+        // 0.543：本模块没有定义时回退到导入模块导出的 struct（本地定义优先）。
+        auto im = imported_structs_.find(n);
+        return im == imported_structs_.end() ? nullptr : im->second;
+    }
+    // 导出接口用：本模块定义的 struct（c_struct 由调用方过滤）。
+    const std::unordered_map<std::string, StructInfo*>& local_structs() const { return structs_; }
+    // 导入模块的 struct 登记（同名的本地定义优先，不覆盖）。
+    void adopt_imported_struct(StructInfo* st) {
+        if (st) imported_structs_.emplace(st->name, st);
     }
 
     // match 捕获名在 case 结束后的合并类型；lower 用它在函数帧里补局部槽。
@@ -373,6 +382,8 @@ private:
 
     // 值类型 struct：名字 → 布局；vector 保证 Type::st 的裸指针长期有效。
     std::unordered_map<std::string, StructInfo*> structs_;
+    // 0.543：从导入模块接过来的 struct（生命周期由那个 ModuleInfo 的 shared_ptr 保证）。
+    std::unordered_map<std::string, StructInfo*> imported_structs_;
     std::vector<std::unique_ptr<StructInfo>> all_structs_;
 
     // 模块成员不存在的统一报错：先查「成员级拒绝」（@reject）表，命中就报原因，

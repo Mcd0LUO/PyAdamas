@@ -910,6 +910,10 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
             info->globals[name] = sym.ty;
         }
     }
+    // 0.543：导出用户 struct（.cpya 的 c_struct 不导出，布局由 C 头决定）。
+    // **拷贝**一份：导入方的 Type::st 指向 ModuleInfo 持有的对象，不借用定义模块 TypeChecker 的所有权。
+    for (auto& [sname, sp] : tc->local_structs())
+        if (sp && !sp->c_struct) info->structs[sname] = std::make_shared<pyadamas::StructInfo>(*sp);
     info->globals["__name__"] = pyadamas::t_str();
     info->globals["__file__"] = pyadamas::t_str();
     // 新构建的模块也走一遍接口编解码：导出签名里的类类型必须指向扁平
