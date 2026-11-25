@@ -487,6 +487,16 @@ private:
         std::string akey;
         bool had_old = false;
     };
+    // 0.537：del 的可见范围 = 当前 statements 序列（保守版）。构造时保存并清空、
+    // 析构时恢复，分支/循环/with/try 里的 del 不外泄。
+    struct DelGuard {
+        std::unordered_set<std::string>& cur;
+        std::unordered_set<std::string> saved;
+        explicit DelGuard(std::unordered_set<std::string>& c) : cur(c), saved(std::move(c)) {
+            cur.clear();
+        }
+        ~DelGuard() { cur = std::move(saved); }
+    };
     std::unordered_map<std::string, TypePtr> attr_refine_;
     Narrowing narrow_on(Expr& cond, bool truthy);
     // 条件里「可窄化的名字」：裸名字或 walrus 的赋值目标（定义在 stmt.cpp）。

@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.538] - 2026-11-25
+
+> feat(typecheck)：**`del <name>` 之后在同一块内再读会报错**（保守版）。
+>
+> 修前：`del y` 之后 `print(y)` 静默打印 **0**（CPython 是 `NameError`）。
+>
+> 修法（保守，不引入任何新增误杀）：`deleted_names_` 只在**当前 statements 序列**内有效——
+>进嵌套块保存并清空、出块恢复；`declare()` 里 erase（重新赋值即复活）；只跟踪 `del <Name>`。
+>
+> ```
+> y: int = 5
+> del y
+> print(y)      # error: name 'y' is not defined (deleted above)
+> ```
+>
+> **仍然不报错的情形**（刻意，写进 `docs/language.md`）：
+>- `del` 写在 `if`/`for`/`while`/`with`/`try` 体内 → 不跟踪；
+>- `del` 之后在**另一个块**里读 → 不报错；
+>- `del` 的是闭包变量（外层作用域）→ 不跟踪；
+>- `del` 之后重新赋值再读 → 正常（复活）；
+>- `del self.x` 这类属性目标 → 与原来一致（不跟踪）。
+>
+> 为什么不做完整版：静态「已删除集合」在跨分支/跨路径时天然会误杀——实测 `concurrent/futures/thread.py`
+>与 `pickletools.py` 是「del 与使用处于不同的可达路径」，完整版需要 definite-assignment 格（与窄化同构），
+>半天工作量且风险高，暂缓。
+>
+> 顺带：`typecheck/stmt.cpp` 触到 1200 行硬限制，DelGuard 抽进 `typecheck.h`、注释压缩后回到 1200。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 527 / difftest 495/0 / check_size PASS / ctest 8/8。
 ## [0.537] - 2026-11-25
 
 > feat(runtime,lower)：**`buffer` —— RC 管理的连续内存**，可直接传给 C（BLAS/memcpy/memset）。

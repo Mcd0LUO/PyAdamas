@@ -143,17 +143,8 @@ bool TypeChecker::block_exits(const std::vector<StmtPtr>& body) {
 }
 
 void TypeChecker::stmts(std::vector<StmtPtr>& body) {
-    // 0.537：del 的可见范围 = 当前 statements 序列（保守版）。进嵌套块时保存
-    // 并清空，出块恢复 —— 分支/循环/with/try 里的 del 不外泄，保持现状。
-    const auto saved_deleted = deleted_names_;
-    deleted_names_.clear();
-    struct DelGuard {
-        std::unordered_set<std::string>& cur;
-        std::unordered_set<std::string> saved;
-        ~DelGuard() { cur = std::move(saved); }
-    } del_guard{deleted_names_, saved_deleted};
-    // 提前退出的 None 守卫：`if x is None: return` 之后，x 一定不是 None。
-    // 收窄要保持到块末，所以在块级别统一记录、退出时恢复。
+    DelGuard del_guard(deleted_names_);  // del 只在本 statements 序列内可见（0.537）
+    // 提前退出的 None 守卫：`if x is None: return` 之后 x 一定不是 None；收窄保持到块末。
     std::vector<Narrowing> active;
     for (auto& s : body) {
         if (s->kind == StmtKind::If) {
