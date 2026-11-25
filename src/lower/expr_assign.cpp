@@ -743,6 +743,23 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::UnameInfo) {
+                VReg uv = expr(*a.value);
+                if (opt) uv = guard_not_none(uv, std::format("attribute '{}'", a.attr));
+                static const char* kUnameFields[] = {"sysname", "nodename", "release",
+                                                    "version", "machine"};
+                (void)uv;
+                for (int i = 0; i < 5; ++i) {
+                    if (a.attr == kUnameFields[i]) {
+                        VReg s = call_runtime(RtFn::OsUnameField, t_str(), {const_int(i)});
+                        push_temp(s);
+                        return s;
+                    }
+                }
+                err(e.line, e.col,
+                    std::format("'posix.uname_result' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::StructTime) {
                 VReg tv = expr(*a.value);
                 if (opt) tv = guard_not_none(tv, std::format("attribute '{}'", a.attr));

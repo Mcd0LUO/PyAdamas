@@ -265,6 +265,8 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         return const_str("<os.stat_result object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::StructTime)
         return const_str("<time.struct_time object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::UnameInfo)
+        return const_str("<posix.uname_result object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::Popen)
         return const_str("<subprocess.Popen object>");
     // ── P3 big 的转换（docs/numeric-types-design.md §1）─────────────

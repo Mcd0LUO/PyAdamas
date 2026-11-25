@@ -58,6 +58,9 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::StructTime:
             call_void(RtFn::PrintStr, {const_str("<time.struct_time object>")});
             break;
+        case TyKind::UnameInfo:
+            call_void(RtFn::PrintStr, {const_str("<posix.uname_result object>")});
+            break;
         case TyKind::Popen:
             call_void(RtFn::PrintStr, {const_str("<subprocess.Popen object>")});
             break;
@@ -194,6 +197,9 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             return;
         case TyKind::StructTime:
             call_void(RtFn::FileWrite, {f, const_str("<time.struct_time object>")});
+            return;
+        case TyKind::UnameInfo:
+            call_void(RtFn::FileWrite, {f, const_str("<posix.uname_result object>")});
             return;
         case TyKind::Popen:
             call_void(RtFn::FileWrite, {f, const_str("<subprocess.Popen object>")});

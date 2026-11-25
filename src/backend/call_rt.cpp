@@ -581,6 +581,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RandNew:
         case RtFn::RandGSeed:
         case RtFn::RandNext:
+        case RtFn::OsUname:
+        case RtFn::OsUnameField:
         case RtFn::OsStat:
         case RtFn::OsLstat:
         case RtFn::OsDup:

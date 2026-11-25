@@ -180,6 +180,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
         case TyKind::StatResult: return "os.stat_result";
         case TyKind::StructTime: return "time.struct_time";
+        case TyKind::UnameInfo: return "posix.uname_result";
         case TyKind::Popen: return "subprocess.Popen";
         case TyKind::Regex: return "re.Pattern";
         case TyKind::Match: return "re.Match";

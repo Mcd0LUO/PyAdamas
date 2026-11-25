@@ -41,6 +41,7 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
         case TyKind::StatResult: return "os.stat_result";
         case TyKind::StructTime: return "time.struct_time";
+        case TyKind::UnameInfo: return "posix.uname_result";
         case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
         case TyKind::Class: return t->cls ? t->cls->name : "object";
         case TyKind::TypeObj: return "type";

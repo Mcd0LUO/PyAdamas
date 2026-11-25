@@ -185,6 +185,16 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
         return t_unknown();
     }
+    if (ot->kind == TyKind::UnameInfo) {
+        // os.uname()：5 个字符串属性。
+        static const char* kUnameFields[] = {"sysname", "nodename", "release", "version",
+                                            "machine"};
+        for (const char* f : kUnameFields)
+            if (a.attr == f) return t_str();
+        err(a.line, a.col,
+            std::format("'posix.uname_result' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
     if (ot->kind == TyKind::StructTime) {
         // time.struct_time：9 个整数属性（顺序 = tm_year..tm_isdst）。
         static const char* kTmFields[] = {"tm_year", "tm_mon",  "tm_mday", "tm_hour",

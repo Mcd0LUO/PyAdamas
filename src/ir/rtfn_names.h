@@ -632,6 +632,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyIterList: return "pa_any_iter_list";
         case RtFn::AnyIndex: return "pa_any_index";
         case RtFn::TimeStrptime: return "pa_time_strptime";
+        case RtFn::OsUname: return "pa_os_uname";
+        case RtFn::OsUnameField: return "pa_os_uname_field";
         case RtFn::OsStat: return "pa_os_stat";
         case RtFn::OsLstat: return "pa_os_lstat";
         case RtFn::OsOpen: return "pa_os_open";
