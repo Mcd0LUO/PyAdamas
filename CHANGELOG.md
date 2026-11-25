@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.534] - 2026-11-25
+
+> feat(runtime,lower)：**内置 `complex` 补 `.real` / `.imag` / `.conjugate()`**（`temp-proj/PITFALLS.md` 的 C3）。
+>
+> 修前：`z.real` / `z.imag` / `z.conjugate()` 全部报 `'complex' object has no attribute`——内置 complex 只有
+>`+ - * /` 和 `abs()`，用户只能自己包一层 `get_re()`/`get_im()`/`conj()`。
+>
+> 修法：
+>- runtime `rt_complex.c`：`pa_complex_real` / `pa_complex_imag`（f64 返回）、`pa_complex_conj`（新 complex，re 不变、im 取负）；
+>- RtFn 三个入口 + `rtfn_names` + `call_rt` 编组，**复用 `ComplexAbs` 那一组**（单指针入参、f64 返回），
+>  `float_info` 那次的 f64 编组问题没有复现；
+>- typecheck：`expr_attribute` 补 `.real`/`.imag`（float）与 `.conjugate`（BoundMethod），`method_call` 补 `conjugate()`；
+>- 降级：属性读走 `ComplexReal`/`ComplexImag`，方法调用走 `ComplexConj`。
+>
+> 实测（`tests/run/complex_accessors.py`，与 CPython 逐字节一致）：
+>```
+>pya:     1.0 -2.0 (1+2j) 5.0
+>CPython: 1.0 -2.0 (1+2j) 5.0
+>```
+>
+> 只加了只读字段访问，complex 的堆对象种类与 RC kind 都没动 → **单用例 ASan**（`build --asan -O1`）无报告。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **522** / difftest 490/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 9/9。
 ## [0.533] - 2026-11-25
 
 > fix(typecheck,lower)：**类实例下标返回 float 的静默错值** + **标注 asyncio 原语反而更差**。
