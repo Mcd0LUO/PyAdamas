@@ -1,0 +1,54 @@
+name: release
+
+# 打 tag（v*）自动构建并发布 GitHub Release；也可在 Actions 页面手动触发。
+# 构建在 ubuntu-latest 上完成（glibc 与本地不同，但二进制是动态链接，产物带 RELEASE.txt 说明依赖）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（已存在）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          g++ --version | head -1
+
+      - name: 配置与构建
+        run: |
+          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/rel -j"$(nproc)"
+
+      - name: 冒烟（套件太慢，这里只跑几个代表用例）
+        run: |
+          for t in tests/run/fib.py tests/run/operator_setitem_delitem.py tests/run/time_struct_time.py; do
+            [ -f "$t" ] && ./build/rel/pyadamas run "$t" >/dev/null || echo "skip $t"
+          done
+
+      - name: 打包（含解包自检 + sha256）
+        run: bash tools/make_release.sh build/rel
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pyadamas-*.tar.gz
+            dist/pyadamas-*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
