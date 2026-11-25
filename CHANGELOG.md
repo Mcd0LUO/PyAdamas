@@ -4,6 +4,42 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.542] - 2026-11-25
+
+> fix(typecheck)：**`buffer` 作类字段的类型标注**（外部验证的 S2，A 类段错误）。
+>
+> ```python
+> class W:
+>     buf: buffer
+>     def __init__(self, n: int) -> None:
+>         self.buf = buffer(n)
+> w = W(10)
+> w.buf[2] = 1.5      # 修前：Segmentation fault
+> print(len(w.buf), w.buf[2])
+> ```
+>
+> 根因不是 RC（`ir -O0` 显示 `pa_rc_inc` 已经发了），而是**注解没映射**：`buf: buffer` 在
+>`annotation.cpp` 里没有对应项，字段类型退化成 `unknown`；于是 `len(w.buf)` 按 list/str 头部解释，
+>`w.buf[2] = 1.5` 走**列表下标写**路径，把 buffer 对象当 `PyAdamasList` 改写 → 段错误。
+>
+> 修法：`parse_annotation` 的 Name 分支加 `buffer` → `mk_buffer(t_float())` + `celem = CKind::Float`
+>（与内置 `buffer(n)` 同类型）。纯类型推导，不动 runtime/RC。
+>
+> 回归 `tests/run/buffer_class_field.py`：跨语句（`len` + 下标读）、跨函数（`w.set/get`）、跨对象（互不影响）、
+>传参后再读；ASan `detect_leaks=1` 零报告。
+>
+> ## 关于外部报的 S1（`ptr[float]` 变量下标写入 → 堆损坏）：**不是编译器 bug**
+>
+> `tests/run/clib.cpya` 的 `malloc_f(n)` 是 `@extern("malloc")`，**参数是字节数**。报告里的 `malloc_f(5)`
+> 只分配 5 字节却写了 5 个 double（40 字节）：`p[0]` 落在 malloc 最小块（可用 24 字节）里不崩，
+>`p[4]` 写到 +32 越过 chunk → `malloc(): corrupted top size`。**与下标是常量还是变量无关**
+>（常量下标同样损坏）。按正确大小 `malloc_f(40)` 分配后，常量下标、while/for 变量下标、
+>`malloc_i` 的 int 变量写入全部正确且 ASan 干净。
+>
+> 回归 `tests/run/ptr_float_store.py` 覆盖上述四种写法，并在用例里写明「参数是字节数」这个坑。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **531** / difftest 498/0 / check_size PASS / ctest 9/9。
 ## [0.541] - 2026-11-25
 
 > fix(driver/check)：**`check --imports` 接上跨模块类引用的 loader**（与 build 同口径）。
