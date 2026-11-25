@@ -387,9 +387,13 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::Exception:
         case TyKind::Complex:
         // 0.544：值/句柄类型各有 tag（30..45），不再退化成 unknown。
-        case TyKind::Deque:  // 30：带元素类型
-            e.u8(30);
-            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+        // 0.544 修正：Deque **不**跨模块（tag 30 停用）。开它会让
+        // `asyncio/coroutines.py` 的 `isinstance(obj, _COROUTINE_TYPES)` 报
+        // 「second argument must be a class」——该文件里 tuple 元素类型
+        // （`types.CoroutineType` / `collections.abc.Coroutine`）经 imports 接口
+        // 解析后不再是类。根因待查，先保持 unknown（与 0.543 之前一致）。
+        case TyKind::Deque:
+            e.u8(0);
             break;
         case TyKind::DateTime: e.u8(31); break;
         case TyKind::TimeDelta: e.u8(32); break;
