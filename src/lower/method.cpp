@@ -1,5 +1,6 @@
 // lower/method.cpp —— 方法与 super 调用降级
 #include "lower/impl.h"
+#include <cstdio>
 
 #include "cimport/native_sigs.h"  // 子模块属性链（os.path.*）的声明式签名
 
@@ -442,6 +443,21 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     TypePtr recv_ty = strip_optional(raw);
     bool opt = recv_ty != raw;
     VReg recv = expr(*at.value);
+    // 联合接收者（0.529 P0-D）：类型检查已按成员表放行（`if isinstance(o, int):
+    // return` 之后的 o 是 str），但降级只看到声明的 `int | str`。选「唯一能接住
+    // 这个方法」的成员派发；槽的表示不变（unknown 里指针类就是裸指针），
+    // 所以没有改槽宽带来的表示风险。
+    if (recv_ty && recv_ty->kind == TyKind::Unknown && !recv_ty->sub.empty()) {
+        TypePtr pick;
+        int hits = 0;
+        for (auto& m : recv_ty->sub) {
+            if (!m) continue;
+            const bool ok = m->kind == TyKind::Class ? (m->cls && m->cls->method(at.attr))
+                                                    : TypeChecker::type_has_method(m, at.attr);
+            if (ok) { pick = m; ++hits; }
+        }
+        if (hits == 1 && pick) recv_ty = pick;
+    }
 
     // 用户类的方法调用：从对象的 vtable 里取函数地址。槽号在编译期
     // 就定了，运行时只有一次间接跳转，不需要按名字查表。

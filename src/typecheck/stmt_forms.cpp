@@ -443,7 +443,13 @@ void TypeChecker::stmt_if(If& f) {
                 if (it != snapshot.end()) sym.ty = it->second;
             }
         };
+        // 联合类型以「if 之前的类型」为合并起点（0.529）：分支只做收窄时，
+        // join(联合, 收窄成员) 必须回到联合；从空表起步会退化成 join(int, str)=unknown。
+        // **只播种联合**——Optional 等不能播种：0.498 的「先合并再恢复窄化」依赖
+        // merge 看到的是分支末端的类型，播种 Optional 会把 None 又并回来。
         std::unordered_map<std::string, TypePtr> merged;
+        for (auto& [n, ty] : snapshot)
+            if (is_union_ty(ty)) merged.emplace(n, ty);
         auto merge_in = [&]() {
             for (auto& [n, sym] : cur_->vars) {
                 auto it = merged.find(n);

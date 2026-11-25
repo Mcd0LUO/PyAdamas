@@ -22,7 +22,11 @@ inline void union_flatten(const TypePtr& t, std::vector<TypePtr>& out) {
 }
 
 inline TypePtr mk_union(const TypePtr& a, const TypePtr& b) {
-    if (is_unknown(a) || is_unknown(b)) return t_unknown();
+    // 联合也是 kind==Unknown（成员表在 sub 里），不能按「裸 unknown」短路——
+    // 否则 mk_union(int | str, float) 直接塌成 unknown，三元以上联合永远建不起来
+    // （0.529 实测：三成员标注在 types 里显示 func(unknown)）。
+    if ((!is_union_ty(a) && is_unknown(a)) || (!is_union_ty(b) && is_unknown(b)))
+        return t_unknown();
     std::vector<TypePtr> ms;
     union_flatten(a, ms);
     union_flatten(b, ms);
@@ -101,6 +105,20 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         a->kind == TyKind::Unknown && a.get() != t_unknown().get() && a->sub.empty();
     const bool b_hole =
         b->kind == TyKind::Unknown && b.get() != t_unknown().get() && b->sub.empty();
+    // 联合参与合并（0.529）：join(int | str, int) 必须是 int | str。原来走到下面的
+    // is_unknown 判断，联合直接退成裸 unknown —— 多分支 isinstance 窄化（两次 if）
+    // 就再也窄不回来，降级层只能报「方法不支持」。
+    if (is_union_ty(a) || is_union_ty(b)) {
+        std::vector<TypePtr> members;
+        union_flatten(a, members);
+        union_flatten(b, members);
+        TypePtr acc;
+        for (auto& m : members) {
+            if (!m) continue;
+            acc = acc ? mk_union(acc, m) : m;
+        }
+        return acc ? acc : t_unknown();
+    }
     if (a_hole && !b_hole) return b;
     if (b_hole && !a_hole) return a;
     if (is_unknown(a) || is_unknown(b)) return t_unknown();

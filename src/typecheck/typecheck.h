@@ -163,6 +163,9 @@ public:
 
     // 表达式推断出的类型。IR 降级阶段要用它决定槽宽和指令选择，
     // 不能靠 ast 重新推一遍——两套推断迟早会分叉。
+    // 降级层判断「联合里哪个成员能接住这个方法」用（0.529）。
+    static bool type_has_method(const TypePtr& t, const std::string& m) { return has_method(t, m); }
+
     TypePtr type_of(const Expr* e) const {
         auto it = expr_types_.find(e);
         return it == expr_types_.end() ? t_unknown() : it->second;
