@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.530] - 2026-11-25
+
+> perf(runtime,lower)：**`x in list` 按元素类型特化**——0.518 评估的 P2-A。
+>
+> 修前：`x in xs` 一律降成 `call.rt pa_list_contains(list, value, cmp_kind)`，运行期每元素过一次
+> `cmp_kind` 分派（switch + 可能的 unknown 探针）。
+>
+> 修法：新增三个运行期入口 `pa_list_contains_i64` / `_f64` / `_str`（按机器字 / IEEE 双精度 /
+> `pa_str_eq` 比较），降级侧在**元素类型静态已知**且容器是 list 时选特化入口：int/bool → i64、
+> float → f64、str → str；unknown/联合/容器元素/tuple 保持通用路径。
+>
+> 微基准（1000 元素 list、1e6 次 `in`，-O2）：
+>
+> | 场景 | 修前 | 修后 | 加速 |
+> |---|---|---|---|
+> | 命中 | 2547 ms | 410 ms | **6.2×** |
+> | 未命中 | 2537 ms | 394 ms | **6.4×** |
+>
+> 我在合并后复核了一次（1000 元素、1e6 次命中，含 `time.time()` 计时）：pya **218 ms** vs
+>CPython 3.14 **4262 ms**（≈19.5×）。
+>
+> 语义：int/float/str/bool 列表、带 `__eq__` 的类实例列表、`not in` 共 7 行与 CPython 逐字节一致
+>（类实例仍走 `__eq__`，不是指针比较）。
+>
+> 12 基准：`bench/realistic` 六个 + `bench/*.py` 三个的 asm md5 **全部不变**（它们没有 list 上的 `in`），
+>`--full` 的 perf 比对 warn=0 fail=0。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 517 / difftest 486/0 / check_size PASS / bench 36/36 / ctest 9/9。
 ## [0.529] - 2026-11-25
 
 > fix(typecheck,lowe)：**`isinstance` 否定分支的窄化真正落地**——0.518 评估的 P0-D。
