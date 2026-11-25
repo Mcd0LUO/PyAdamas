@@ -45,7 +45,18 @@ void Lowerer::stmt(Stmt& s) {
                 if (tn && tc_.type_of(a.value.get()) &&
                     tc_.type_of(a.value.get())->kind == TyKind::BoundMethod &&
                     bm_receiver_ok(tc_.type_of(at.value.get()))) {
-                    st_->bm_names[tn->id] = &at;
+                    // 接收者的写版本号：调用点比对，变了就不重放（静默错值防线）。
+                    std::string recv_key;
+                    if (auto* rn = dynamic_cast<Name*>(at.value.get())) recv_key = rn->id;
+                    else if (auto* ra = dynamic_cast<Attribute*>(at.value.get()))
+                        if (auto* bn = dynamic_cast<Name*>(ra->value.get()))
+                            recv_key = bn->id + "." + ra->attr;
+                    if (recv_key.empty()) break;
+                    FuncCtx::BmBinding b;
+                    b.at = &at;
+                    b.recv = recv_key;
+                    b.version = st_->name_version[recv_key];
+                    st_->bm_names[tn->id] = b;
                     break;
                 }
             }

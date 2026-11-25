@@ -4,6 +4,15 @@
 namespace pyadamas {
 
 void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
+    // B1-min 健全性：记住「哪个名字/哪个 self 字段被写过」的版本号，绑定点与调用点
+    // 之间版本变了就不走重放（否则会出现 `push = xs.append; xs = ys; push()` 这种
+    // 静默错值）。
+    if (auto* tn = dynamic_cast<Name*>(&target)) {
+        ++st_->name_version[tn->id];
+    } else if (auto* ta = dynamic_cast<Attribute*>(&target)) {
+        if (auto* bn = dynamic_cast<Name*>(ta->value.get()))
+            ++st_->field_version[bn->id + "." + ta->attr];
+    }
     // 以 vreg 上记录的类型为准：调用方传进来的 vty 有时是目标侧的类型
     TypePtr src_ty = vreg_ty(v);
     if (!src_ty || src_ty->kind == TyKind::Unknown) src_ty = vty;

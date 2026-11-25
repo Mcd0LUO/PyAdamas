@@ -487,7 +487,17 @@ VReg Lowerer::lower_call(Call& c) {
     // B1-min（0.535）：被调者是绑定了方法的局部变量 —— 还原成对接收者的方法调用。
     if (c.func->kind == ExprKind::Name) {
         auto it = st_->bm_names.find(static_cast<Name&>(*c.func).id);
-        if (it != st_->bm_names.end() && it->second) return lower_method_call(*it->second, c);
+        if (it != st_->bm_names.end() && it->second.at) {
+            // 健全性：接收者在绑定与调用之间被写过就**不重放**（否则会静默打错对象）。
+            if (st_->name_version[it->second.recv] != it->second.version) {
+                err(c.line, c.col,
+                    std::format("bound method's receiver '{}' was reassigned after binding; "
+                                "call the method directly instead",
+                                it->second.recv));
+                return const_none();
+            }
+            return lower_method_call(*it->second.at, c);
+        }
     }
     // 内建函数
     if (c.func->kind == ExprKind::Name) {

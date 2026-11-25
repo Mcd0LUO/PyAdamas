@@ -159,7 +159,15 @@ struct FuncCtx {
     // B1-min（0.535）：`push = xs.append` 这类**局部变量**绑定方法。只记
     // 编译期的「接收者表达式 + 方法名」，调用点还原成一次普通方法调用 ——
     // 不造运行期对象，所以存进容器/返回/传参仍然按老规矩报错。
-    std::unordered_map<std::string, Attribute*> bm_names;
+    struct BmBinding {
+        Attribute* at = nullptr;
+        std::string recv;   // 接收者名字（不是 Name 时为空 → 只按版本号 0 处理）
+        int version = 0;
+    };
+    std::unordered_map<std::string, BmBinding> bm_names;
+    // 名字 / 字段的写版本号：绑定点记一份，调用点比对（B1-min 健全性）。
+    std::unordered_map<std::string, int> name_version;
+    std::unordered_map<std::string, int> field_version;
     std::unordered_map<std::string, TypePtr> extra_locals;
     // 闭包：本函数需要从外层拿的变量，以及被内层捕获、需要转成 cell 的局部名。
     const ClosureMeta* closure = nullptr;
