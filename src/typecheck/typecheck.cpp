@@ -1,4 +1,5 @@
 // typecheck/typecheck.cpp —— 类型检查驱动：作用域、声明收集、函数签名、注解解析
+#include "driver/build.h"
 #include "typecheck/typecheck.h"
 
 #include <deque>
@@ -1037,5 +1038,14 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
 
 // 语句块是否必然离开：最后一条是 return/raise/break/continue，
 // 或者是 if/else 且所有分支都离开。用来识别提前退出的 None 守卫。
+
+void TypeChecker::err_member(const std::string& module, const std::string& name, int line,
+                              int col) {
+    if (auto msg = reject_message(module, name); !msg.empty()) {
+        err(line, col, msg);
+        return;
+    }
+    err(line, col, std::format("module '{}' has no attribute '{}'", module, name));
+}
 
 }  // namespace pyadamas

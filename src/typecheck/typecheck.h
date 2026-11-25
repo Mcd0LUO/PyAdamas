@@ -372,6 +372,10 @@ private:
     std::unordered_map<std::string, StructInfo*> structs_;
     std::vector<std::unique_ptr<StructInfo>> all_structs_;
 
+    // 模块成员不存在的统一报错：先查「成员级拒绝」（@reject）表，命中就报原因，
+    // 否则报 module 'x' has no attribute 'y'。五个使用点都走这里，消息只有一份。
+    void err_member(const std::string& module, const std::string& name, int line, int col);
+
     void err(int line, int col, std::string msg) {
         diags_.push_back({line, col, std::move(msg)});
     }

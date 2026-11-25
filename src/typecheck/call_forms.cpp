@@ -134,12 +134,7 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                             for (auto& kw : c.keywords) expr(*kw.value);
                             return rt;
                         }
-                        if (auto msg = reject_message(full, a.attr); !msg.empty()) {
-                            err(c.line, c.col, msg);
-                            return t_unknown();
-                        }
-                        err(c.line, c.col,
-                            std::format("module '{}' has no attribute '{}'", full, a.attr));
+                        err_member(full, a.attr, c.line, c.col);
                         return t_unknown();
                     }
                 }
@@ -293,12 +288,7 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 }
                 auto it = mod->globals.find(a.attr);
                 if (it == mod->globals.end()) {
-                    if (auto msg = reject_message(vn->id, a.attr); !msg.empty()) {
-                        err(c.line, c.col, msg);
-                        return t_unknown();
-                    }
-                    err(c.line, c.col,
-                        std::format("module '{}' has no attribute '{}'", vn->id, a.attr));
+                    err_member(vn->id, a.attr, c.line, c.col);
                     return t_unknown();
                 }
                 auto mt = it->second;

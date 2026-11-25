@@ -551,17 +551,11 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             auto ot = expr(*sub->value);
             auto st = expr(*sub->slice);
             if (sub->slice->kind == ExprKind::Slice) {
-                // 切片赋值：运行时展开，但**元素类型必须检查**。
-                //
-                // 原实现只确认「对象可变」就放过，于是
-                //     l: list[int] = [1, 2]
-                //     l[0:1] = ['hello']
-                // 编译通过，运行时 pa_list_slice_assign 把字符串指针写进
-                // 一个声明为 int 的列表；后续 l[0] 按 int 读出来就是垃圾
-                // （实测输出 96042627193968 这种值，每次运行都不同）。
-                //
-                // 检查方式与单元素赋值（下面的 merge_elem）保持一致：
-                // 值是序列就逐个元素对；不是序列就整体对。
+                // 切片赋值：运行时展开，但**元素类型必须检查**。原实现只确认
+                // 「对象可变」就放过，于是 `l: list[int]; l[0:1] = ['hello']`
+                // 编译通过、运行时把字符串指针写进 int 列表，后续按 int 读出来
+                // 是垃圾（实测 96042627193968 这类值）。检查方式与单元素赋值
+                // （下面的 merge_elem）一致：值是序列就逐个元素对，否则整体对。
                 auto& sl = static_cast<SliceExpr&>(*sub->slice);
                 if (sl.lower) expr(*sl.lower);
                 if (sl.upper) expr(*sl.upper);
@@ -644,12 +638,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     }
                     auto it = mod->globals.find(at->attr);
                     if (it == mod->globals.end()) {
-                        if (auto msg = reject_message(vn->id, at->attr); !msg.empty()) {
-                            err(line, col, msg);
-                            return;
-                        }
-                        err(line, col,
-                            std::format("module '{}' has no attribute '{}'", vn->id, at->attr));
+                        err_member(vn->id, at->attr, line, col);
                         return;
                     }
                     if (!assignable(it->second, value))
@@ -690,6 +679,11 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             }
             auto ot = expr(*at->value);
             if (ot->kind == TyKind::Func) return;
+            if (ot->kind == TyKind::StructTime) {
+                err(line, col,
+                    "'time.struct_time' object is immutable (assign to a variable first)");
+                return;
+            }
             if (ot->kind == TyKind::Optional && !ot->sub.empty()) {
                 TyKind ik = ot->sub[0]->kind;
                 if (ik == TyKind::Class || ik == TyKind::Struct || ik == TyKind::StructPtr)

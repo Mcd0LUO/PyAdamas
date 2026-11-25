@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.519] - 2026-11-25
+
+> feat(typecheck)：**成员级编译期拒绝原语 `@reject("原因")`**——成员**存在但不可用**时，在调用/使用处报明确原因。
+>
+> 动机：有些 API 的语义在编译期模型里**无法成立**（或运行期只能给出静默错的假数据）。之前的做法是「不声明」→ 用户看到
+> `module 'sys' has no attribute 'modules'`，既不知道原因也不知道怎么办。现在可以声明出来、但使用即报错。
+>
+> - **pysig 语法**：`@reject("why")` 加在 `def` 上（`stdlib/sigs/*.pysig`）；解析器拒绝无参/重复的 `@reject`，
+>   且被拒绝的成员**不参与运行期符号反查**（`resolve_rt_symbols` 跳过，不会要求一个不存在的 `pa_*` 符号）；
+> - **C++ 侧**：`ModuleInfo::rejects`（名字 → 原因），`builtin_sigs` 里直接 `info->rejects[...] = ...`；
+> - **使用点统一拦截**：`reject_message(module, name)`（`driver/build.h`）在五个「没有这个属性」的报错点先查拒绝表——
+>   表达式取属性、调用、赋值、`from ... import`、以及 `--imports` 的成员解析；命中就报原因、不再落到通用错误。
+>
+> 首批用上两个真实例子：
+> - `sys.modules` → `pyadamas resolves modules at compile time (no runtime module registry); import the module explicitly`；
+> - `sys.getrefcount` → `pyadamas does not expose reference counts`。
+>
+> 实测三种形态都报对原因：`print(sys.modules)`、`print(sys.getrefcount(1))`、`from sys import modules`；
+> 正常成员（`sys.maxsize`/`sys.prefix`）不受影响。
+>
+> 闸门：套件 / difftest / check_size / ctest（合并时跑一次）。
 ## [0.518] - 2026-11-25
 
 > 一批「系统面 + 多继承性能」的落地：`os.walk` 崩溃、fd 面、`os.stat`、`sys` 身份常量、虚调用守卫看穿 thunk。

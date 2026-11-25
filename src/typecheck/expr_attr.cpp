@@ -52,12 +52,7 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                 return mk_class_obj(mk_class(ci->second.cls.get()));
             auto it = mod->globals.find(a.attr);
             if (it == mod->globals.end()) {
-                if (auto msg = reject_message(vn->id, a.attr); !msg.empty()) {
-                    err(a.line, a.col, msg);
-                    return t_unknown();
-                }
-                err(a.line, a.col,
-                    std::format("module '{}' has no attribute '{}'", vn->id, a.attr));
+                err_member(vn->id, a.attr, a.line, a.col);
                 return t_unknown();
             }
             return it->second;

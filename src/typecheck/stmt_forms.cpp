@@ -1026,13 +1026,12 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
                     cur_->modules[bind] = std::move(child);
                     continue;
                 }
-                if (auto msg = reject_message(im.module, al.name); !msg.empty()) {
-                    err(im.line, im.col, msg);
+                if (!reject_message(im.module, al.name).empty()) {
+                    err_member(im.module, al.name, im.line, im.col);
                 } else if (lenient_imports_) {
                     unsupported.push_back("import attribute");
                 } else {
-                    err(im.line, im.col,
-                        std::format("module '{}' has no attribute '{}'", im.module, al.name));
+                    err_member(im.module, al.name, im.line, im.col);
                 }
                 declare(bind, t_unknown(), im.line);
                 continue;
