@@ -4,6 +4,74 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.544] - 2026-11-25
+
+> feat(typecheck)：**补全内置类型的注解映射**（10 个名字，`default`/`old` 基线各 +1）。
+>
+> 之前 `buf: buffer` 退化成 unknown（0.542 的 S2 段错误就是这么来的）。同类问题成片存在——
+>这些类型**都有运行期实现**，坏的只是「注解不认识」：
+>
+> | 注解 | 映射到 |
+> |---|---|
+> | `deque` / `deque[T]` / `Deque[T]` | `mk_deque(unknown/T)` |
+> | `datetime` / `date` | `TyKind::DateTime` |
+> | `timedelta` | `TyKind::TimeDelta` |
+> | `Path` | `TyKind::Path` |
+> | `re.Pattern` / `re.Match`（dotted） | `t_regex()` / `t_match()` |
+> | `subprocess.Popen`（dotted） | `t_popen()` |
+> | `range` | `mk_range(int)` |
+> | `buffer` | `mk_buffer(float)`（0.542） |
+>
+> 另外补了 `assignable` 的 Deque 规则（与 list 同口径），否则 `d: deque[int] = deque()` 会因为
+>「元素 unknown vs int」被拒。
+>
+> 仍然保持 unknown 的（**不猜**）：`io.StringIO`/`BytesIO`/`IOBase`（没有对应 TyKind，运行期是 File 那套但
+>不完全等价）；裸 `Generator`/`AsyncGenerator`/`Coroutine`/`Future`/`Task`（只有下标形式能表达产出类型，
+>文档应写 `Generator[int]`）；`Match`/`Regex`/`Random`/`CompletedProcess` 的**裸名**（正常用法是从对应
+>模块构造/调用返回，dotted 形式已覆盖）。
+>
+> 基线：syntax 621、**default 500**（↑1）、**old 505**（↑1）、imports 167 —— 有 stdlib 文件因为注解能认了而通过。
+> 闸门：套件 538 / difftest 504/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
+
+## [0.543] - 2026-11-25
+
+> feat(ir,typecheck,driver)：**跨模块 struct 导出**。
+>
+> ```python
+> # smod.py
+> struct Point:
+>     x: float
+>     y: float
+> def make(a: float, b: float) -> Point:
+>     p: Point = Point(0.0, 0.0)
+>     p.x = a; p.y = b
+>     return p
+> def norm2(p: Point) -> float:
+>     return p.x * p.x + p.y * p.y
+> # main.py
+> import smod
+> p = smod.make(3.0, 4.0)      # 3.0 4.0
+> print(smod.norm2(p))          # 25.0（按值传参）
+> p.x = 6.0                     # 跨模块字段写
+> print(smod.norm2(p))          # 52.0
+> ```
+>
+> 实现：接口新增**用户 struct 段**（name / c_union / 每字段 name+type+offset+size / size / align）；
+>`enc_type` 打开 **tag 27（值）/ 28（指针）**，按名字引用；解码用 `pending_structs` 回填 `Type::st`
+>（struct 段在 globals **之后**解码，globals 里的 27/28 必须先登记）；`kModuleFormatVersion` **15 → 16**。
+>
+> 关键教训（上一轮一次性做完时踩的坑）：**`StructInfo` 必须由 `ModuleInfo` 拷贝持有**，不能借用定义模块
+>`TypeChecker` 的对象（no-op deleter 的 shared_ptr → 运行时段错误）。`.cpya` 的 `c_struct` **不导出**
+>（布局由 C 头决定，这是上一轮 4 个 stdlib OUTPUT DIFF 的根因）。
+>
+> 回归 `tests/modules/struct_export/`：字段读写、按值传参、跨模块修改后重新计算。
+> **全量 ASan 套件 538 ran ok、零报告。**
+>
+> 顺带发现的**既有 bug**（不属于本次改动，单独修）：`p: Point` 只声明不构造、随后写字段 → 段错误
+>（`Point(0.0, 0.0)` 构造后再写就正常）。已在 CHANGELOG 记录，另派。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 538 / difftest 504/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.542] - 2026-11-25
 
 > fix(typecheck)：**`buffer` 作类字段的类型标注**（外部验证的 S2，A 类段错误）。
