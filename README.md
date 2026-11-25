@@ -199,3 +199,5 @@ ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包
 ## 许可证
 
 Apache License 2.0，见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
+
+Copyright 2026 Mcd0_LUO。
