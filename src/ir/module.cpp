@@ -388,6 +388,15 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::Complex:
         // 0.544：值/句柄类型各有 tag（30..45），不再退化成 unknown。
         // 0.544 修正：Deque **不**跨模块（tag 30 停用）。开它会让
+        //   已排除的假设（0.549 调查）：
+        //   - 编解码不对称：❌ 最小用例 `d: deque[int]` 全局 + `def f(x: deque[int])`
+        //     跨模块正常工作（`len(d)` / `f(d)` 都对），enc/dec 的 tag 30 + 元素类型
+        //     是严格对称的；
+        //   - `isinstance(x, (types.CoroutineType, collections.abc.Coroutine))`：❌ 单独
+        //     复现**不**触发（ok），必须整文件 `check --imports asyncio/coroutines.py`；
+        //   - 仍然成立的现象：只有 `asyncio/coroutines.py` 报「second argument must be a
+        //     class」，怀疑与 asyncio 的 import 图里某个模块的接口在 Deque tag 开启后
+        //     解出的类表被破坏有关（下一步：对 asyncio 的 import 做子集二分）。
         // `asyncio/coroutines.py` 的 `isinstance(obj, _COROUTINE_TYPES)` 报
         // 「second argument must be a class」——该文件里 tuple 元素类型
         // （`types.CoroutineType` / `collections.abc.Coroutine`）经 imports 接口
