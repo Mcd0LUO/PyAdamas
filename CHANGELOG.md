@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.554] - 2026-11-25
+
+> fix(ir)：**`ptr[float]` 作类字段跨模块**——`celem`（C 元素种类）现在进接口。
+>
+> 复现：
+>
+> ```python
+> # ndmod.py
+> class Arr:
+>     data: ptr[float]
+>     def __init__(self, n: int) -> None:
+>         self.data = c.malloc_f(n * 8)
+> # main.py
+> def fill(a: ndmod.Arr) -> None:
+>     a.data[0] = 1.5      # 修前：IndexError: list assignment index out of range
+> ```
+>
+> `ptr[T]` 在类型系统里是 **`Optional[T]` + `celem`**（C 元素种类，决定下标寻址宽度）。接口编码只写了
+>`Optional[int]` 的内层类型，**`celem` 丢了** → 导入方拿到的字段类型是「普通 `Optional[int]`」，
+>`a.data[i] = v` 走**列表下标写**路径 → `IndexError`。同模块内 `celem` 还在，所以一直正常。
+>
+> 修法：`enc_type` 对 `Optional` 且 `celem != None` 的写 **tag 46 + celem 字节 + 内层类型**；
+>`dec_type` 的 `case 46` 复原 `celem`。`kModuleFormatVersion` **17 → 18**。
+>
+> 回归 `tests/modules/ptr_field_xmod/`：模块内构造 `Arr`、**在导入方函数里**做 `a.data[i] = v`、
+>回到定义方读回（`1.5 4.25`）。单用例 ASan `detect_leaks=1` 干净。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（不降）。
+> 闸门：套件 **561** / difftest 508/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.553] - 2026-11-25
 
 > fix(ir)：**Deque 跨模块 tag（30）恢复可用**——根因是 fall-through 落错 case，不是编解码不对称。

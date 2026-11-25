@@ -1,0 +1,78 @@
+# C 互操作 v1：cimport + .cpya 声明文件
+cmodule("clib")
+link("m")
+link("m")
+
+PI: float = 3.141592653589793
+ANSWER: int = 42
+SMALL: int32 = 7
+CODE: uint32 = 8
+NAME: str = "pyadamas"
+FLAG: bool = True
+OFF: bool = False
+
+def sqrt(x: float) -> float: pass
+def pow(x: float, y: float) -> float: pass
+def strlen(s: str) -> int: pass
+def labs(x: int) -> int: pass
+@extern("abs")
+def abs32(x: int32) -> int32: pass
+@extern("isalpha")
+def is_alpha(c: int32) -> bool: pass
+def malloc(n: int) -> ptr: pass
+# 带元素类型的指针返回值：支持 p[i] 解引用。
+@extern("malloc")
+def malloc_i(n: int) -> ptr[int]: pass
+@extern("malloc")
+def malloc_f(n: int) -> ptr[float]: pass
+def free(p: ptr) -> None: pass
+@extern("free")
+def free_opt(p: Optional[str]) -> None: pass
+def memset(p: ptr[int], v: int32, n: int) -> ptr[int]: pass
+def getenv(name: str) -> Optional[str]: pass
+# 可变参数：参数表末尾的 ... 允许任意多个额外实参。
+def printf(fmt: str, *args: unknown) -> int32: pass
+# C 回调：比较函数收到元素指针，PyAdamas 侧用 ptr[int] 标注后解引用。
+def qsort(base: ptr, n: int, size: int, cmp: Callable[[ptr[int], ptr[int]], int]) -> None: pass
+# 8 个 int 参数：验证超过 6 个时走栈。
+def syscall(n: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int) -> int: pass
+# 缓冲区传参：list[float] / list[int] / bytes 的 data 指针。
+def modf(x: float, iptr: ptr[float]) -> float: pass
+@extern("time")
+def time_at(t: ptr[int]) -> int: pass
+def memcmp(a: ptr, b: ptr, n: int) -> int32: pass
+
+# 带字段的 C 结构体：布局按 C 规则计算，ptr[tm] 可直接读写字段。
+class tm:
+    tm_sec: int32
+    tm_min: int32
+    tm_hour: int32
+    tm_mday: int32
+    tm_mon: int32
+    tm_year: int32
+    tm_wday: int32
+    tm_yday: int32
+    tm_isdst: int32
+    tm_gmtoff: int
+    tm_zone: ptr
+
+def gmtime(t: ptr[int]) -> ptr[tm]: pass
+
+# 按值结构体：8 字节 INTEGER 返回（rax）、16 字节返回（rax/rdx）、
+# 4 字节按值传参（整数寄存器）。
+class div_t:
+    quot: int32
+    rem: int32
+class ldiv_t:
+    quot: int
+    rem: int
+class in_addr:
+    s_addr: uint32
+
+def div(n: int32, d: int32) -> div_t: pass
+def ldiv(n: int, d: int) -> ldiv_t: pass
+def htonl(x: uint32) -> uint32: pass
+def inet_ntoa(a: in_addr) -> str: pass
+
+# C 全局变量：optind 是 int（getopt 的全局游标），初始值为 1。
+optind: int32

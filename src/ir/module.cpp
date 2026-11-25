@@ -471,8 +471,17 @@ void enc_type(Enc& e, const TypePtr& t) {
             for (auto& s : t->sub) enc_type(e, s);
             break;
         case TyKind::Optional:
-            e.u8(10);
-            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            // 0.554：ptr[T] 在类型系统里就是 Optional[T] + celem（C 元素种类）。
+            // celem 不进接口的话，导入方拿到的是「普通 Optional[int]」，
+            // `a.data[i] = v` 会走列表下标写 → IndexError（跨模块 ndarray 越界）。
+            if (t->celem != CKind::None) {
+                e.u8(46);
+                e.u8(static_cast<uint8_t>(t->celem));
+                enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            } else {
+                e.u8(10);
+                enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            }
             break;
         case TyKind::Func:
             e.u8(11);
@@ -527,6 +536,12 @@ TypePtr dec_type(Dec& d) {
             return t;
         }
         case 10: return mk_optional(dec_type(d));
+        case 46: {
+            auto ck = static_cast<CKind>(d.u8());
+            TypePtr t = mk_optional(dec_type(d));
+            t->celem = ck;
+            return t;
+        }
         case 11: {
             TypePtr t = std::make_shared<Type>();
             t->kind = TyKind::Func;
