@@ -45,3 +45,20 @@ done
 > `tools/flagbench.sh` 是 0.481 新加的一次性 A/B 工具（从 0.474/0.475 的临时脚本收编）：
 > 只切一个环境变量、两侧独立 `PYADAMAS_CACHE_DIR` + `--rebuild`、每轮打乱顺序 + 奇偶轮交换 A/B 先后、
 > BURST 连跑取平均、报中位数与 p25。它不碰 `build/release`（0.271 oracle）。
+
+## P1-A 虚调用去虚拟化（0.530 候选，**未合并**）
+
+分支 `.wt/p1`（`44a5bea`），实测结论：**收益为零，且有健全性问题，已弃用**。
+
+- 现状核实：`src/opt/devirt.cpp` 处理的是「经函数变量的间接调用」，不是 vtable 的 VCall；
+  真正的 VCall 只在接收者静态类是**终态类**（`sealed_classes_`）时才降成直调。
+- 做法：新增 `devirt_vcall.cpp`，按**槽号**扫所有类的 vtable，条目唯一就改直调。
+- 实测：-O0 下确实变直调；1e7 次单态调用微基准 **0.07s → 0.07s**（-O1/-O2 本来就被内联）；
+  12 基准 IR 里 **0 个 VCall**，perf 全 0 变化。
+- **健全性问题（弃用原因）**：槽号是**每个类自己的布局**，不是全局方法 id。按槽号跨类匹配，
+  会在「两个不相干类在同一槽号放不同方法」时改错目标——合并后 `370_textwrap`、
+  `390_configparser_core` 立刻出现 OUTPUT DIFF（`'MiXeD'` 被 lower 成 `'mixed'`、
+  textwrap 结果变成 `'[one two]\n[three]'`），`git reset` 回 0.529 后恢复。
+
+若还要做，正确判据必须是「接收者静态类型已知 + 该类 vtable 该槽的目标 == 全类唯一实现 +
+本模块无子类/无 import」，而不是只看槽号。
