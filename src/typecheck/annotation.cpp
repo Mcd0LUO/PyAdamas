@@ -193,6 +193,15 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                         if (mod->name == "random" && at->attr == "Random") return t_random();
                         if (mod->name == "subprocess" && at->attr == "CompletedProcess")
                             return t_completed();
+                        // B3b（0.533）：asyncio 原语的内建类型。标注成 unknown 会让
+                        // `async with` 在**降级**阶段被拒（前端放行、后端报错），
+                        // 而不标注反而能过 —— 标注了更差。
+                        if (mod->name == "asyncio") {
+                            if (at->attr == "Lock") return mk_async_lock();
+                            if (at->attr == "Semaphore") return mk_async_semaphore();
+                            if (at->attr == "Event") return mk_async_event();
+                            if (at->attr == "Queue") return mk_async_queue(t_unknown());
+                        }
                     } else {
                         // 跨模块类标注 `p: a.Point`：接口里带完整字段/方法表，
                         // 解析成同一个 ClassInfo*（lowering 走 imported class 路径）。
