@@ -73,7 +73,20 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::AnnAssign: {
             auto& a = static_cast<AnnAssign&>(s);
             mark_ann_unknown_slot(a);  // P3-1b：object/Any 标注槽禁升级
-            if (!a.value) break;  // 纯声明：槽本来就是 0（None）
+            if (!a.value) {
+                // 纯声明：槽本来就是 0（None）。但 struct 的 0 是空指针：
+                // 只声明 Point 后再写字段会写到地址 0（段错误）。值类型 struct
+                // 的局部变量在声明处分配零填充 payload，语义与标量一致（未初始化
+                // = 零），字段读写不再崩。
+                TypePtr want0;
+                if (a.target->kind == ExprKind::Name)
+                    want0 = storage_ty(static_cast<Name&>(*a.target).id);
+                if (want0 && want0->kind == TyKind::Struct && want0->st && !want0->st->c_struct) {
+                    VReg obj = struct_new(want0->st);
+                    assign_to(*a.target, obj, want0);
+                }
+                break;
+            }
             TypePtr vt = tc_.type_of(a.value.get());
             // `x: list[float] = [1, 2]`：字面量必须按标注的元素类型构造。
             // 照字面量自己的 list[int] 构造，槽会被当成 list[float] 读，

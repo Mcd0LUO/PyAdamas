@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.545] - 2026-11-25
+
+> fix(lower)：**值类型 struct 的「只声明」局部变量**（A 类段错误）。
+>
+> ```python
+> struct Point:
+>     x: float
+>     y: float
+> def f() -> float:
+>     p: Point        # 只声明、不构造
+>     p.x = 1.0       # 修前：Segmentation fault（写到地址 0）
+>     return p.x
+> ```
+>
+> 根因：`AnnAssign` 无初值时降级器直接 `break`（「槽本来就是 0（None）」）——对标量成立，
+>但**值类型 struct 在槽里是指针**，0 就是空指针，字段写等于写地址 0。
+>
+> 修法：无初值但标注是值类型 struct（非 `.cpya` 的 `c_struct`）时，在声明处 `struct_new` 分配一块
+>零填充 payload 并走正常赋值路径。语义与标量一致（**未初始化 = 零**），`p.x` 读回 `0.0`、写正常。
+>
+> 回归 `tests/run/struct_declare.py`：声明后写字段（3.0）、声明后读字段（0.0）。
+>
+> 这是 0.543 跨模块 struct 收尾时顺带发现的**既有 bug**（在 0.542 的基线上同样复现），不属于那次改动。
+>
+> 基线：default 500/626、old 505、`--imports` 167（不降）。
+> 闸门：套件 **539** / difftest 505/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8；
+>**全量 ASan 套件 539 ran ok、零报告**。
 ## [0.544] - 2026-11-25
 
 > feat(typecheck)：**补全内置类型的注解映射**（10 个名字，`default`/`old` 基线各 +1）。
