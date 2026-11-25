@@ -1,5 +1,22 @@
 # 装饰器建模：三种合成包装类型（待做）
 
+> ## 0. 结论更新（0.517 后实测）：**这个设计大部分是空的**
+>
+> 在动手实现前先量了三个装饰器的**运行期存在性**，结果推翻了设计前提：
+>
+> | 装饰器 | 实测 |
+> |---|---|
+> | `contextlib.contextmanager` | **可用**（`with tag() as v:` 输出 7），类型层是 unknown，但 `with` 已经能工作 |
+> | `functools.singledispatch` | **不存在**——`check` 直接报 `module 'functools' has no attribute 'singledispatch'` |
+> | `types.coroutine` | **不存在**——`import types` 报 `cannot find module 'types'` |
+>
+> 也就是说：0.500 判负「装饰器保留签名」时那 4 个文件里的 `@singledispatch` / `@types.coroutine` 用法，
+>**在我们的 stdlib 里根本没有对应实现**；建模它们等于先实现这两个模块/属性（新功能），而不是「补类型」。
+>剩下唯一可建模的是 `contextmanager`，而它**运行期已经能用**（unknown 类型不影响 `with`），建模只提升类型保真度、不改基线数字。
+>
+> **结论**：装饰器建模从「待做」改为「**暂不适用**」；若将来实现 `functools.singledispatch` 或 `types` 模块，再回来做第 1–3 步。
+> 0.500 的判负（未知装饰器不保留原签名）**维持不变**。
+
 > 状态：**未实现**。0.500 的「装饰器保留原签名」判负是因为这三个装饰器**真的改变返回类型**；
 > 要安全地让未知装饰器保留签名，必须先给这三个建模。相关：[frontend-gaps.md](frontend-gaps.md) §3.1、§8.3。
 
