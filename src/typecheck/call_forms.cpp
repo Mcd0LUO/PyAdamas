@@ -1,4 +1,5 @@
 // typecheck/call_forms.cpp —— call 按被调表达式形态拆分
+#include "driver/build.h"
 #include "typecheck/typecheck.h"
 
 #include "common/re_groups.h"
@@ -132,6 +133,10 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                             for (auto& arg : c.args) expr(*arg);
                             for (auto& kw : c.keywords) expr(*kw.value);
                             return rt;
+                        }
+                        if (auto msg = reject_message(full, a.attr); !msg.empty()) {
+                            err(c.line, c.col, msg);
+                            return t_unknown();
                         }
                         err(c.line, c.col,
                             std::format("module '{}' has no attribute '{}'", full, a.attr));
@@ -288,6 +293,10 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 }
                 auto it = mod->globals.find(a.attr);
                 if (it == mod->globals.end()) {
+                    if (auto msg = reject_message(vn->id, a.attr); !msg.empty()) {
+                        err(c.line, c.col, msg);
+                        return t_unknown();
+                    }
                     err(c.line, c.col,
                         std::format("module '{}' has no attribute '{}'", vn->id, a.attr));
                     return t_unknown();

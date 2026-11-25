@@ -1,4 +1,5 @@
 // typecheck/stmt_forms.cpp —— stmt 按语句形态拆分
+#include "driver/build.h"
 #include "typecheck/typecheck.h"
 
 #include <algorithm>
@@ -1025,7 +1026,9 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
                     cur_->modules[bind] = std::move(child);
                     continue;
                 }
-                if (lenient_imports_) {
+                if (auto msg = reject_message(im.module, al.name); !msg.empty()) {
+                    err(im.line, im.col, msg);
+                } else if (lenient_imports_) {
                     unsupported.push_back("import attribute");
                 } else {
                     err(im.line, im.col,

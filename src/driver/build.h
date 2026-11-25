@@ -97,6 +97,9 @@ struct Program {
 
 // 内建模块（math/os/json/...）的签名表，实现在 typecheck/builtin_sigs.cpp。
 ModuleInfoPtr builtin_module(const std::string& name);
+// 成员级编译期拒绝：成员存在但不可用（@reject("why") 或 C++ 侧注册）。
+// 返回空串表示没有注册；非空时调用点应直接报这个原因，而不是「没有这个属性」。
+std::string reject_message(const std::string& module, const std::string& name);
 
 // check 模式用的 import 图解析：加载依赖模块的接口（不生成代码），
 // 返回一个 module_lookup 闭包给 TypeChecker。无法解析的依赖返回 nullptr

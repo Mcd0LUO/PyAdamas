@@ -38,6 +38,10 @@ struct ModuleInfo {
     // 任意属性/调用都放行成 unknown，降级成 rt_cpy 的子进程 IPC 调用。
     // 名字是 "python"（根，只用于 from-import 解析）或 "python.<module>"。
     bool cpy_proxy = false;
+    // 成员级编译期拒绝（@reject("msg") 或 C++ 侧注册）：成员**存在但不可用**，
+    // 使用时报出给定原因，而不是「没有这个属性」。用于语义无法静态建模、
+    // 或运行期行为会静默错的地方。
+    std::unordered_map<std::string, std::string> rejects;
     // 模块的版本坐标（P0：全局常量，默认 "0"）。进 mangling 也进接口，
     // 保证「同包不同版本 → 不同符号」。真正的每包版本在 P2 才接入。
     std::string version;

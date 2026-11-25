@@ -35,3 +35,8 @@ def intern(s: str) -> str: pass
 # （默认 1000，与 CPython 一致；set 校验 n >= 1），让依赖它的代码行为一致。
 def getrecursionlimit() -> int: pass
 def setrecursionlimit(limit: int) -> int: pass
+
+# 成员级编译期拒绝（@reject）：成员**存在但不可用**，使用时直接报原因。
+# getrefcount：运行期不暴露引用计数（RC 头是内部布局），给假数字比不给更糟。
+@reject("sys.getrefcount is not available: pyadamas does not expose reference counts")
+def getrefcount(obj: object) -> int: pass

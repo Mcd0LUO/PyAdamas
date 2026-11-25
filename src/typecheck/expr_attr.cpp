@@ -3,6 +3,7 @@
 // 文件规模硬限制 1200 行：P4 语言缺口给 typecheck/expr.cpp 加了异常类当值
 // 的类型分支后超限，把最大的 Attribute case 按职责拆到这里。逻辑逐字搬移，
 // 不改语义（门控关时 asm 逐字节不变的闸门要求）。
+#include "driver/build.h"
 #include "typecheck/typecheck.h"
 
 #include "ir/module.h"
@@ -51,6 +52,10 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                 return mk_class_obj(mk_class(ci->second.cls.get()));
             auto it = mod->globals.find(a.attr);
             if (it == mod->globals.end()) {
+                if (auto msg = reject_message(vn->id, a.attr); !msg.empty()) {
+                    err(a.line, a.col, msg);
+                    return t_unknown();
+                }
                 err(a.line, a.col,
                     std::format("module '{}' has no attribute '{}'", vn->id, a.attr));
                 return t_unknown();

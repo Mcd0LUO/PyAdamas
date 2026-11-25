@@ -105,6 +105,11 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["prefix"] = pyadamas::t_str();
         info->globals["exec_prefix"] = pyadamas::t_str();
         info->globals["path"] = pyadamas::mk_list(pyadamas::t_str());
+        // sys.modules 是运行期的模块注册表，pyadamas 没有这个东西（编译期就
+        // 决定了模块集合）；给一个空 dict 会静默错，所以在这里明确拒绝。
+        info->rejects["modules"] =
+            "sys.modules is not available: pyadamas resolves modules at compile time "
+            "(no runtime module registry); import the module explicitly";
         info->globals["stdin"] = pyadamas::t_file();
         info->globals["stdout"] = pyadamas::t_file();
         info->globals["stderr"] = pyadamas::t_file();
@@ -706,9 +711,18 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     // 的继续用硬编码，两者共存。
     if (auto declared = pyadamas::nativesig::module_info(name)) {
         for (auto& [gname, gty] : declared->globals) info->globals[gname] = gty;
+        for (auto& [rname, rmsg] : declared->rejects) info->rejects[rname] = rmsg;
     }
     cache[name] = info;
     return info;
+}
+
+std::string reject_message(const std::string& module, const std::string& name) {
+    if (auto info = builtin_module(module)) {
+        auto it = info->rejects.find(name);
+        if (it != info->rejects.end()) return it->second;
+    }
+    return {};
 }
 
 }  // namespace pyadamas
