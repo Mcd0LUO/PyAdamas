@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.517] - 2026-11-25
+
+> feat(runtime)：**`json.dump(obj, fp)` / `json.load(fp)`**（文件流版）。
+>
+> - **`dump`**：原生层的文件写入口**本来就可达**——`runtime/rt_internal.h` 里已有 `pa_file_write(PyAdamasFile*, PyAdamasStr*)`（`rt_file.c`），
+>   不需要补新 API。流程：`pa_json_dumps(value, desc, indent, flags, NULL)` 拿结果串 → `pa_file_write(fp, s)` → `rc_dec` 中间串 → 返回 None；
+>   `desc` 由调用点的静态类型生成（与 dumps 同一条 `json_desc`），`indent` 用 `INT64_MIN` 哨兵表示 None；
+> - **`load`**：用 `pa_file_read(fp, -1)` 读全文（支持 FileLike 的实例侧分派），再走**动态**解析 `pa_json_parse`——不经 sample 描述符。
+>   **返回类型故意是 unknown**：CPython 的 `load` 返回类型本来就是动态的，没有 sample 参数无法静态定；与 `loads(text, sample)` 的规则不同，已写进 pysig 注释。
+>
+> 接线：`RtFn::JsonDump`（5 参，与 JsonDumps 同编组）/ `JsonLoad`（1 参）+ `rtfn_names` + `call_rt` + `rt_internal` +
+>`builtin_sigs.cpp` 的 json 分支（`dump` 的 obj/fp 标 `ann_unknown`、`load` 返回 unknown）+ `lower/import.cpp` 原生名表 + `lower/import_misc.cpp` 的 dump/load 分支（支持 `indent=`）。
+>
+> 对拍（`tests/run/json_dump_load.py`，11 行全同）：dump 内容 == `json.dumps(obj)`、`indent=2` 排版逐字节相同；
+>load 读回 `repr` 与原对象一致；str 往返（中文/转义）；非法 JSON 的
+>`ValueError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)` 逐字一致。
+>
+> 限制（写进文档）：dump 只开放 `indent=` 关键字（`separators`/`sort_keys`/`ensure_ascii` 未开放）；
+>dump 的目标必须是真 file/FileLike（其它值走 `file_check` 的 TypeError，CPython 是 AttributeError，未对齐）；
+>`load` 返回 unknown 意味着后续要静态类型的操作得经动态路径。
+> 另外沿用 json 既有模型：**混合类型 dict 的 dumps/dump 需要静态可定的类型**（`json needs a statically known type`），这是既有行为、不是本版引入。
+>
+> ASan 套件 **506 ran ok / 0 失败**；628 默认口径 **501/623 不降**；本仓库 **907 个 `.py`：789 通过**；
+>12 基准 asm 与 master 逐字节相同。闸门：套件 **506** / difftest **476** / check_size **PASS** / ctest 9/9。
 ## [0.516] - 2026-11-25
 
 > feat(runtime)：**`operator.setitem(obj, key, value)` / `operator.delitem(obj, key)`**——照 `pa_any_index` 的结构做运行期分派。
