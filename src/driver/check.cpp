@@ -190,7 +190,13 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
         // 「annotated as Point but assigned Point」。解码后类表/签名统一到
         // 同一批 ClassInfo，与 build 行为一致。
         if (auto bytes = pyadamas::encode_module_interface(*info)) {
-            if (auto dec = pyadamas::decode_module_interface(*bytes, path))
+            // 0.541：跨模块类引用（tag 29）要按模块名取别的模块的接口 —— 与 build 端
+            // 同口径（build 用 Program::units + builtin_module）。这里用 check 自己的
+            // 加载器，避免 check --imports 把跨模块类引用退化成 unknown。
+            auto iface_loader = [&ctx, path](const std::string& dep) -> pyadamas::ModuleInfoPtr {
+                return check_load(ctx, path, dep);
+            };
+            if (auto dec = pyadamas::decode_module_interface(*bytes, path, iface_loader))
                 info = *dec;
         }
         ctx.loading.erase(name);
