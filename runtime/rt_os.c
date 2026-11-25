@@ -450,45 +450,68 @@ PyAdamasDict* pa_os_environ(void) {
    顺序 = 目录 readdir 顺序（不排序，与 CPython 一致）；followlinks=False，
    符号链接目录按 lstat 判定为目录时也不进入（与 CPython 默认语义一致：
    os.walk 用 scandir 的 is_dir(follow_symlinks=False) 过滤，不跟随链接）。 */
-static void walk_recurse(PyAdamasList* out, const char* dir) {
-    DIR* dp = opendir(dir);
-    if (!dp) {
-        os_raise("walk", errno);
-        return;
-    }
-    PyAdamasList* dirs = pa_list_new(0, 1);
-    PyAdamasList* files = pa_list_new(0, 1);
-    struct dirent* de;
-    while ((de = readdir(dp)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
-        struct stat st;
-        int isdir = 0;
-        if (lstat(path, &st) == 0) isdir = S_ISDIR(st.st_mode) ? 1 : 0;
-        PyAdamasStr* nm = str_new(de->d_name, (int64_t)strlen(de->d_name));
-        if (isdir) pa_list_append(dirs, (int64_t)nm, 1);
-        else pa_list_append(files, (int64_t)nm, 1);
-    }
-    closedir(dp);
-    PyAdamasList* tup = pa_list_new(0, 1);
-    PyAdamasStr* root = str_new(dir, (int64_t)strlen(dir));
-    pa_list_append(tup, (int64_t)root, 1);
-    pa_list_append(tup, (int64_t)dirs, 1);
-    pa_list_append(tup, (int64_t)files, 1);
-    pa_list_append(out, (int64_t)tup, 1);
-    /* 先产出本层，再按 readdir 顺序下钻；dirs 由 tup 持引用，元素存活。 */
-    for (int64_t i = 0; i < dirs->len; ++i) {
-        PyAdamasStr* nm = (PyAdamasStr*)dirs->data[i];
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s", dir, nm->data);
-        walk_recurse(out, path);
-    }
-}
-
+/* 迭代式 os.walk（0.518 修 heap-use-after-free）：原实现是 C 递归，每层把
+   dirs/files/tup 只放在 C 局部变量里；递归期间不断 str_new 分配字符串，
+   一旦触发主收集，这些对象在根集合的四处都看不见，整棵子图被当垃圾清扫。
+   现在改成显式栈（堆上的 list），并把 `out` 与栈都用 pa_gc_pin 挂成 GC 根
+   —— 按 rt_internal.h 的「容器 + 逐个填充」约定，GC 从根标记整棵子图。
+   顺序与递归版一致：每层先产出 (root, dirs, files)，再按 readdir 顺序下钻。 */
 PyAdamasList* pa_os_walk(PyAdamasStr* top) {
     PyAdamasList* out = pa_list_new(0, 1);
-    walk_recurse(out, top->data);
+    PyAdamasList* stack = pa_list_new(4, 1);
+    pa_gc_pin(out);
+    pa_gc_pin(stack);
+    pa_list_append(stack, (int64_t)str_new(top->data, top->len), 1);
+    while (stack->len > 0) {
+        int64_t last = stack->len - 1;
+        PyAdamasStr* dir = (PyAdamasStr*)stack->data[last];
+        pa_rc_inc(dir);              /* 弹出前自持一份，栈释放它自己的 */
+        pa_list_del_index(stack, last);
+        DIR* dp = opendir(dir->data);
+        if (!dp) {
+            pa_rc_dec(dir);
+            os_raise("walk", errno);
+            pa_gc_unpin(stack);
+            pa_gc_unpin(out);
+            return out;
+        }
+        PyAdamasList* dirs = pa_list_new(0, 1);
+        PyAdamasList* files = pa_list_new(0, 1);
+        pa_gc_pin(dirs);
+        pa_gc_pin(files);
+        struct dirent* de;
+        while ((de = readdir(dp)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+            char path[4096];
+            snprintf(path, sizeof path, "%s/%s", dir->data, de->d_name);
+            struct stat st;
+            int isdir = 0;
+            if (lstat(path, &st) == 0) isdir = S_ISDIR(st.st_mode) ? 1 : 0;
+            PyAdamasStr* nm = str_new(de->d_name, (int64_t)strlen(de->d_name));
+            if (isdir) pa_list_append(dirs, (int64_t)nm, 1);
+            else pa_list_append(files, (int64_t)nm, 1);
+        }
+        closedir(dp);
+        PyAdamasList* tup = pa_list_new(0, 1);
+        pa_gc_pin(tup);
+        pa_list_append(tup, (int64_t)str_new(dir->data, dir->len), 1);
+        pa_list_append(tup, (int64_t)dirs, 1);
+        pa_list_append(tup, (int64_t)files, 1);
+        pa_list_append(out, (int64_t)tup, 1);
+        pa_gc_unpin(tup);
+        /* 子目录路径压栈：字符串一创建就进（被 pin 的）栈，GC 看得见。 */
+        for (int64_t i = 0; i < dirs->len; ++i) {
+            PyAdamasStr* nm = (PyAdamasStr*)dirs->data[i];
+            char path[4096];
+            snprintf(path, sizeof path, "%s/%s", dir->data, nm->data);
+            pa_list_append(stack, (int64_t)str_new(path, (int64_t)strlen(path)), 1);
+        }
+        pa_gc_unpin(files);
+        pa_gc_unpin(dirs);
+        pa_rc_dec(dir);
+    }
+    pa_gc_unpin(stack);
+    pa_gc_unpin(out);
     return out;
 }
 
