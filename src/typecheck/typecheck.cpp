@@ -910,6 +910,94 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
         }
         return std::nullopt;
     }
+    // 0.547：常量折叠。默认参数只收可序列化的字面量，但 `def f(x: int = 2 ** 10)` 这种写法
+    // 在 CPython 里完全正常，被拒是纯粹的实现限制。这里对两侧都是字面量的二元运算做折叠，
+    // 只保留确定不溢出、不依赖运行期的组合（整数 + - * % // << >> & | ^ 与受限的 **，
+    // 浮点 + - * /，字符串/字节串的 +）。不确定的一律返回 nullopt，调用方照旧报错。
+    if (e->kind == ExprKind::BinOp) {
+        const auto& b = static_cast<const BinOp&>(*e);
+        auto l = literal_of_expr(b.left.get());
+        auto r = literal_of_expr(b.right.get());
+        if (!l || !r) return std::nullopt;
+        const bool li = l->kind == LiteralValue::Kind::Int && !l->u64;
+        const bool ri = r->kind == LiteralValue::Kind::Int && !r->u64;
+        const bool lf = l->kind == LiteralValue::Kind::Float;
+        const bool rf = r->kind == LiteralValue::Kind::Float;
+        LiteralValue out;
+        if (li && ri) {
+            int64_t a = l->i;
+            int64_t c = r->i;
+            int64_t v = 0;
+            bool ok = true;
+            switch (b.op) {
+                case Tok::PLUS: ok = !__builtin_add_overflow(a, c, &v); break;
+                case Tok::MINUS: ok = !__builtin_sub_overflow(a, c, &v); break;
+                case Tok::STAR: ok = !__builtin_mul_overflow(a, c, &v); break;
+                case Tok::PERCENT:
+                    if (c == 0) return std::nullopt;
+                    v = a % c;
+                    break;
+                case Tok::DOUBLESLASH:
+                    if (c == 0) return std::nullopt;
+                    v = a / c;
+                    break;
+                case Tok::LSHIFT:
+                    if (c < 0 || c > 62) return std::nullopt;
+                    v = static_cast<int64_t>(static_cast<uint64_t>(a) << c);
+                    break;
+                case Tok::RSHIFT:
+                    if (c < 0 || c > 63) return std::nullopt;
+                    v = a >> c;
+                    break;
+                case Tok::AMPER: v = a & c; break;
+                case Tok::VBAR: v = a | c; break;
+                case Tok::CIRCUMFLEX: v = a ^ c; break;
+                case Tok::DOUBLESTAR: {
+                    if (c < 0 || c > 62) return std::nullopt;
+                    v = 1;
+                    for (int64_t k = 0; k < c; ++k)
+                        if (__builtin_mul_overflow(v, a, &v)) { ok = false; break; }
+                    break;
+                }
+                default: return std::nullopt;
+            }
+            if (!ok) return std::nullopt;
+            out.kind = LiteralValue::Kind::Int;
+            out.i = v;
+            return out;
+        }
+        if ((li || lf) && (ri || rf)) {
+            double a = li ? static_cast<double>(l->i) : l->f;
+            double c = ri ? static_cast<double>(r->i) : r->f;
+            double v = 0;
+            switch (b.op) {
+                case Tok::PLUS: v = a + c; break;
+                case Tok::MINUS: v = a - c; break;
+                case Tok::STAR: v = a * c; break;
+                case Tok::SLASH:
+                    if (c == 0) return std::nullopt;
+                    v = a / c;
+                    break;
+                default: return std::nullopt;
+            }
+            out.kind = LiteralValue::Kind::Float;
+            out.f = v;
+            return out;
+        }
+        if (l->kind == LiteralValue::Kind::Str && r->kind == LiteralValue::Kind::Str &&
+            b.op == Tok::PLUS) {
+            out.kind = LiteralValue::Kind::Str;
+            out.s = l->s + r->s;
+            return out;
+        }
+        if (l->kind == LiteralValue::Kind::Bytes && r->kind == LiteralValue::Kind::Bytes &&
+            b.op == Tok::PLUS) {
+            out.kind = LiteralValue::Kind::Bytes;
+            out.s = l->s + r->s;
+            return out;
+        }
+        return std::nullopt;
+    }
     if (e->kind != ExprKind::Constant) return std::nullopt;
     auto& c = static_cast<const Constant&>(*e);
     LiteralValue v;

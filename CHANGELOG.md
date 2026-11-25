@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.547] - 2026-11-25
+
+> feat(typecheck)：**默认参数支持常量表达式**（编译期折叠）。
+>
+> 修前：
+>
+> ```python
+> def scale(x: int = 2 ** 10) -> int:
+>     return x
+> # error: default value of 'x' is not a literal constant;
+> #        the code generator cannot fill it in yet
+> ```
+>
+> 默认参数一直是「只收字面量」（接口序列化需要不依赖 AST 的表示），所以 `2 ** 10`、`1 << 4`、
+>`"a" + "b"` 这些在 CPython 里完全正常的写法都被拒。
+>
+> 修法：`literal_of_expr` 对**两侧都是字面量**的二元运算做折叠，只保留确定不溢出、不依赖运行期的组合：
+>- 整数：`+ - * % // << >> & | ^`（`+ - *` 用 `__builtin_*_overflow` 查溢出，越界即放弃折叠）与受限 `**`
+>  （指数 0..62，逐步乘并查溢出）；除数/模数为 0 一律不折叠；
+>- 浮点：`+ - * /`；字符串/字节串：`+`；
+>- 其它情况（变量、调用、混合 u64 大字面量）仍返回「不是字面量」，错误消息不变。
+>
+> 回归 `tests/run/default_const_fold.py`：`2**10` → 1024、`1<<4 + 1.5*2.0` → 19.0、`"a"+"b"` → `ab`、
+>`7%3 + 100//7` → 15；`x: int = n`（变量）仍被拒。
+>
+> 顺带：`kModuleFormatVersion` 从 15 补到 **16** —— 0.543 加了 struct 段却漏了 bump（我的疏漏），
+>这会让旧 modcache 有被新解码器误读的风险。
+>
+> 基线：default 500/626、old 505、`--imports` 167（不降）。
+> 闸门：套件 **541** / difftest 506/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.546] - 2026-11-25
 
 > fix(typecheck)：**`Chan[T]` / `Chan` 注解**——跨模块 channel 从此可用。
