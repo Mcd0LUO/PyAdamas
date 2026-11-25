@@ -2853,6 +2853,7 @@ void gc_scan_object(PyAdamasRc* h) {
     void* p = (char*)h + PYADAMAS_RC_HDR;
     switch (h->kind) {
         case PYADAMAS_RC_STR:
+        case PYADAMAS_RC_BUFFER:  // 0.536：连续内存，元素只有标量，无出边
             break;
         case PYADAMAS_RC_LIST: {
             PyAdamasList* l = (PyAdamasList*)p;
