@@ -298,3 +298,12 @@ push(2.0)      # CPython 改 xs；重放改 ys —— 静默错值
 属于不可接受的静默分歧，未合并。628 口径收益为零（499 → 499，那 15 个文件都超出「局部变量 + 直接调用」）。
 正确做法：绑定点把接收者**求值一次并存进隐藏槽**，调用点用槽里的值；这样不新增堆对象种类、
 只多一个槽，工作量中等（要给 `lower_method_call` 一个「接收者来自槽」的入口，不能靠 `type_of` 反查）。
+
+### 8.9 跨模块调用被装饰方法（0.536 前后）
+
+- **0.535 及以前**：段错误（接口丢了 `decorated` 标记，导入方按普通方法走 vtable 空槽）；
+- **0.536 起**：check 阶段报 `decorated method 'add' of imported class 'Calc' is not available across modules`；
+- 同模块内装饰方法一直正常；
+- 未做：跨模块**支持**它（需要把类属性里的闭包值跨模块导出，属于接口格式的第二类扩展，暂不做）；
+- 另：函数值不能挂属性（`wrapper.calls = get_calls`）：check 过、build 报 `unsupported assignment target`，
+  函数值是纯编译期实体；用闭包 cell 或模块级 dict 替代。

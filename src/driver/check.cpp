@@ -107,6 +107,8 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
                     if (slot != m.slot) nm.aliases.push_back(slot);
                 nm.call_sig = m.call_sig;
                 nm.sig = m.call_sig;
+                // 0.536：装饰标记（check 侧接口也要带，否则 check 会放行、build 才报）。
+                nm.decorated = m.decorated;
                 flat->methods.push_back(std::move(nm));
             }
             for (size_t mi = 0; mi < flat->methods.size(); ++mi) {

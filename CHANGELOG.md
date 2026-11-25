@@ -4,6 +4,47 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.536] - 2026-11-25
+
+> fix(ir,typecheck)：**跨模块调用被装饰方法不再段错误**（`temp-proj/DECORATORS.md` 的 J2）。
+>
+> 复现（修前）：
+>
+> ```python
+> # decorators.py
+> def doubled(fn):
+>     def wrapper(self, x: int) -> int:
+>         return fn(self, x) * 2
+>     return wrapper
+> class Calc:
+>     @doubled
+>     def add(self, x: int) -> int: ...
+> # main.py
+> import decorators as d
+> c = d.Calc(10)
+> print(c.add(5))     # Segmentation fault
+> ```
+>
+> 根因链：装饰方法的实现是**类属性里的闭包值**，不占 vtable 槽（`vtable: f3 f-1`）；
+>但接口导出时丢了两处信息，导入方按普通方法 `vcall %14[1]` → 跳空槽（-1）→ 段错误：
+>1. 接口 flatten（`driver/build.cpp` 的 `by_key` 重建）没复制 `MethodInfo::decorated`；
+>2. 接口编码/解码没有这个字段。
+>
+> 修法：`MethodInfo::decorated` 进接口（编码加 1 字节），flatten 两处（build 与 check）都复制；
+>导入类上的装饰方法调用在 **check 阶段**就报清楚：
+>
+> ```
+> error: decorated method 'add' of imported class 'Calc' is not available across modules;
+>        call it inside its own module or drop the decorator
+> ```
+>
+> 同模块内装饰方法不受影响（仍正常，`30`）。
+>
+> 顺带记录：函数值不能挂属性（`wrapper.calls = ...`）check 过、build 报 `unsupported assignment target`，
+>函数值是纯编译期实体、没有运行期字典——用闭包 cell 或模块级 dict 替代（已记入 `docs/frontend-gaps.md`）。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 524 / difftest 492/0 / check_size PASS / ctest 8/8。
 ## [0.535] - 2026-11-25
 
 > feat(lower)：**局部变量绑定的方法可以直接调用**（B1 最小范围），并带健全性护栏。

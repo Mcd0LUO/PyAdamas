@@ -168,6 +168,16 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             // 骨架（还没看到类体）才放宽；本类方法体里成员表是齐的
             if (!recv->cls->complete && recv->cls != cur_class_) return t_unknown();
             auto* m = recv->cls->method(name);
+            // 0.536：装饰器链的结果是**类属性**（运行期闭包值），接口里不导出。
+            // 以前跨模块调用按 vtable 走空槽直接段错误；现在在 check 阶段就报清楚
+            // （temp-proj/DECORATORS.md 的 J2）。
+            if (m && m->decorated && recv->cls->imported()) {
+                err(c.line, c.col,
+                    std::format("decorated method '{}' of imported class '{}' is not available "
+                                "across modules; call it inside its own module or drop the decorator",
+                                name, recv->cls->name));
+                return t_unknown();
+            }
             if (!m) {
                 // 父类是外部类型：方法可能在那边，实参也无从检查。
                 // self 上调不到的方法同理——mixin 组合出来的成员静态看不见。

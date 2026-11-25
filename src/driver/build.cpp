@@ -860,6 +860,9 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                         if (slot != m.slot) nm.aliases.push_back(slot);
                     nm.call_sig = m.call_sig;
                     nm.sig = m.call_sig;
+                    // 0.536：装饰过的方法必须把标记带过接口（temp-proj 的 J2：
+                    // 跨模块调用被装饰方法会按 vtable 走空槽 → 段错误）。
+                    nm.decorated = m.decorated;
                     flat->methods.push_back(std::move(nm));
                 }
                 // 属性描述符按方法索引重建，导入方才能识别 @property。

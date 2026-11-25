@@ -688,6 +688,10 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             for (auto& m : c.methods) {
                 e.str(m.name);
                 e.u8(static_cast<uint8_t>(m.kind));
+                // 0.536：装饰过的方法必须把标记带过接口。以前不带，
+                // 导入方按普通方法走 vtable，槽里是装饰器的 wrapper/空槽，
+                // 跨模块调用直接段错误（temp-proj/DECORATORS.md 的 J2）。
+                e.u8(m.decorated ? 1 : 0);
                 e.u32(static_cast<uint32_t>(m.slot));
                 e.u32(static_cast<uint32_t>(m.aliases.size()));
                 for (int a : m.aliases) e.u32(static_cast<uint32_t>(a));
@@ -775,6 +779,7 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
                 MethodInfo m;
                 m.name = d.str();
                 m.kind = static_cast<MethodKind>(d.u8());
+                m.decorated = d.u8() != 0;
                 m.slot = static_cast<int>(d.u32());
                 uint32_t nal = d.u32();
                 for (uint32_t k = 0; k < nal; ++k)
