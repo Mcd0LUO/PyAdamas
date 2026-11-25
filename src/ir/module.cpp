@@ -400,6 +400,12 @@ void enc_type(Enc& e, const TypePtr& t) {
         //     `_collections_abc.py:89 sys._getframe` 未建模）；只有
         //     `asyncio/coroutines.py` 复现 ⇒ 与该文件的 import 图无关，是**文件自身**
         //     的 `_COROUTINE_TYPES` 元组在 tag 30 打开后元素类型退化。
+        //   - **决定性实验（0.551）**：enc 开 tag 30、但 dec 的 `case 30` 改成
+        //     `return t_unknown()`（或不消费元素类型）→ `asyncio/coroutines.py` **ok**。
+        //     说明字节流**没有错位**，问题在**解成真正的 Deque 类型之后**：
+        //     该文件的 `_COROUTINE_TYPES` tuple 元素在 check 的类型合并里被 Deque 参与
+        //     后不再是「类」。这是**类型检查侧**（join/assignable 与 tuple 元素推断）
+        //     的问题，不是编解码问题。下一步从 `_COROUTINE_TYPES` 的静态类型入手。
         //   - 仍然成立的现象：只有 `asyncio/coroutines.py` 报「second argument must be a
         //     class」，怀疑与 asyncio 的 import 图里某个模块的接口在 Deque tag 开启后
         //     解出的类表被破坏有关（下一步：对 asyncio 的 import 做子集二分）。
