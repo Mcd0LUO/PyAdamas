@@ -64,6 +64,12 @@ TypePtr TypeChecker::expr(Expr& e) {
             }
             case ExprKind::Name: {
                 auto& n = static_cast<Name&>(e);
+                // 0.537：同一块内 `del y` 之后再读 y → 报错（CPython 是 NameError）。
+                if (deleted_names_.count(n.id)) {
+                    err(n.line, n.col,
+                        std::format("name '{}' is not defined (deleted above)", n.id));
+                    return t_unknown();
+                }
                 // 类体命名空间优先于模块全局：Python 的类体里，前面几行
                 // 赋过的名字就是类命名空间的成员，会遮住同名全局。
                 if (auto it = class_body_attrs_.find(n.id); it != class_body_attrs_.end())
