@@ -99,6 +99,12 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["version_info"] =
             pyadamas::mk_tuple({pyadamas::t_int(), pyadamas::t_int(), pyadamas::t_int(),
                                 pyadamas::t_str(), pyadamas::t_int()});
+        // 解释器身份（0.518）：prefix/exec_prefix 是编译期字符串快照，path 是
+        // list[str] 快照（可 insert，但不参与导入解析）——值在 lowering 的
+        // builtin_value 里生成，这里只声明类型。
+        info->globals["prefix"] = pyadamas::t_str();
+        info->globals["exec_prefix"] = pyadamas::t_str();
+        info->globals["path"] = pyadamas::mk_list(pyadamas::t_str());
         info->globals["stdin"] = pyadamas::t_file();
         info->globals["stdout"] = pyadamas::t_file();
         info->globals["stderr"] = pyadamas::t_file();

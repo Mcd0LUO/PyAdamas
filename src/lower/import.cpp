@@ -301,6 +301,24 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
             out = def_heap(ty, std::move(mt));  // def_heap 已把堆结果登进临时栈
             return true;
         }
+        // 解释器身份（0.518）：pyadamas 没有运行期「安装前缀」概念，这三个
+        // 按**目标平台**给编译期快照，与 sys.pysig 里 version/platform 同口径；
+        // sys.path 是 list[str] 快照（可被用户 insert，但不参与我们的导入解析）。
+        if (member == "prefix" || member == "exec_prefix") {
+            ty = t_str();
+            out = const_str("/usr");
+            return true;
+        }
+        if (member == "path") {
+            ty = mk_list(t_str());
+            Inst ml;
+            ml.op = IrOp::MakeList;
+            ml.imm = list_kind_filled(ty);
+            ml.args = {const_str(""), const_str("/usr/lib/python3.14"),
+                       const_str("/usr/lib/python3.14/lib-dynload")};
+            out = def_heap(ty, std::move(ml));
+            return true;
+        }
         if (member == "argv") {
             ty = mk_list(t_str());
             out = call_runtime(RtFn::SysArgv, ty, {});
