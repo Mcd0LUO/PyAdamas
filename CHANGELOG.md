@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.550] - 2026-11-25
+
+> test(ir)：记录 **Deque(30) 跨模块 tag 的排除结论**（只加注释，无行为变化）。
+>
+> 0.548 停用 tag 30 是因为 `check --imports /usr/lib/python3.14/asyncio/coroutines.py` 报
+>`isinstance() second argument must be a class or builtin type`。这轮把两个最可能的假设都验掉了：
+>
+> | 假设 | 实验 | 结论 |
+> |---|---|---|
+> | 编解码不对称 | 被 import 模块导出 `d: deque[int]` + `def f(x: deque[int]) -> int`，开 tag 30 后主模块 `len(dmod.d)` 与 `dmod.f(dmod.d)` 都正常 | **排除** |
+> | `isinstance` 的 tuple 元素退化成非类 | `T = (types.CoroutineType, collections.abc.Coroutine); isinstance(x, T)` 用 `check -I .` 不触发 | **排除** |
+> | 整文件 `check --imports` 才报 | 仍复现 | **未解决** |
+>
+> 结论：Deque 的 tag 编码本身没问题，问题出在 **asyncio 的 import 图**——某个被间接导入的模块接口在 tag 30 打开后
+>解出的类表被破坏。下一步方向（已写进代码注释）：对 asyncio 的 import 链做子集二分，或在 dec 侧打印每个接口
+>解出的类数对比。**tag 30 保持停用**，同模块内 `deque`/`deque[T]` 不受影响。
+>
+> 顺带记录两个本轮尝试过但**没有采用**的修法（都会让基线退化，已回退）：
+>- 在 check 模式下合成一个 `_GeneratorContextManager` 类，让 `@contextmanager` 的类型在两个模式口径一致——
+>  **已实测：default 500 → 496、old 505 → 501**（4 个 stdlib 文件因为「装饰 dunder 方法」等错误被拒），
+>  所以不采用；
+>- 按名字文本匹配 `contextlib` 的 Attribute 形式（保留在原代码里，是 0.540 已有的行为）。
+>
+> `check -I . main.py` 对 `tests/modules/contextlib_xmod` 仍报 `module attribute is not callable`（build/run 正常）——
+>这是**已知的 check/build 口径差**，根因是 check 模式下 contextlib 的类表没被加载，待单独修。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（与 0.549 持平）。
+> 闸门：套件 556 / difftest 506/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.549] - 2026-11-25
 
 > test(modules)：**补 7 个类型 tag 的跨模块用例**（0.548 的 tag 有实现、缺验收）。
