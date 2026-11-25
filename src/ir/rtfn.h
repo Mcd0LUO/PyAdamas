@@ -251,6 +251,9 @@ enum class RtFn : uint16_t {
     ComplexAdd, ComplexSub, ComplexMul, ComplexDiv, // (c*,c*) -> c*
     ComplexNeg,   // (c*) -> c*
     ComplexAbs,   // (c*) -> f64
+    ComplexReal,  // (c*) -> f64
+    ComplexImag,  // (c*) -> f64
+    ComplexConj,  // (c*) -> c*
     ComplexStr,   // (c*) -> str*
     ComplexEq,    // (c*,c*) -> bool
     ComplexTruth, // (c*) -> bool

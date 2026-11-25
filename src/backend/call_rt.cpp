@@ -509,6 +509,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::Chr:
         case RtFn::ComplexNeg:
         case RtFn::ComplexAbs:
+        case RtFn::ComplexReal:
+        case RtFn::ComplexImag:
+        case RtFn::ComplexConj:
         case RtFn::ComplexStr:
         case RtFn::ComplexTruth:
         case RtFn::ReprStr:

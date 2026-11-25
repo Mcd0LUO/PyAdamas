@@ -143,6 +143,19 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
 
 VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     ++side_effect_seq_;
+    // C3（0.534）：complex.conjugate() -> 新 complex（无参数）。
+    {
+        TypePtr rt0 = tc_.type_of(at.value.get());
+        if (rt0 && rt0->kind == TyKind::Complex && at.attr == "conjugate") {
+            if (!c.args.empty() || !c.keywords.empty()) {
+                err(c.line, c.col, "conjugate() takes no arguments");
+                return const_none();
+            }
+            VReg zv = expr(*at.value);
+            VReg r = call_runtime(RtFn::ComplexConj, t_complex(), {zv});
+            return r;
+        }
+    }
     // super().m(...)：沿运行期 MRO 找下一个实现。
     if (auto* sup = dynamic_cast<Call*>(at.value.get())) {
         if (auto* sn = dynamic_cast<Name*>(sup->func.get());

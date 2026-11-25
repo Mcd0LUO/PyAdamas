@@ -69,6 +69,17 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
         if (it != attr_refine_.end()) return it->second;
     }
     if (is_unknown(ot)) return t_unknown();
+    // C3（0.534）：complex 的访问器。`conjugate` 是方法引用，类型按
+    // BoundMethod(Complex, "conjugate") 记，调用点在 call_forms 里解析。
+    if (ot && ot->kind == TyKind::Complex) {
+        if (a.attr == "real" || a.attr == "imag") return t_float();
+        if (a.attr == "conjugate") {
+            auto bt = new_ty(TyKind::BoundMethod);
+            bt->sub.push_back(ot);
+            bt->name = "conjugate";
+            return bt;
+        }
+    }
     if (ot->kind == TyKind::Optional) {
         // 0.498：窄化之后走到这里说明没判空 —— 报错给出可操作提示，
         // 然后仍按内层类型继续检查（避免一条语句刷两条错）。

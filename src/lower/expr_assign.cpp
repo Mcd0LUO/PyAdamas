@@ -678,6 +678,15 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'datetime' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::Complex) {  // C3（0.534）：real / imag
+                VReg zv = expr(*a.value);
+                if (opt) zv = guard_not_none(zv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "real") return call_runtime(RtFn::ComplexReal, t_float(), {zv});
+                if (a.attr == "imag") return call_runtime(RtFn::ComplexImag, t_float(), {zv});
+                err(e.line, e.col,
+                    std::format("'complex' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::TimeDelta) {
                 VReg tv = expr(*a.value);
                 if (opt) tv = guard_not_none(tv, std::format("attribute '{}'", a.attr));

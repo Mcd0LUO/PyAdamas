@@ -36,6 +36,13 @@ PyAdamasComplex* pa_complex_neg(PyAdamasComplex* a) {
     return pa_complex_new(-a->re, -a->im);
 }
 
+/* complex 访问器（0.534）：re/im 是两个 double；conjugate 造新对象。 */
+double pa_complex_real(PyAdamasComplex* a) { return a ? a->re : 0.0; }
+double pa_complex_imag(PyAdamasComplex* a) { return a ? a->im : 0.0; }
+PyAdamasComplex* pa_complex_conj(PyAdamasComplex* a) {
+    return pa_complex_new(a ? a->re : 0.0, a ? -a->im : 0.0);
+}
+
 double pa_complex_abs(PyAdamasComplex* a) { return hypot(a->re, a->im); }
 
 int64_t pa_complex_eq(PyAdamasComplex* a, PyAdamasComplex* b) {
