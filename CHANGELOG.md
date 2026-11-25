@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.532] - 2026-11-25
+
+> perf(opt)：**RC 临时值配对消除**——0.518 评估的 P2-C（选了低风险的 B 方案）。
+>
+> 现状（1e7 次实例创建循环，-O2）：每次迭代 IR 是
+>`obj.new` + `pa_rc_temp` + `field.set` + `pa_rc_temp_take` + 循环尾 `rc_dec`，62 ns/次。
+>原有 `rc_redundant_pairs` 只能吃掉**相邻**的 `RcTemp`/`RcTempTake`，被 `field.set` 隔开的那对漏掉了。
+>
+> 修法：新增形态 **1b** —— 同一基本块内 `RcTemp(v)` 与它之后**不碰临时值栈**
+>（不出现 `RcTemp`/`RcTempTake`/`RcCleanup`）的 `RcTempTake(v)` 成对删除；
+>中间只要有一条动栈指令就放过。依据：`pa_rc_temp` 只压栈不改 rc、`pa_rc_temp_take` 只出栈，
+>两条一起删时 rc 与栈水位都不变，异常路径也一样（owner 自己的引用还在）。
+>
+> 实测：
+>
+> | 场景 | 修前 | 修后 |
+> |---|---|---|
+> | 实例创建循环（1e7 次，-O2） | 0.62–0.63 s（62 ns/次） | **0.57–0.58 s（57 ns/次）**，约 8% |
+> | CPython 3.14 同机 | 3.71–3.73 s（372 ns/次） | 不变 |
+>
+> 我在合并后复核（2e6 次含方法调用）：pya **130 ms** vs CPython **767 ms**（≈5.9×）。
+>
+> 收益 <10%，按既定口径**不做 A 方案**（栈分配非逃逸实例，需动分配器 + GC/异常交互）。
+>
+> 闸门：**全量 ASan 套件 519 ran ok / 0 失败 / 无 sanitizer 报告**；常规套件 519；difftest 487/0；
+>check_size PASS；bench 36/36（`obj_dispatch` 的 asm 因 RC 对消变了，perf 在噪声内）；ctest 9/9。
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
 ## [0.531] - 2026-11-25
 
 > perf(runtime,lower)：**`isinstance` 走整数 class id**，替掉 MRO 上的字符串比较。
