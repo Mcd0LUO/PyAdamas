@@ -394,6 +394,12 @@ void enc_type(Enc& e, const TypePtr& t) {
         //     是严格对称的；
         //   - `isinstance(x, (types.CoroutineType, collections.abc.Coroutine))`：❌ 单独
         //     复现**不**触发（ok），必须整文件 `check --imports asyncio/coroutines.py`；
+        //   - **依赖链二分（0.551）**：把 tag 30 打开后逐个 `check --imports` 直接依赖：
+        //     `collections/__init__.py` / `inspect.py` / `os.py` / `sys/__init__.py` /
+        //     `types.py` 都没有 isinstance 报错（只有各自的无关错误，如
+        //     `_collections_abc.py:89 sys._getframe` 未建模）；只有
+        //     `asyncio/coroutines.py` 复现 ⇒ 与该文件的 import 图无关，是**文件自身**
+        //     的 `_COROUTINE_TYPES` 元组在 tag 30 打开后元素类型退化。
         //   - 仍然成立的现象：只有 `asyncio/coroutines.py` 报「second argument must be a
         //     class」，怀疑与 asyncio 的 import 图里某个模块的接口在 Deque tag 开启后
         //     解出的类表被破坏有关（下一步：对 asyncio 的 import 做子集二分）。
