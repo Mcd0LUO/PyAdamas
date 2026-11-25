@@ -446,6 +446,15 @@ VReg Lowerer::dunder_call(VReg recv, TypePtr recv_ty, const char* name,
     }
     TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
     if (want_ret && !type_eq(rt, want_ret)) return kNoReg;
+    // 实参按形参类型 coerce（P0-A）：gen_vcall 按**实参 vreg 的静态类型**分类 ABI，
+    // 而这里过去直接把 args 塞进 VCall —— 形参是 union（unknown，走整型寄存器）而实参
+    // 是 float（走 xmm）时，callee 读到的是 double 的位模式（q + 2.0 静默算错）。
+    // bind_args 里早就有这一步，dunder 调用漏了。
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == kNoReg) continue;
+        TypePtr want = m->call_sig->pos[i].ty;
+        args[i] = coerce(args[i], vreg_ty(args[i]), want);
+    }
     if (m->decorated) {
         // 装饰后的 dunder 存在类属性里：取包装函数，把 self 显式传进去。
         const ClassAttrInfo* ca = recv_ty->cls->class_attr(name);
