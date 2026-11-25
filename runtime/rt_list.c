@@ -1570,6 +1570,32 @@ int64_t pa_list_contains(PyAdamasList* l, int64_t v, int64_t kind) {
     return 0;
 }
 
+
+/* ── 按元素类型特化的 list 成员查找（0.531，P2-A）────────────────
+   通用入口 pa_list_contains 每个元素都要过一次 `cmp_kind` 分派（switch + 可能的
+   unknown 探针）。元素类型静态已知时直接按机器字/双精度/字符串比，热循环里
+   少一次分派。语义与通用路径逐位一致（int/bool 按机器字、float 按 IEEE 值、
+   str 按字节）。 */
+int64_t pa_list_contains_i64(PyAdamasList* l, int64_t v) {
+    for (int64_t i = 0; i < l->len; ++i)
+        if (l->data[i] == v) return 1;
+    return 0;
+}
+
+int64_t pa_list_contains_f64(PyAdamasList* l, double v) {
+    for (int64_t i = 0; i < l->len; ++i) {
+        double e;
+        memcpy(&e, &l->data[i], sizeof e);
+        if (e == v) return 1;
+    }
+    return 0;
+}
+
+int64_t pa_list_contains_str(PyAdamasList* l, PyAdamasStr* v) {
+    for (int64_t i = 0; i < l->len; ++i)
+        if (pa_str_eq((PyAdamasStr*)(uintptr_t)l->data[i], v)) return 1;
+    return 0;
+}
 /* 元素比较链：编译器按静态类型生成一串字符，每字符说明该层元素怎么比——
      i = int/bool（机器字）、s = str（按字节）、f = float（IEEE）、
      x = 其它/未知（机器字）、l = list（递归）、d = dict（递归）、t = set（递归）。

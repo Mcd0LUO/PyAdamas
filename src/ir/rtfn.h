@@ -87,6 +87,9 @@ enum class RtFn : uint16_t {
     DictVersion,  // (dict*) -> i64  迭代版本号（键集合变化的计数器）
     DictKeyAt,    // (dict*, i64 index) -> i64
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
+    ListContainsI64,  // (list*, i64) -> i64     list[int] 的成员查找（无分派）
+    ListContainsF64,  // (list*, f64) -> i64     list[float] 的成员查找
+    ListContainsStr,  // (list*, str*) -> i64    list[str] 的成员查找
     ListEq,       // (list*, list*, i64 cmp_kind) -> i64
     StrContains,  // (str*, str*) -> i64
     DictGetOr,    // (dict*, i64 key, i64 default) -> i64
