@@ -242,6 +242,14 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                             if (at->attr == "Event") return mk_async_event();
                             if (at->attr == "Queue") return mk_async_queue(t_unknown());
                         }
+                        // 0.550：内置模块里**用 pya 源码实现**的类（`io.StringIO` /
+                        // `io.BytesIO` 就在 stdlib/io.py 里）。以前这一支只认上面那几个
+                        // 硬编码名字，其余 dotted 注解一律退化成 unknown，于是
+                        // `s: io.StringIO = io.StringIO()` 之后 `s.write/getvalue`
+                        // 全在降级期报「method ... is not supported」。
+                        if (auto ci = mod->classes.find(at->attr);
+                            ci != mod->classes.end() && ci->second.cls)
+                            return mk_class(ci->second.cls.get());
                     } else {
                         // 跨模块类标注 `p: a.Point`：接口里带完整字段/方法表，
                         // 解析成同一个 ClassInfo*（lowering 走 imported class 路径）。
