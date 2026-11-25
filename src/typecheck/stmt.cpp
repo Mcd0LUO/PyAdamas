@@ -549,6 +549,12 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
         if (auto* sub = dynamic_cast<Subscript*>(&target)) {
             auto ot = expr(*sub->value);
             auto st = expr(*sub->slice);
+            // time.struct_time 只读（0.518）：CPython 里它是不可变对象，这里在编译期拒绝。
+            if (ot && ot->kind == TyKind::StructTime) {
+                err(line, col,
+                    "'time.struct_time' object is immutable (assign to a variable first)");
+                return;
+            }
             if (sub->slice->kind == ExprKind::Slice) {
                 // 切片赋值：运行时展开，但**元素类型必须检查**。
                 //
@@ -685,6 +691,12 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             }
             auto ot = expr(*at->value);
             if (ot->kind == TyKind::Func) return;
+            // time.struct_time 只读（0.518）：编译期拒绝，消息固定。
+            if (ot->kind == TyKind::StructTime) {
+                err(line, col,
+                    "'time.struct_time' object is immutable (assign to a variable first)");
+                return;
+            }
             if (ot->kind == TyKind::Optional && !ot->sub.empty()) {
                 TyKind ik = ot->sub[0]->kind;
                 if (ik == TyKind::Class || ik == TyKind::Struct || ik == TyKind::StructPtr)

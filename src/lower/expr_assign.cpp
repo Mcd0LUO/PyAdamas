@@ -190,6 +190,13 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 err(target.line, target.col, "'set' object does not support item assignment");
                 break;
             }
+            // time.struct_time 只读（0.518）：类型检查层已在两处拦截，这里是
+            // 降级层的兜底（同一句消息），保证不会走到 IndexStore 把对象当 list 改写。
+            if (ot && ot->kind == TyKind::StructTime) {
+                err(target.line, target.col,
+                    "'time.struct_time' object is immutable (assign to a variable first)");
+                break;
+            }
             // 用户类：MRO 里有 __setitem__ 时按 dunder 分发，否则报错。
             // 以前直接落到 IndexStore，把对象当 PyAdamasList 解引用 -> 段错误。
             if (ot && ot->kind == TyKind::Class) {
@@ -734,6 +741,20 @@ VReg Lowerer::expr(Expr& e) {
                 }
                 err(e.line, e.col,
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
+            if (ot && ot->kind == TyKind::StructTime) {
+                VReg tv = expr(*a.value);
+                if (opt) tv = guard_not_none(tv, std::format("attribute '{}'", a.attr));
+                static const char* kTmFields[] = {"tm_year", "tm_mon",  "tm_mday", "tm_hour",
+                                                 "tm_min",  "tm_sec",  "tm_wday", "tm_yday",
+                                                 "tm_isdst"};
+                for (int i = 0; i < 9; ++i) {
+                    if (a.attr == kTmFields[i])
+                        return call_runtime(RtFn::ListGet, t_int(), {tv, const_int(i)});
+                }
+                err(e.line, e.col,
+                    std::format("'time.struct_time' object has no attribute '{}'", a.attr));
                 return const_none();
             }
             if (ot && ot->kind == TyKind::StatResult) {

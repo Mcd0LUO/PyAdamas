@@ -185,6 +185,17 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
         return t_unknown();
     }
+    if (ot->kind == TyKind::StructTime) {
+        // time.struct_time：9 个整数属性（顺序 = tm_year..tm_isdst）。
+        static const char* kTmFields[] = {"tm_year", "tm_mon",  "tm_mday", "tm_hour",
+                                         "tm_min",  "tm_sec",  "tm_wday", "tm_yday",
+                                         "tm_isdst"};
+        for (const char* f : kTmFields)
+            if (a.attr == f) return t_int();
+        err(a.line, a.col,
+            std::format("'time.struct_time' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
     if (ot->kind == TyKind::StatResult) {
         // os.stat_result：10 个整数属性（CPython 的 tuple 顺序）。
         static const char* kStatFields[] = {"st_mode",  "st_ino",  "st_dev",   "st_nlink",

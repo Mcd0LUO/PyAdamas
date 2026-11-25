@@ -7,6 +7,28 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     VReg obj = expr(*s.value);
     TypePtr ot = tc_.type_of(s.value.get());
     TypePtr ty = tc_.type_of(&s);
+    // time.struct_time（0.518）：运行期就是 9 个 int 的 list，所以下标读 = ListGet，
+    // 切片 = ListSlice 且类型仍按 tuple[int, ...]（与旧的 tuple 语义完全一致，
+    // `gmtime(0)[:6] == (1970,1,1,0,0,0)` 照旧成立）。对象本身只读，写在类型检查
+    // 层就拒绝，不会走到这里。
+    if (ot && ot->kind == TyKind::StructTime) {
+        if (s.slice->kind == ExprKind::Slice) {
+            auto& sl = static_cast<SliceExpr&>(*s.slice);
+            constexpr int64_t kNone = std::numeric_limits<int64_t>::min();
+            auto bound = [&](ExprPtr& e) -> VReg {
+                if (!e) return const_int(kNone);
+                return coerce(expr(*e), tc_.type_of(e.get()), t_int());
+            };
+            VReg start = bound(sl.lower);
+            VReg stop = bound(sl.upper);
+            VReg step = bound(sl.step);
+            VReg v = call_runtime(RtFn::ListSlice, mk_tuple_rest(t_int()), {obj, start, stop, step});
+            push_temp(v);
+            return v;
+        }
+        VReg si = coerce(expr(*s.slice), tc_.type_of(s.slice.get()), t_int());
+        return call_runtime(RtFn::ListGet, t_int(), {obj, si});
+    }
 
     if (s.slice->kind == ExprKind::Slice) {
         auto& sl = static_cast<SliceExpr&>(*s.slice);

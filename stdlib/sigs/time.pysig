@@ -14,8 +14,8 @@ def sleep(secs: float) -> None: pass
 # localtime/gmtime 的可选参数用 -1e300 当「取当前时间」的哨兵（CPython 无此
 # 约定，见 runtime/rt_time.c 的注释）；返回 9 元 int 元组（struct_time 的
 # 下标形态）。运行期符号：pa_time_localtime / pa_time_gmtime。
-def localtime(secs: float = -1e300) -> tuple[int, ...]: pass
-def gmtime(secs: float = -1e300) -> tuple[int, ...]: pass
+def localtime(secs: float = -1e300) -> struct_time: pass
+def gmtime(secs: float = -1e300) -> struct_time: pass
 
 # strftime 的第二实参可以是 9 元组/9 元列表，参数装配在
 # lower_import_native.cpp 里手工做（声明只负责类型检查放行）。
@@ -23,6 +23,7 @@ def strftime(*args: unknown) -> str: pass
 
 # mktime 接受 9 元组或 9 元列表，所以形参是 unknown（list 按 CPython 口径不接受）。
 def mktime(t: tuple[int, ...]) -> float: pass
+def strptime(s: str, fmt: str) -> struct_time: pass
 
 # 常量表（CPython 下同名的 int 常量）。这两个值是 Linux 的 <time.h> 口径，
 # 与 CPython 的 time.CLOCK_MONOTONIC / time.CLOCK_REALTIME 一致。

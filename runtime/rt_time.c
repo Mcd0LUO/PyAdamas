@@ -1,4 +1,8 @@
 // rt_time.c —— time 模块
+// strptime(3) 是 XSI 扩展：没有这个宏时 glibc 只声明 strftime（-Werror 会拦下）。
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #include "rt_internal.h"
 
 #include <errno.h>
@@ -122,6 +126,32 @@ PyAdamasList* pa_time_gmtime(double secs) {
     return tm_to_tuple(&tmv);
 }
 
+
+/* time.strptime(s, fmt)（0.518）：C 的 strptime 填 struct tm，再展开成 9 个 int 的
+   list（顺序与 localtime/gmtime 一致）。解析失败抛 ValueError（CPython 的文本是
+   "time data '...' does not match format '...'"）。 */
+PyAdamasList* pa_time_strptime(PyAdamasStr* s, PyAdamasStr* fmt) {
+    struct tm tmv;
+    memset(&tmv, 0, sizeof tmv);
+    const char* rest = strptime(s->data, fmt->data, &tmv);
+    if (!rest) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "time data '%s' does not match format '%s'", s->data,
+                 fmt->data);
+        pa_raise_c("ValueError", buf);
+    }
+    PyAdamasList* l = pa_list_new(9, 0);
+    pa_list_append(l, (int64_t)tmv.tm_year + 1900, 0);
+    pa_list_append(l, (int64_t)tmv.tm_mon + 1, 0);
+    pa_list_append(l, (int64_t)tmv.tm_mday, 0);
+    pa_list_append(l, (int64_t)tmv.tm_hour, 0);
+    pa_list_append(l, (int64_t)tmv.tm_min, 0);
+    pa_list_append(l, (int64_t)tmv.tm_sec, 0);
+    pa_list_append(l, (int64_t)tmv.tm_wday, 0);
+    pa_list_append(l, (int64_t)tmv.tm_yday, 0);
+    pa_list_append(l, (int64_t)tmv.tm_isdst, 0);
+    return l;
+}
 PyAdamasStr* pa_time_strftime(PyAdamasStr* fmt, PyAdamasList* tm) {
     struct tm tmv;
     if (tm) {

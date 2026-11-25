@@ -548,6 +548,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Random:
         case TyKind::CompletedProcess:
         case TyKind::StatResult:
+        case TyKind::StructTime:
         case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:
@@ -604,6 +605,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Random:
         case TyKind::CompletedProcess:
         case TyKind::StatResult:
+        case TyKind::StructTime:
         case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:

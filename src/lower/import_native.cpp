@@ -282,7 +282,7 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         if (c.args.size() == 2) {
             TypePtr at = tc_.type_of(c.args[1].get());
             if (at && at->kind != TyKind::Tuple && at->kind != TyKind::List &&
-                at->kind != TyKind::Unknown) {
+                at->kind != TyKind::StructTime && at->kind != TyKind::Unknown) {
                 err(c.line, c.col,
                     "time.strftime() second argument must be a struct_time tuple");
                 return const_none();
