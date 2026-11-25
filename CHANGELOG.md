@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.537] - 2026-11-25
+
+> feat(runtime,lower)：**`buffer` —— RC 管理的连续内存**，可直接传给 C（BLAS/memcpy/memset）。
+>
+> 目标：解决「`cimport` 里 `calloc` 自建缓冲区必然泄漏」（没有 `__del__`）导致 ndarray 这类库只能用
+>`list[float]` 的问题。
+>
+> ```python
+> b = buffer(4)            # 4 个 float64，零初始化（calloc）
+> b[0] = 1.5
+> ib = buffer_i32(8)       # int32
+> fb = buffer_f32(4)       # float32（4 字节/元素，见下面的限制）
+> print(len(b), b[0])      # 4 1.5
+> cimport clib
+> clib.modf(3.75, b)       # 作为 ptr[float] 实参：连续 data 直接交给 C
+> clib.memset(ib, 0, 32)   # 作为 ptr[int]
+> ```
+>
+> 实现：新堆种类 `PYADAMAS_RC_BUFFER`（`{magic, data*, len, elem_kind}`，data `calloc`、dtor `free`，
+>GC 叶子）；`TyKind::Buffer`；内置 `buffer/buffer_i32/buffer_f32`；`len`；下标读写（越界 panic、
+>负索引）；`CKind::BufBuffer` 让 buffer 作为 `ptr`/`ptr[T]` 实参（data 在对象 +8）。
+>
+> 修掉的两个真问题（外部验证报告 `temp-proj/BUFFER_REPORT.md` 发现）：
+>1. **泄漏**：`ir_is_heap()` 没把 `Buffer` 算成持有引用、`gc_free_body()` 没有 BUFFER 分支 →
+>   每个 buffer 的 data 必然泄漏（单 8KB → 8KB leaked）。修后 `ASAN_OPTIONS=detect_leaks=1` **零泄漏**；
+>2. **静默错值**：`BufferSetF64` 的第三实参是 double 却进了三整型寄存器的编组 → 裸变量/表达式写入垃圾，
+>   只有字面量恰好蒙对。新增 `gen_rt_i2f1`(int,int,double) 修掉。
+>
+> 限制（刻意，写进 `docs/language.md`）：
+>- **32 位 buffer（`buffer_i32`/`buffer_f32`）只能传裸 `ptr`**，不能传 `ptr[T]`（避免 8 字节步长越界）；
+>- 不支持切片、迭代、`in`；跨模块接口把 Buffer 记成 unknown（拿不到静态类型）。
+>
+> 性能（外部实测，1e6 元素）：`arange` buffer **0.0050s** vs list 0.0092s（1.84× 快）；
+>`sum` buffer 0.00475s vs list 0.00176s（2.7× 慢，每次下标都是带边界检查的 runtime 调用）；合计约快 11%。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **526** / difftest 494/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 8/8；
+>buffer 用例 ASan 零泄漏。
 ## [0.536] - 2026-11-25
 
 > fix(ir,typecheck)：**跨模块调用被装饰方法不再段错误**（`temp-proj/DECORATORS.md` 的 J2）。
