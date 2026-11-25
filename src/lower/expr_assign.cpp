@@ -377,6 +377,17 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 store_field(f->ty, obj, off, v);
                 break;
             }
+            // 0.556（J1）：函数值没有运行期字典，属性写不能编译成动态属性写。
+            // 给出可执行的替代方案，而不是笼统的 unsupported assignment target。
+            if (at.value->kind == ExprKind::Name || at.value->kind == ExprKind::Attribute) {
+                TypePtr bt = tc_.type_of(at.value.get());
+                if (bt && bt->kind == TyKind::Func) {
+                    err(target.line, target.col,
+                        "function values have no runtime attribute dict; "
+                        "use a closure cell (nonlocal counter) or a module-level dict instead");
+                    break;
+                }
+            }
             err(target.line, target.col, "unsupported assignment target");
             break;
         }

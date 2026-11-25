@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.556] - 2026-11-26
+
+> fix(lower)：**函数值写属性给出可执行的错误信息**（外部清单的 J1）。
+>
+> ```python
+> def f() -> int:
+>     return 1
+> f.calls = 0
+> print(f.calls)
+> ```
+>
+> 修前：`error: unsupported assignment target`（不知道发生了什么）。
+> 修后：
+>
+> ```
+> error: function values have no runtime attribute dict;
+>        use a closure cell (nonlocal counter) or a module-level dict instead
+> ```
+>
+> 函数值在我们的实现里是**编译期实体**（静态闭包：code + 捕获清单，没有运行期字典），
+>`f.attr = v` 无法编译成动态属性写。这是刻意的设计取向（J1 同时记在「设计限制」一栏），
+>所以本轮只把错误信息改成**说明原因 + 给出替代方案**，不引入运行期字典。
+>
+> 替代写法（文档里也这么建议）：闭包 cell 计数（`nonlocal`）或模块级 dict。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（不降）。
+> 闸门：套件 562 / difftest 509/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.555] - 2026-11-26
 
 > feat(driver)：**`@dataclass` 按需自动开**——必填字段不再丢参（外部清单的 N9）。
