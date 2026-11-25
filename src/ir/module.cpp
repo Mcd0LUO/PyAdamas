@@ -335,9 +335,11 @@ void enc_type(Enc& e, const TypePtr& t) {
         // 形参的 `Value | float` 丢掉成员表后，调用点会按第一个实参反推类型，
         // 轻则误报「used with both float and non-float values」，重则 ABI 错位。
         // tag 25 = 联合，成员依次编码；0..24 逐字沿用，旧 modcache 解码不变。
-        // 0.536：buffer 不进跨模块接口（只在定义模块内可见），编码成 unknown。
+        // 0.544：buffer 有 tag 37（元素类型 + 元素宽度）。
         case TyKind::Buffer:
-            e.u8(0);
+            e.u8(37);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            e.u8(static_cast<uint8_t>(t->celem));
             break;
         case TyKind::Unknown:
             if (!t->sub.empty()) {
@@ -384,24 +386,33 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
-        // range 跨模块接口暂不支持：按 unknown 处理
-        case TyKind::Range:
+        // 0.544：值/句柄类型各有 tag（30..45），不再退化成 unknown。
+        case TyKind::Deque:  // 30：带元素类型
+            e.u8(30);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            break;
+        case TyKind::DateTime: e.u8(31); break;
+        case TyKind::TimeDelta: e.u8(32); break;
+        case TyKind::Path: e.u8(33); break;
+        case TyKind::Regex: e.u8(34); break;
+        case TyKind::Match: e.u8(35); break;
+        case TyKind::Popen: e.u8(36); break;
+        case TyKind::StructTime: e.u8(38); break;
+        case TyKind::UnameInfo: e.u8(39); break;
+        case TyKind::FloatInfo: e.u8(40); break;
+        case TyKind::SysFlags: e.u8(41); break;
+        case TyKind::StatResult: e.u8(42); break;
+        case TyKind::CompletedProcess: e.u8(43); break;
+        case TyKind::Random: e.u8(44); break;
+        case TyKind::Range:  // 45：带元素类型
+            e.u8(45);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            break;
+        // 以下**刻意保持 unknown**（跨模块传裸句柄会 UAF 或语义不安全）：
+        //   File   —— 文件句柄绑定进程内 fd；
+        //   DYLIB  —— 动态库句柄；
+        //   VThread/Chan —— 运行期线程/通道句柄，跨模块会悬垂。
         case TyKind::File:
-        case TyKind::Random:
-        case TyKind::CompletedProcess:
-        case TyKind::StatResult:
-        case TyKind::StructTime:
-        case TyKind::UnameInfo:
-        case TyKind::FloatInfo:
-        case TyKind::SysFlags:
-        case TyKind::Regex:
-        case TyKind::Match:
-        // Popen / datetime / pathlib / deque 跨模块签名暂不支持：按 unknown 处理
-        case TyKind::Popen:
-        case TyKind::DateTime:
-        case TyKind::TimeDelta:
-        case TyKind::Path:
-        case TyKind::Deque:
         // 0.543：用户 struct 按名字导出（27 = 值、28 = 指针）。.cpya 的 c_struct 继续按
         // unknown —— 布局由 C 头决定，导入方不该按值语义重建。
         case TyKind::Struct:
@@ -567,6 +578,27 @@ TypePtr dec_type(Dec& d) {
             d.pending_classes.push_back(std::move(pc));
             return t;
         }
+        // 0.544：值/句柄类型 tag 30..45（与 enc_type 一一对应）。
+        case 30: return mk_deque(dec_type(d));
+        case 31: return new_ty(TyKind::DateTime);
+        case 32: return new_ty(TyKind::TimeDelta);
+        case 33: return new_ty(TyKind::Path);
+        case 34: return t_regex();
+        case 35: return t_match();
+        case 36: return t_popen();
+        case 37: {
+            auto buf = mk_buffer(dec_type(d));
+            buf->celem = static_cast<CKind>(d.u8());
+            return buf;
+        }
+        case 38: return t_struct_time();
+        case 39: return t_uname();
+        case 40: return t_float_info();
+        case 41: return t_sys_flags();
+        case 42: return t_stat();
+        case 43: return t_completed();
+        case 44: return t_random();
+        case 45: return mk_range(dec_type(d));
         case 29: {
             // 0.540：别的模块的类引用 —— (归属模块, 类名)，解析推迟到类表解码后。
             TypePtr t = std::make_shared<Type>();

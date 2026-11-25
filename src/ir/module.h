@@ -73,7 +73,7 @@ struct ModuleInfo {
 #endif
 inline constexpr const char* kCompilerVersion = PYADAMAS_VERSION;
 
-inline constexpr uint16_t kModuleFormatVersion = 15;  // 0.540：tag 29（跨模块类引用）
+inline constexpr uint16_t kModuleFormatVersion = 17;  // 0.544：tag 30..45  // 0.540：tag 29（跨模块类引用）
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
