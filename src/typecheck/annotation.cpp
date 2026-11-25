@@ -58,6 +58,8 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "stat_result") return t_stat();
             if (id == "struct_time") return t_struct_time();
             if (id == "uname_result") return t_uname();
+            if (id == "float_info") return t_float_info();
+            if (id == "sys_flags") return t_sys_flags();
             if (id == "bool") return t_bool();
             if (id == "None") return t_none();
             // 只建模具体容器，不建模协议：Sequence/Iterable 这类标注

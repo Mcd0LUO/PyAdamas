@@ -632,6 +632,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyIterList: return "pa_any_iter_list";
         case RtFn::AnyIndex: return "pa_any_index";
         case RtFn::TimeStrptime: return "pa_time_strptime";
+        case RtFn::SysFloatInfoF: return "pa_sys_float_info_f";
+        case RtFn::SysFloatInfoI: return "pa_sys_float_info_i";
+        case RtFn::SysFlagField: return "pa_sys_flag_field";
         case RtFn::OsUname: return "pa_os_uname";
         case RtFn::OsUnameField: return "pa_os_uname_field";
         case RtFn::OsStat: return "pa_os_stat";
