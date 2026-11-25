@@ -678,6 +678,7 @@ private:
     bool is_lru_cache_expr(const Expr* e);
     // 0.540: @contextmanager 装饰器识别（按名字）。
     bool is_contextmanager_expr(const Expr* e);
+    TypePtr contextmanager_func_type(const std::string& name);
     // json.loads 的目标类型由第二个「样例值」的静态类型给出。
     std::optional<TypePtr> json_call(const std::string& member, Call& c);
 

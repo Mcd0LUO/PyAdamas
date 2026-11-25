@@ -5,9 +5,6 @@
 
 namespace pyadamas {
 
-// driver/build.h 的内置模块表（按名字取 ModuleInfo）；只前向声明，避免反向依赖 driver。
-ModuleInfoPtr builtin_module(const std::string& name);
-
 // Align tuple elements correctly: a variadic annotation has one element
 // type, not a slot corresponding to the first item of a fixed tuple.
 static TypePtr refine_return_holes(const TypePtr& to, const TypePtr& from, int depth = 0) {
@@ -109,12 +106,8 @@ bool TypeChecker::reserve_imported_method_slots(const ClassInfo* cls, int line, 
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (!func_owners_.count(&f)) {
             func_owners_[&f] = owner;
-            // 模块级函数与方法直接进重查表。
-            //
-            // **嵌套函数也要进**（0.382）：它们的未标注形参同样靠调用点回填，
-            // 以前不登记，于是「函数里定义的 def 拿到实参类型」这条路径完全
-            // 不存在 —— 形参停在 unknown，降级层看到 unknown 就报
-            // 「method 'x' is not supported」。
+            // 模块级函数与方法直接进重查表。  **嵌套函数也要进**（0.382）：它们的未标注形参同样靠调用点回填， 以前不登记，于是「函数里定义的 def 拿到实参类型」这条路径完全
+            // 不存在 —— 形参停在 unknown，降级层看到 unknown 就报 「method 'x' is not supported」。
             //
             // 重查时词法父作用域靠 `nested_recheck_parent_` 重新挂接（工作队列
             // 里已经这么做了），作用域对象由 pool_ 持有，重查期间仍然有效。
@@ -209,35 +202,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
                 // lru_cache 包装后签名与被装饰函数相同，类型上按恒等处理。
                 if (is_lru_cache_expr(it->get())) continue;
-                // 0.540: @contextmanager 把生成器函数包成 _GeneratorContextManager 工厂。
-                // 装饰器自己的返回类型不可表达，以前整条链退化成 unknown（同模块内靠
-                // 降级器的函数定义还能过 with，跨模块就只剩 unknown）。这里给被装饰符号
-                // 精确签名 (*args) -> _GeneratorContextManager：varargs 由 enc_sig 编码，
-                // 类引用走 tag 29（带归属模块）。
-                if (is_contextmanager_expr(it->get())) {
-                    ClassInfoPtr cm_cls;
-                    auto cit = classes_.find("_GeneratorContextManager");
-                    if (cit != classes_.end()) cm_cls = cit->second;
-                    if (!cm_cls) {
-                        if (auto mod = lookup_module_alias("contextlib")) {
-                            auto mc = mod->classes.find("_GeneratorContextManager");
-                            if (mc != mod->classes.end()) cm_cls = mc->second.cls;
-                        }
-                    }
-                    if (cm_cls) {
-                        auto fn = std::make_shared<FuncInfo>();
-                        fn->name = f.name;
-                        fn->ret = mk_class(cm_cls.get());
-                        fn->ret_known = true;
-                        fn->varargs = true;
-                        fn->vararg_name = "args";
-                        fn->vararg_ty = t_unknown();
-                        auto ft = new_ty(TyKind::Func);
-                        ft->fn = fn;
-                        cur = ft;
-                        continue;
-                    }
-                }
+                // 0.540: @contextmanager 的精确签名（实现见 call_modules.cpp）。
+                if (is_contextmanager_expr(it->get()))
+                    if (TypePtr cm = contextmanager_func_type(f.name)) { cur = cm; continue; }
                 TypePtr dt = type_of(it->get());
                 if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret) {
                     cur = dt->fn->ret;

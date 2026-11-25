@@ -832,6 +832,32 @@ std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Ca
 
 // @functools.lru_cache / @lru_cache(...) 在类型上是恒等装饰器：
 // 包装函数的签名与被装饰函数相同，调用点仍按原签名检查实参。
+// 0.540：@contextmanager 装饰后的类型 = (*args: unknown) -> _GeneratorContextManager。
+// 装饰器本身的返回类型不可表达，不这么做整条链会退化成 unknown（跨模块就只剩 unknown）。
+// 类引用走 tag 29（带归属模块），导入方按需加载 contextlib 的接口解析。
+TypePtr TypeChecker::contextmanager_func_type(const std::string& name) {
+    ClassInfoPtr cm_cls;
+    auto cit = classes_.find("_GeneratorContextManager");
+    if (cit != classes_.end()) cm_cls = cit->second;
+    if (!cm_cls) {
+        if (auto mod = lookup_module_alias("contextlib")) {
+            auto mc = mod->classes.find("_GeneratorContextManager");
+            if (mc != mod->classes.end()) cm_cls = mc->second.cls;
+        }
+    }
+    if (!cm_cls) return nullptr;
+    auto fn = std::make_shared<FuncInfo>();
+    fn->name = name;
+    fn->ret = mk_class(cm_cls.get());
+    fn->ret_known = true;
+    fn->varargs = true;
+    fn->vararg_name = "args";
+    fn->vararg_ty = t_unknown();
+    auto ft = new_ty(TyKind::Func);
+    ft->fn = fn;
+    return ft;
+}
+
 bool TypeChecker::is_contextmanager_expr(const Expr* e) {
     if (auto* call = dynamic_cast<const Call*>(e)) e = call->func.get();
     if (auto* at = dynamic_cast<const Attribute*>(e)) {

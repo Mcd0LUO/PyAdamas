@@ -4,6 +4,50 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.540] - 2026-11-25
+
+> fix(ir,typecheck)：**跨模块类引用带归属模块**（接口格式 v15）+ **`@contextmanager` 跨模块可用**。
+>
+> 修前：
+>
+> ```python
+> # cmmod.py
+> from contextlib import contextmanager
+> @contextmanager
+> def managed(tag: str):
+>     yield 1
+> # main.py
+> import cmmod
+> with cmmod.managed("x") as v:   # error: with requires a class instance with __enter__/__exit__
+>     ...
+> ```
+>
+> 两层根因：
+>1. **接口的类引用只写裸类名**（tag 13），解码时只查导入方自己的类表——别的模块的类
+>   （`contextlib._GeneratorContextManager`）解析失败，静默退化成 `unknown`；
+>2. `@contextmanager` 包装后的符号在**定义模块自己的 `types` 里就是 unknown**（装饰器的返回类型不可表达），
+>   同模块内能过是因为降级器手里有函数定义，跨模块就只剩 unknown。
+>
+> 修法：
+>- `enc_type` 新增 **tag 29 = 类引用(归属模块, 类名)**（同模块仍用 tag 13，`0..28` 逐字沿用）；
+>- `Dec` 加 `loader` 回调 + 已解析缓存 + loading 集合（A↔B 互相引用可重入）；解析顺序：本模块类表 →
+>  `loader(module)` → 仍无则保持 unknown（`PYADAMAS_DIAG_TYPEREF=1` 打一行诊断，不 panic）；
+>- `@contextmanager` 按**名字文本**识别（不依赖符号类型——导入的名字本身就是 unknown），给被装饰符号
+>  精确签名 `(*args: unknown) -> _GeneratorContextManager`，varargs 用现有 `enc_sig` 编码；
+>- **`kModuleFormatVersion` 14 → 15**（旧 modcache 自动失效，首次全量构建慢一次）。
+>
+> 由此修好的是一整类场景（不再只是 contextmanager）：任何「返回值/参数是**别的模块的类**」的跨模块签名。
+>
+> 回归 `tests/modules/contextlib_xmod/`（跨模块 `@contextmanager` + 跨模块 `nullcontext` 返回值）。
+>
+> 顺带：`typecheck/func.cpp` 因这次改动涨到 1232 行、超过 1200 硬限制；把 `@contextmanager` 的类型推导
+>抽成 `TypeChecker::contextmanager_func_type`（实现放 `call_modules.cpp`）并压缩注释，回到 1199 行。
+>
+> 已知未做：`check --imports` 侧的 loader 目前只走 `builtin_module` 兜底，跨模块引用别的模块的类时
+>仍可能落到 unknown（有诊断打印），下一轮接上 `check_load`。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **529** / difftest 496/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.539] - 2026-11-25
 
 > feat(runtime,lower)：**支持用户类 `__del__`**（RC 归零、释放前调用一次）。
