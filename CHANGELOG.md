@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.528] - 2026-11-25
+
+> fix(lower)：**`isinstance(动态值, int/bool/bytes)` 不再恒为 False**——一个 P0 级静默错值。
+>
+> 现象（修前，类型标签默认关）：
+>
+> ```python
+> def h(o: object) -> int:
+>     return 1 if isinstance(o, int) else 0
+> print(h(1), h("x"))          # 0 0   ← 应为 1 0
+> ```
+>
+> 对列表元素同样：`for x in xs: if isinstance(x, int)` 统计 `[1, "a", 2.0, 3]` 得 **0**（CPython 2）。
+>
+> 根因：静态类型是 unknown 时，只有 `str/list/dict/float` 有运行期探针，`int/bool/bytes` 没有 tag
+> 就**保守返回 false**；精确判定要 `AnyTypeIs(v, code)`，而它依赖 `PYADAMAS_TYPE_TAGS`，默认关。
+>
+> 直接默认全量开标签实测不可接受（`--full` 的 12 基准，相对 0.527）：
+>
+> | 基准 | 变化 |
+> |---|---|
+> | matmul | **+660%** |
+> | spectral_norm | **+148%** |
+> | sieve | **+110%** |
+> | nbody | **+83%** |
+> | mandelbrot | **+57%** |
+> | fib | **+38%** |
+> | binary_trees | **+11%** |
+>
+> 所以改成**程序级按需开启**：`prepare_program` 里扫一遍源码，出现 `isinstance` 才给这个程序打开标签
+>（`PYADAMAS_TYPE_TAGS=1` 强制开、`=0` 强制关，作逃生口）；标签本身仍写在模块缓存清单里参与失效。
+>
+> 结果：
+>- 正确性：`tests/run/isinstance_dynamic.py` 与 CPython 逐字节一致（`1 0 0 1` / `2` / `int str float int list other`）；
+>- 性能：12 基准 **36/36 逐字节一致、warn=0 fail=0**（它们不含 `isinstance`，一个字 tag 都不多）；
+>- 基线：default 499/626 不变。
+>
+> 闸门：套件 **516** / difftest 485/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 8/8。
 ## [0.527] - 2026-11-25
 
 > fix(ir)：**模块接口保留联合类型与类对象**——0.518 评估的 P0-B。
