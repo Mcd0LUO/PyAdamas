@@ -371,6 +371,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                             acc = join(acc, ot->sub[i]);
                         return mk_tuple_rest(acc);
                     }
+                    if (ot->kind == TyKind::StructTime) return mk_tuple_rest(t_int());
                     if (is_unknown(ot)) return t_unknown();
                     err(s.line, s.col,
                         std::format("'{}' is not sliceable", type_name(ot)));
@@ -1092,6 +1093,9 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 return obj->sub[1];
             case TyKind::Deque:
                 return obj->sub.empty() ? t_unknown() : obj->sub[0];
+            case TyKind::StructTime:
+                // time.struct_time 的下标形态：9 个 int（旧 tuple 语义，0.518 保留）。
+                return t_int();
             default:
                 // 类名下标是泛型参数（`MyList[int]`、`Generic[T]`），
                 // 我们不做泛型，返回 unknown 比判死有用

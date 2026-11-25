@@ -752,6 +752,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::OsPathSamefile:
         case RtFn::RandGetrandbits:
         case RtFn::OsRename:
+        case RtFn::TimeStrptime:
         case RtFn::OsRead:
         case RtFn::OsWrite:
         case RtFn::OsFdopen:

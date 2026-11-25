@@ -244,6 +244,9 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     }
     if (is_unknown(dst) || is_unknown(src)) return true;
     if (type_eq(dst, src)) return true;
+    // time.struct_time 的旧 tuple 语义（0.518）：它运行期就是 9 个 int 的 list，
+    // 所有吃 tuple[int, ...] 的接口（mktime / strftime / 下标切片以外）都该继续接受它。
+    if (dst->kind == TyKind::Tuple && src->kind == TyKind::StructTime) return true;
     if (dst->kind == TyKind::Float &&
         (src->kind == TyKind::Int || is_fixed_int(src)))
         return true;  // int/定宽整数 → float 提升

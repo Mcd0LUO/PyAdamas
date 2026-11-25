@@ -69,6 +69,7 @@ enum class TyKind : uint8_t {
     Random,       // random.Random() 返回的随机数生成器
     CompletedProcess,  // subprocess.run() 返回的结果对象
     StatResult,        // os.stat()/lstat() 的结果对象（10 个整数属性）
+    StructTime,        // time.localtime()/gmtime()/strptime() 的结果（9 个 tm_* 属性）
     Popen,        // subprocess.Popen() 返回的进程句柄
     Regex,        // re.compile() 返回的 Pattern
     Match,        // re.search()/match() 返回的 Match
@@ -773,6 +774,10 @@ inline const TypePtr& t_random() {
 }
 inline const TypePtr& t_completed() {
     static TypePtr v = new_ty(TyKind::CompletedProcess);
+    return v;
+}
+inline const TypePtr& t_struct_time() {
+    static TypePtr v = new_ty(TyKind::StructTime);
     return v;
 }
 inline const TypePtr& t_stat() {
