@@ -616,6 +616,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DequePop:
         case RtFn::DequePopleft:
         case RtFn::DequeLen:
+        case RtFn::BufferLen:
+        case RtFn::BufferGetI64:
+        case RtFn::BufferSetI64:
+        case RtFn::BufferGetF64:
+        case RtFn::BufferSetF64:
         case RtFn::DequeMaxlen:
         case RtFn::DequeClear:
         case RtFn::DequeToList:
@@ -811,6 +816,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListSet:
         case RtFn::ListInsert:   /* 0.303：(list*, i, v, heap) */
         case RtFn::DictSet:
+        case RtFn::BufferNew:
         case RtFn::ListContains:
         case RtFn::ListContainsI64:
         case RtFn::ListContainsStr:

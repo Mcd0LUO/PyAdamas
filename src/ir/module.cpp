@@ -321,6 +321,10 @@ void enc_type(Enc& e, const TypePtr& t) {
         // 形参的 `Value | float` 丢掉成员表后，调用点会按第一个实参反推类型，
         // 轻则误报「used with both float and non-float values」，重则 ABI 错位。
         // tag 25 = 联合，成员依次编码；0..24 逐字沿用，旧 modcache 解码不变。
+        // 0.536：buffer 不进跨模块接口（只在定义模块内可见），编码成 unknown。
+        case TyKind::Buffer:
+            e.u8(0);
+            break;
         case TyKind::Unknown:
             if (!t->sub.empty()) {
                 e.u8(25);

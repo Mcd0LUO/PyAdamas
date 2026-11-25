@@ -434,6 +434,7 @@ TypePtr TypeChecker::builtin_value_type(const std::string& n) {
 bool TypeChecker::is_builtin_callable(const std::string& n) {
         static const std::unordered_set<std::string> names = {
             "print",  "len",    "range",  "abs",   "min",     "max",    "sum",
+            "buffer", "buffer_i32", "buffer_f32",
             "sorted", "reversed", "enumerate", "zip", "int",  "float",  "str",
             "bool",   "list",   "dict",   "tuple", "set",     "ord",    "chr",
             "repr",   "any",    "all",    "round", "isinstance", "input", "type",

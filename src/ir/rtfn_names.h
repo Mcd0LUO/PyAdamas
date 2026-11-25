@@ -125,6 +125,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictContains: return "pa_dict_contains";
         case RtFn::DictVersion: return "pa_dict_version";
         case RtFn::DictKeyAt: return "pa_dict_key_at";
+        case RtFn::BufferNew: return "pa_buffer_new";
+        case RtFn::BufferLen: return "pa_buffer_len";
+        case RtFn::BufferGetI64: return "pa_buffer_get_i64";
+        case RtFn::BufferSetI64: return "pa_buffer_set_i64";
+        case RtFn::BufferGetF64: return "pa_buffer_get_f64";
+        case RtFn::BufferSetF64: return "pa_buffer_set_f64";
         case RtFn::ListContains: return "pa_list_contains";
         case RtFn::ListContainsI64: return "pa_list_contains_i64";
         case RtFn::ListContainsF64: return "pa_list_contains_f64";

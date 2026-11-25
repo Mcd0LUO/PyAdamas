@@ -61,6 +61,55 @@ int64_t pa_buffer_len(void* p) {
     return b->len;
 }
 
+/* 下标读写：越界 panic（与 list 同口径，不静默）。下标是元素下标，不是字节。 */
+static PyAdamasBuffer* buf_checked(void* p, int64_t i) {
+    PyAdamasBuffer* b = (PyAdamasBuffer*)p;
+    if (!b || b->magic != PYADAMAS_BUFFER_MAGIC) panic_c("not a buffer");
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) panic_c("buffer index out of range");
+    return b;
+}
+
+int64_t pa_buffer_get_i64(void* p, int64_t i) {
+    PyAdamasBuffer* b = buf_checked(p, i);
+    if (i < 0) i += b->len;
+    if (b->elem_kind == 1) return (int64_t)((int32_t*)b->data)[i];
+    if (b->elem_kind == 2) {
+        float f = ((float*)b->data)[i];
+        double d = (double)f;
+        int64_t r;
+        memcpy(&r, &d, sizeof r);
+        return r;
+    }
+    return ((int64_t*)b->data)[i];
+}
+
+void pa_buffer_set_i64(void* p, int64_t i, int64_t v) {
+    PyAdamasBuffer* b = buf_checked(p, i);
+    if (i < 0) i += b->len;
+    if (b->elem_kind == 1) { ((int32_t*)b->data)[i] = (int32_t)v; return; }
+    if (b->elem_kind == 2) { double d; memcpy(&d, &v, sizeof d); ((float*)b->data)[i] = (float)d; return; }
+    ((int64_t*)b->data)[i] = v;
+}
+
+double pa_buffer_get_f64(void* p, int64_t i) {
+    PyAdamasBuffer* b = buf_checked(p, i);
+    if (i < 0) i += b->len;
+    if (b->elem_kind == 2) return (double)((float*)b->data)[i];
+    if (b->elem_kind == 1) return (double)((int32_t*)b->data)[i];
+    double d;
+    memcpy(&d, &((int64_t*)b->data)[i], sizeof d);
+    return d;
+}
+
+void pa_buffer_set_f64(void* p, int64_t i, double v) {
+    PyAdamasBuffer* b = buf_checked(p, i);
+    if (i < 0) i += b->len;
+    if (b->elem_kind == 2) { ((float*)b->data)[i] = (float)v; return; }
+    if (b->elem_kind == 1) { ((int32_t*)b->data)[i] = (int32_t)v; return; }
+    memcpy(&((int64_t*)b->data)[i], &v, sizeof v);
+}
+
 int64_t pa_buffer_elem_kind(void* p) {
     PyAdamasBuffer* b = (PyAdamasBuffer*)p;
     return (b && b->magic == PYADAMAS_BUFFER_MAGIC) ? b->elem_kind : 0;

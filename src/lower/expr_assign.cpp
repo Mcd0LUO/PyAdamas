@@ -199,6 +199,18 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 err(target.line, target.col, "'set' object does not support item assignment");
                 break;
             }
+            // 0.536：连续内存缓冲区按下标写（越界在运行期 panic，与 list 同口径）。
+            if (ot && ot->kind == TyKind::Buffer) {
+                TypePtr et = ot->sub.empty() ? t_float() : ot->sub[0];
+                if (et && et->kind == TyKind::Float) {
+                    v = coerce(v, src_ty, t_float());
+                    call_void(RtFn::BufferSetF64, {obj, idx, v});
+                } else {
+                    v = coerce(v, src_ty, t_int());
+                    call_void(RtFn::BufferSetI64, {obj, idx, v});
+                }
+                break;
+            }
             // time.struct_time 只读（0.518）：类型检查层已在两处拦截，这里是
             // 降级层的兜底（同一句消息），保证不会走到 IndexStore 把对象当 list 改写。
             if (ot && ot->kind == TyKind::StructTime) {

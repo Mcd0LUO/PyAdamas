@@ -578,6 +578,7 @@ VReg Lowerer::lower_call(Call& c) {
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
+                "buffer", "buffer_i32", "buffer_f32",
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",

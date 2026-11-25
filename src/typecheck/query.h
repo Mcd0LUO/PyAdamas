@@ -76,6 +76,9 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Range:
             return t->sub.empty() ? "range"
                                   : std::format("range[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Buffer:
+            return t->sub.empty() ? "buffer"
+                                  : std::format("buffer[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::Set:
             return t->sub.empty() ? "set"
                                   : std::format("set[{}]", type_name_impl(t->sub[0], depth + 1));
@@ -215,6 +218,7 @@ inline std::string bare_type_name(const TypePtr& t) {
         case TyKind::Bytes: return "bytes";
         case TyKind::List: return "list";
         case TyKind::Range: return "range";
+        case TyKind::Buffer: return "buffer";
         case TyKind::Set: return "set";
         case TyKind::Dict: return "dict";
         case TyKind::Tuple: return "tuple";
