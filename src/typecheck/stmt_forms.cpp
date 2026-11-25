@@ -1050,7 +1050,11 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
     }
 
 void TypeChecker::stmt_delete(Delete& a) {
-        for (auto& t : static_cast<Delete&>(a).targets) expr(*t);
+        for (auto& t : a.targets) {
+            expr(*t);
+            // 0.537（保守版）：只记名字目标；同一 statements 序列内后续读到时报错。
+            if (t && t->kind == ExprKind::Name) deleted_names_.insert(static_cast<Name&>(*t).id);
+        }
         return;
     }
 

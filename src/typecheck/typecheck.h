@@ -492,6 +492,10 @@ private:
     // 条件里「可窄化的名字」：裸名字或 walrus 的赋值目标（定义在 stmt.cpp）。
     Name* narrow_name_of(Expr* e);
     // isinstance 窄化的类型计算（定义在 stmt.cpp）：判不准返回 nullptr。
+    // 0.537（del 保守版）：**当前直线块**内被 `del` 掉的名字。只在同一个
+    // statements 序列里生效（进嵌套块保存/清空、出块恢复），所以分支/循环/
+    // with/try 体里的 del 不会外泄 —— 那类写法保持现状（不报错、不误杀）。
+    std::unordered_set<std::string> deleted_names_;
     TypePtr narrow_isinstance(const TypePtr& t, const ClassInfo* cls, bool truthy);
     // 同一条件的全部窄化（`a is not None and b is not None` 有两个）。
     std::vector<Narrowing> narrow_all(Expr& cond, bool truthy);

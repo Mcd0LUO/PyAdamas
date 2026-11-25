@@ -273,6 +273,7 @@ Scope* TypeChecker::assign_target_scope(const std::string& name) {
     }
 
 void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col, bool annotated) {
+        deleted_names_.erase(name);  // 0.537：重新赋值即复活（保守版 del）
         // `x = None` 只是占位或清空，不是「这个槽位就是 None」。
         // 让它参与收窄会把 `loader_cls = None` 之前推出来的类型抹掉，
         // 也会把「先置 None、分支里再赋值」的代码判成 None 属性访问。
