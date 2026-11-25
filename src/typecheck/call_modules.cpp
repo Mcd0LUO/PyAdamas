@@ -845,6 +845,25 @@ TypePtr TypeChecker::contextmanager_func_type(const std::string& name) {
             if (mc != mod->classes.end()) cm_cls = mc->second.cls;
         }
     }
+    // 0.551：check 模式下 `import cmmod` 的模块里既没有 `contextlib` 别名、
+    // `classes_` 里也没有那个类（模块是独立编译的），但模块加载回调能按名字取到
+    // stdlib 的 `contextlib` 接口 —— 直接查它的类表（不合成类型，只是取真类）。
+    if (!cm_cls && module_lookup_) {
+        if (auto mod = module_lookup_("contextlib")) {
+            auto mc = mod->classes.find("_GeneratorContextManager");
+            if (mc != mod->classes.end()) cm_cls = mc->second.cls;
+        }
+    }
+    // 诊断结论（0.551，未采纳修法）：check 模式下三路都取不到那个类 ——
+    //   `classes_`：没有（cmmod 里只有自己的类）；
+    //   `lookup_module_alias("contextlib")`：check 只解析 cmmod 自己的 import 图，
+    //     没有 `contextlib` 的模块别名；
+    //   `module_lookup_("contextlib")`：**check 故意不加载 stdlib 模块**
+    //     （check.cpp 的 check_load：非 --imports 时 stdlib/CPython Lib 一律返回
+    //     nullptr，0.523 实测强制解析会让 626 文件 default 口径 499 → 223）。
+    // 所以这不是类型推导能修的，要么放宽 check 的 stdlib 策略（风险同上），要么在
+    // check 侧专门为 contextlib 开一个例外（只加载这一个模块的类表）。两条都属于
+    // loader 层决策，本轮不动。
     if (!cm_cls) return nullptr;
     auto fn = std::make_shared<FuncInfo>();
     fn->name = name;
