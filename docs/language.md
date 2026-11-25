@@ -1733,6 +1733,39 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 
 数据按行主序拍平传入；维度非法或输入过短会抛 `ValueError`。
 
+
+### `malloc`/`free` 与裸指针：参数是字节数
+
+`cimport` 里的 `malloc_f(n)` / `malloc_i(n)` 直接对应 C 的 `malloc(size_t)`——
+**`n` 是字节数，不是元素个数**，编译器不会替你乘元素宽度：
+
+```python
+cimport clib as c
+p = c.malloc_f(40)     # 5 个 double（5 * 8 字节）
+i: int = 0
+while i < 5:
+    p[i] = i * 1.0     # 下标按元素宽度寻址，越界写是自己负责
+    i = i + 1
+print(p[0], p[4])      # 0.0 4.0
+c.free(p)
+```
+
+写成 `malloc_f(5)` 只分配 5 字节却写 5 个 double 会**踩坏堆**（`malloc(): corrupted top size`），
+而且**与下标是常量还是变量无关**——这是使用方的错误，不是编译器的越界检查缺失。
+要连续内存优先用 `buffer(n)`（见上一节），它有长度、有越界检查、有 RAII，不需要手工 `free`。
+
+### 生成器/协程的类型注解要带下标
+
+`Generator`、`AsyncGenerator`、`Coroutine`、`Future`、`Task` 这些**只有下标形式**能表达
+元素类型；裸名注解推导不出产出类型，保持 `unknown`（调用 `send`/`next` 会报「需要生成器」）：
+
+```python
+def count(n: int) -> Generator[int]:   # 正确
+    ...
+
+def bad(n: int) -> Generator:          # 裸名：产出类型是 unknown
+    ...
+```
 ## 会被拒绝的写法
 
 **语法层**（`check` 就报错）：
