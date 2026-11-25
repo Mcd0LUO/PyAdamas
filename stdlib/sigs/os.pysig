@@ -71,6 +71,10 @@ def lseek(fd: int, pos: int, whence: int) -> int: pass
 def dup(fd: int) -> int: pass
 def fdopen(fd: int, mode: str = "r") -> file: pass
 
+# os.stat / lstat（0.518 C 部分）：返回内建记录对象 os.stat_result，10 个整数属性。
+def stat(path: str) -> stat_result: pass
+def lstat(path: str) -> stat_result: pass
+
 # 随机字节（bytes，不是 str）：读 /dev/urandom。
 def urandom(n: int) -> bytes: pass
 # strerror(code)：errno → 文本。

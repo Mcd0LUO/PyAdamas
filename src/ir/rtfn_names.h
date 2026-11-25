@@ -631,6 +631,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AttrDict: return "pa_attr_dict_view";
         case RtFn::AnyIterList: return "pa_any_iter_list";
         case RtFn::AnyIndex: return "pa_any_index";
+        case RtFn::OsStat: return "pa_os_stat";
+        case RtFn::OsLstat: return "pa_os_lstat";
         case RtFn::OsOpen: return "pa_os_open";
         case RtFn::OsRead: return "pa_os_read";
         case RtFn::OsWrite: return "pa_os_write";

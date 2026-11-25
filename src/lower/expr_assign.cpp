@@ -736,6 +736,20 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::StatResult) {
+                VReg sv = expr(*a.value);
+                if (opt) sv = guard_not_none(sv, std::format("attribute '{}'", a.attr));
+                static const char* kStatFields[] = {"st_mode",  "st_ino",  "st_dev",   "st_nlink",
+                                                    "st_uid",   "st_gid",  "st_size",  "st_atime",
+                                                    "st_mtime", "st_ctime"};
+                for (int i = 0; i < 10; ++i) {
+                    if (a.attr == kStatFields[i])
+                        return call_runtime(RtFn::ListGet, t_int(), {sv, const_int(i)});
+                }
+                err(e.line, e.col,
+                    std::format("'os.stat_result' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Popen) {
                 VReg pv = expr(*a.value);
                 if (opt) pv = guard_not_none(pv, std::format("attribute '{}'", a.attr));

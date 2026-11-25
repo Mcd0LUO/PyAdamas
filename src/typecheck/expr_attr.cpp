@@ -185,6 +185,17 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
         return t_unknown();
     }
+    if (ot->kind == TyKind::StatResult) {
+        // os.stat_result：10 个整数属性（CPython 的 tuple 顺序）。
+        static const char* kStatFields[] = {"st_mode",  "st_ino",  "st_dev",   "st_nlink",
+                                            "st_uid",   "st_gid",  "st_size",  "st_atime",
+                                            "st_mtime", "st_ctime"};
+        for (const char* f : kStatFields)
+            if (a.attr == f) return t_int();
+        err(a.line, a.col,
+            std::format("'os.stat_result' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
     if (ot->kind == TyKind::Popen) {
         if (a.attr == "pid" || a.attr == "returncode") return t_int();
         if (a.attr == "stdout" || a.attr == "stderr" || a.attr == "stdin")

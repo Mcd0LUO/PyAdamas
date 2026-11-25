@@ -578,6 +578,32 @@ PyAdamasFile* pa_os_fdopen(int64_t fd, PyAdamasStr* mode) {
     /* closefd=1：文件对象关闭时一并关掉这个 fd（与 CPython 的 os.fdopen 一致）。 */
     return pa_file_open(str_new("", 0), fd, mode, -1, -1, 1);
 }
+
+/* ── os.stat / os.lstat（0.518 C 部分）─────────────────────────────
+   返回 os.stat_result：运行期用**10 个整数的 list** 承载（顺序与 CPython 的
+   stat_result tuple 一致：mode, ino, dev, nlink, uid, gid, size, atime, mtime,
+   ctime），属性读由降级层按名字映射成 ListGet(obj, i) —— 不新增 RC kind，
+   也不需要新的运行期对象模型。 */
+static PyAdamasList* stat_fill(const char* path, int follow) {
+    struct stat st;
+    int rc = follow ? stat(path, &st) : lstat(path, &st);
+    if (rc != 0) os_raise_path(path, errno);
+    PyAdamasList* l = pa_list_new(10, 0);
+    pa_list_append(l, (int64_t)st.st_mode, 0);
+    pa_list_append(l, (int64_t)st.st_ino, 0);
+    pa_list_append(l, (int64_t)st.st_dev, 0);
+    pa_list_append(l, (int64_t)st.st_nlink, 0);
+    pa_list_append(l, (int64_t)st.st_uid, 0);
+    pa_list_append(l, (int64_t)st.st_gid, 0);
+    pa_list_append(l, (int64_t)st.st_size, 0);
+    pa_list_append(l, (int64_t)st.st_atime, 0);
+    pa_list_append(l, (int64_t)st.st_mtime, 0);
+    pa_list_append(l, (int64_t)st.st_ctime, 0);
+    return l;
+}
+
+PyAdamasList* pa_os_stat(PyAdamasStr* path) { return stat_fill(path->data, 1); }
+PyAdamasList* pa_os_lstat(PyAdamasStr* path) { return stat_fill(path->data, 0); }
 /* ── os.system：返回 C system() 的 wait status（CPython/Unix 口径）── */
 int64_t pa_os_system(PyAdamasStr* cmd) {
     return (int64_t)system(cmd->data);

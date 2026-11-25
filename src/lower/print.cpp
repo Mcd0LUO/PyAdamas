@@ -52,6 +52,9 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::CompletedProcess:
             call_void(RtFn::PrintStr, {const_str("<subprocess.CompletedProcess object>")});
             break;
+        case TyKind::StatResult:
+            call_void(RtFn::PrintStr, {const_str("<os.stat_result object>")});
+            break;
         case TyKind::Popen:
             call_void(RtFn::PrintStr, {const_str("<subprocess.Popen object>")});
             break;
@@ -182,6 +185,9 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             return;
         case TyKind::CompletedProcess:
             call_void(RtFn::FileWrite, {f, const_str("<subprocess.CompletedProcess object>")});
+            return;
+        case TyKind::StatResult:
+            call_void(RtFn::FileWrite, {f, const_str("<os.stat_result object>")});
             return;
         case TyKind::Popen:
             call_void(RtFn::FileWrite, {f, const_str("<subprocess.Popen object>")});

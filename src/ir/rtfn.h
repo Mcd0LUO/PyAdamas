@@ -351,6 +351,8 @@ enum class RtFn : uint16_t {
     RandGLognormvariate, // (f64 mu, f64 sigma) -> f64
     RandGParetovariate,  // (f64 alpha) -> f64
     RandGWeibullvariate, // (f64 alpha, f64 beta) -> f64
+    OsStat,      // (str* path) -> list*   os.stat：10 个整数（stat_result）
+    OsLstat,     // (str* path) -> list*   os.lstat
     OsOpen,      // (str* path, i64 flags, i64 mode) -> i64   os.open → fd
     OsRead,      // (i64 fd, i64 n) -> str*                  os.read → bytes
     OsWrite,     // (i64 fd, str* data) -> i64               os.write → 写入字节数
