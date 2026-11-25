@@ -52,6 +52,14 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             // complex 有独立的 TyKind（P3 tagged union 里的 complex 子类），
             // 漏了它注解会静默退化成 unknown，调用方按整数打印指针。
             if (id == "complex") return t_complex();
+            // 0.542：`buf: buffer` 这类标注（与内置 `buffer(n)` 返回同一个类型）。
+            // 漏了它会静默退化成 unknown：字段读回是 unknown，`w.buf[i] = v` 走
+            // 列表下标写路径 → 段错误 / 堆损坏。
+            if (id == "buffer") {
+                auto bt = mk_buffer(t_float());
+                bt->celem = CKind::Float;
+                return bt;
+            }
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();
             if (id == "file") return t_file();
