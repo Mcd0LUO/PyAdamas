@@ -261,6 +261,8 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         return const_str("<random.Random object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::CompletedProcess)
         return const_str("<subprocess.CompletedProcess object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::StatResult)
+        return const_str("<os.stat_result object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::Popen)
         return const_str("<subprocess.Popen object>");
     // ── P3 big 的转换（docs/numeric-types-design.md §1）─────────────

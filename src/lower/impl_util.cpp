@@ -39,6 +39,7 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::File: return "file";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
+        case TyKind::StatResult: return "os.stat_result";
         case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
         case TyKind::Class: return t->cls ? t->cls->name : "object";
         case TyKind::TypeObj: return "type";

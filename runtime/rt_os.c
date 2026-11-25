@@ -450,48 +450,160 @@ PyAdamasDict* pa_os_environ(void) {
    顺序 = 目录 readdir 顺序（不排序，与 CPython 一致）；followlinks=False，
    符号链接目录按 lstat 判定为目录时也不进入（与 CPython 默认语义一致：
    os.walk 用 scandir 的 is_dir(follow_symlinks=False) 过滤，不跟随链接）。 */
-static void walk_recurse(PyAdamasList* out, const char* dir) {
-    DIR* dp = opendir(dir);
-    if (!dp) {
-        os_raise("walk", errno);
-        return;
-    }
-    PyAdamasList* dirs = pa_list_new(0, 1);
-    PyAdamasList* files = pa_list_new(0, 1);
-    struct dirent* de;
-    while ((de = readdir(dp)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
-        struct stat st;
-        int isdir = 0;
-        if (lstat(path, &st) == 0) isdir = S_ISDIR(st.st_mode) ? 1 : 0;
-        PyAdamasStr* nm = str_new(de->d_name, (int64_t)strlen(de->d_name));
-        if (isdir) pa_list_append(dirs, (int64_t)nm, 1);
-        else pa_list_append(files, (int64_t)nm, 1);
-    }
-    closedir(dp);
-    PyAdamasList* tup = pa_list_new(0, 1);
-    PyAdamasStr* root = str_new(dir, (int64_t)strlen(dir));
-    pa_list_append(tup, (int64_t)root, 1);
-    pa_list_append(tup, (int64_t)dirs, 1);
-    pa_list_append(tup, (int64_t)files, 1);
-    pa_list_append(out, (int64_t)tup, 1);
-    /* 先产出本层，再按 readdir 顺序下钻；dirs 由 tup 持引用，元素存活。 */
-    for (int64_t i = 0; i < dirs->len; ++i) {
-        PyAdamasStr* nm = (PyAdamasStr*)dirs->data[i];
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s", dir, nm->data);
-        walk_recurse(out, path);
-    }
-}
-
+/* 迭代式 os.walk（0.518 修 heap-use-after-free）：原实现是 C 递归，每层把
+   dirs/files/tup 只放在 C 局部变量里；递归期间不断 str_new 分配字符串，
+   一旦触发主收集，这些对象在根集合的四处都看不见，整棵子图被当垃圾清扫。
+   现在改成显式栈（堆上的 list），并把 `out` 与栈都用 pa_gc_pin 挂成 GC 根
+   —— 按 rt_internal.h 的「容器 + 逐个填充」约定，GC 从根标记整棵子图。
+   顺序与递归版一致：每层先产出 (root, dirs, files)，再按 readdir 顺序下钻。 */
 PyAdamasList* pa_os_walk(PyAdamasStr* top) {
     PyAdamasList* out = pa_list_new(0, 1);
-    walk_recurse(out, top->data);
+    PyAdamasList* stack = pa_list_new(4, 1);
+    pa_gc_pin(out);
+    pa_gc_pin(stack);
+    pa_list_append(stack, (int64_t)str_new(top->data, top->len), 1);
+    while (stack->len > 0) {
+        int64_t last = stack->len - 1;
+        PyAdamasStr* dir = (PyAdamasStr*)stack->data[last];
+        pa_rc_inc(dir);              /* 弹出前自持一份，栈释放它自己的 */
+        pa_list_del_index(stack, last);
+        DIR* dp = opendir(dir->data);
+        if (!dp) {
+            pa_rc_dec(dir);
+            os_raise("walk", errno);
+            pa_gc_unpin(stack);
+            pa_gc_unpin(out);
+            return out;
+        }
+        PyAdamasList* dirs = pa_list_new(0, 1);
+        PyAdamasList* files = pa_list_new(0, 1);
+        pa_gc_pin(dirs);
+        pa_gc_pin(files);
+        struct dirent* de;
+        while ((de = readdir(dp)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+            char path[4096];
+            snprintf(path, sizeof path, "%s/%s", dir->data, de->d_name);
+            struct stat st;
+            int isdir = 0;
+            if (lstat(path, &st) == 0) isdir = S_ISDIR(st.st_mode) ? 1 : 0;
+            PyAdamasStr* nm = str_new(de->d_name, (int64_t)strlen(de->d_name));
+            if (isdir) pa_list_append(dirs, (int64_t)nm, 1);
+            else pa_list_append(files, (int64_t)nm, 1);
+        }
+        closedir(dp);
+        PyAdamasList* tup = pa_list_new(0, 1);
+        pa_gc_pin(tup);
+        pa_list_append(tup, (int64_t)str_new(dir->data, dir->len), 1);
+        pa_list_append(tup, (int64_t)dirs, 1);
+        pa_list_append(tup, (int64_t)files, 1);
+        pa_list_append(out, (int64_t)tup, 1);
+        pa_gc_unpin(tup);
+        /* 子目录路径压栈：字符串一创建就进（被 pin 的）栈，GC 看得见。 */
+        for (int64_t i = 0; i < dirs->len; ++i) {
+            PyAdamasStr* nm = (PyAdamasStr*)dirs->data[i];
+            char path[4096];
+            snprintf(path, sizeof path, "%s/%s", dir->data, nm->data);
+            pa_list_append(stack, (int64_t)str_new(path, (int64_t)strlen(path)), 1);
+        }
+        pa_gc_unpin(files);
+        pa_gc_unpin(dirs);
+        pa_rc_dec(dir);
+    }
+    pa_gc_unpin(stack);
+    pa_gc_unpin(out);
     return out;
 }
 
+
+/* ── 文件描述符面（0.518 B 部分）：open/read/write/lseek/dup/fdopen ──────
+   O_* 常量由 pysig 声明，值必须与宿主 C 宏一致 —— 下面的静态断言在编译期
+   校验（换平台时数值不符会直接编译失败，不会静默错）。 */
+_Static_assert(O_RDONLY == 0, "O_RDONLY");
+_Static_assert(O_WRONLY == 1, "O_WRONLY");
+_Static_assert(O_RDWR == 2, "O_RDWR");
+_Static_assert(O_CREAT == 64, "O_CREAT");
+_Static_assert(O_EXCL == 128, "O_EXCL");
+_Static_assert(O_TRUNC == 512, "O_TRUNC");
+_Static_assert(O_APPEND == 1024, "O_APPEND");
+_Static_assert(O_NONBLOCK == 2048, "O_NONBLOCK");
+
+/* CPython 的 OSError 文本：`[Errno N] strerror: 'path'`（os_raise 的
+   `what: strerror` 是既有风格，这里只给新的 fd 面用 CPython 口径）。 */
+static void os_raise_path(const char* path, int e) {
+    char buf[512];
+    snprintf(buf, sizeof buf, "[Errno %d] %s: '%s'", e, strerror(e), path);
+    pa_raise_c("OSError", buf);
+}
+
+int64_t pa_os_open(PyAdamasStr* path, int64_t flags, int64_t mode) {
+    int fd = open(path->data, (int)flags, (mode_t)mode);
+    if (fd < 0) os_raise_path(path->data, errno);
+    return (int64_t)fd;
+}
+
+PyAdamasStr* pa_os_read(int64_t fd, int64_t n) {
+    if (n < 0) n = 0;
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) panic_c("out of memory");
+    ssize_t got = read((int)fd, buf, (size_t)n);
+    if (got < 0) {
+        free(buf);
+        os_raise("read", errno);
+    }
+    PyAdamasStr* s = str_new(buf, (int64_t)got);
+    free(buf);
+    return s;
+}
+
+int64_t pa_os_write(int64_t fd, PyAdamasStr* data) {
+    ssize_t w = write((int)fd, data->data, (size_t)data->len);
+    if (w < 0) os_raise("write", errno);
+    return (int64_t)w;
+}
+
+int64_t pa_os_lseek(int64_t fd, int64_t pos, int64_t whence) {
+    off_t r = lseek((int)fd, (off_t)pos, (int)whence);
+    if (r < 0) os_raise("lseek", errno);
+    return (int64_t)r;
+}
+
+int64_t pa_os_dup(int64_t fd) {
+    int nf = dup((int)fd);
+    if (nf < 0) os_raise("dup", errno);
+    return (int64_t)nf;
+}
+
+PyAdamasFile* pa_os_fdopen(int64_t fd, PyAdamasStr* mode) {
+    /* closefd=1：文件对象关闭时一并关掉这个 fd（与 CPython 的 os.fdopen 一致）。 */
+    return pa_file_open(str_new("", 0), fd, mode, -1, -1, 1);
+}
+
+/* ── os.stat / os.lstat（0.518 C 部分）─────────────────────────────
+   返回 os.stat_result：运行期用**10 个整数的 list** 承载（顺序与 CPython 的
+   stat_result tuple 一致：mode, ino, dev, nlink, uid, gid, size, atime, mtime,
+   ctime），属性读由降级层按名字映射成 ListGet(obj, i) —— 不新增 RC kind，
+   也不需要新的运行期对象模型。 */
+static PyAdamasList* stat_fill(const char* path, int follow) {
+    struct stat st;
+    int rc = follow ? stat(path, &st) : lstat(path, &st);
+    if (rc != 0) os_raise_path(path, errno);
+    PyAdamasList* l = pa_list_new(10, 0);
+    pa_list_append(l, (int64_t)st.st_mode, 0);
+    pa_list_append(l, (int64_t)st.st_ino, 0);
+    pa_list_append(l, (int64_t)st.st_dev, 0);
+    pa_list_append(l, (int64_t)st.st_nlink, 0);
+    pa_list_append(l, (int64_t)st.st_uid, 0);
+    pa_list_append(l, (int64_t)st.st_gid, 0);
+    pa_list_append(l, (int64_t)st.st_size, 0);
+    pa_list_append(l, (int64_t)st.st_atime, 0);
+    pa_list_append(l, (int64_t)st.st_mtime, 0);
+    pa_list_append(l, (int64_t)st.st_ctime, 0);
+    return l;
+}
+
+PyAdamasList* pa_os_stat(PyAdamasStr* path) { return stat_fill(path->data, 1); }
+PyAdamasList* pa_os_lstat(PyAdamasStr* path) { return stat_fill(path->data, 0); }
 /* ── os.system：返回 C system() 的 wait status（CPython/Unix 口径）── */
 int64_t pa_os_system(PyAdamasStr* cmd) {
     return (int64_t)system(cmd->data);

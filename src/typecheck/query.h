@@ -178,6 +178,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::File: return "file";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
+        case TyKind::StatResult: return "os.stat_result";
         case TyKind::Popen: return "subprocess.Popen";
         case TyKind::Regex: return "re.Pattern";
         case TyKind::Match: return "re.Match";

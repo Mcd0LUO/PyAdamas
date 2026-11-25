@@ -581,6 +581,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RandNew:
         case RtFn::RandGSeed:
         case RtFn::RandNext:
+        case RtFn::OsStat:
+        case RtFn::OsLstat:
+        case RtFn::OsDup:
         case RtFn::OsMkdir:
         case RtFn::OsRmdir:
         case RtFn::OsRemove:
@@ -749,6 +752,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::OsPathSamefile:
         case RtFn::RandGetrandbits:
         case RtFn::OsRename:
+        case RtFn::OsRead:
+        case RtFn::OsWrite:
+        case RtFn::OsFdopen:
         case RtFn::OsGetenv:
         case RtFn::DateTimeField:
         case RtFn::DateTimeStrftime:
@@ -1085,6 +1091,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::BigRShift:
         case RtFn::BigToBase:
         case RtFn::AnySetIndex:
+            gen_rt_i3(in);
+            break;
+        case RtFn::OsOpen:
+        case RtFn::OsLseek:
             gen_rt_i3(in);
             break;
         case RtFn::BigFmt:
