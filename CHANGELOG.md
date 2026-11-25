@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.529] - 2026-11-25
+
+> fix(typecheck,lowe)：**`isinstance` 否定分支的窄化真正落地**——0.518 评估的 P0-D。
+>
+> ```python
+> def f(o: int | str) -> str:
+>     if isinstance(o, int):
+>         return "int"
+>     return o.upper()        # 修前：method 'upper' is not supported by the code generator yet
+> print(f(1), f("ab"))      # 修后：int AB（与 CPython 一致）
+> ```
+>
+> 三处类型层修复（上一轮 0.528 修好守卫后剩下的正是这三层丢信息）：
+>
+> 1. `mk_union` 把**联合当成裸 unknown 短路**：`mk_union(int | str, float)` 直接塌成 unknown，
+>    于是三元以上联合永远建不起来（`pyadamas types` 里三成员标注显示 `func(unknown)`）；
+> 2. `join` 不认识联合：`join(int | str, int)` → unknown，多分支窄化窄不回来；
+> 3. `stmt_if` 的分支合并以空表起步：`join(int, str)` → unknown。现在**只播种联合类型**
+>    （Optional 不能播种——0.498 的「先合并再恢复窄化」依赖 merge 看到分支末端类型，
+>    播种 Optional 会把 None 并回来，实测 `narrow_optional` 立刻误报）。
+>
+> 降级层配合：方法调用的接收者是联合时，选「唯一能接住这个方法」的成员派发
+>（`TypeChecker::type_has_method`），**槽的表示不变**（unknown 里指针类就是裸指针），
+>因此没有改槽宽带来的表示风险。
+>
+> 回归 `tests/run/isinstance_neg_branch.py`：两成员 / 三成员 / `not isinstance` / `raise` /
+>属性路径五组，输出与 CPython 逐字节一致（`int AB` / `int float ab` / `no ab` / `skip AB` / `b CD`）。
+>
+> 基线：default 499/626、old 504/626、`--imports` 167（均不变）。
+> 闸门：套件 **517** / difftest 486/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 8/8。
 ## [0.528] - 2026-11-25
 
 > fix(lower)：**`isinstance(动态值, int/bool/bytes)` 不再恒为 False**——一个 P0 级静默错值。
