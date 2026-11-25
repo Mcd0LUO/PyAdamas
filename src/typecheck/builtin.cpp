@@ -137,11 +137,11 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         // 是 float64；`buffer_i32(n)` / `buffer_f32(n)` 是 32 位宽度。
         if (n == "buffer" || n == "buffer_i32" || n == "buffer_f32") {
             if (a.size() != 1)
-                return mk_buffer(n == "buffer" ? t_float() : t_int());
+                return mk_buffer(n == "buffer_i32" ? t_int() : t_float());
             if (!is_unknown(a[0]) && !is_int_like(a[0]))
                 err(c.line, c.col,
                     std::format("'{}' size must be int, got '{}'", n, type_name(a[0])));
-            return mk_buffer(n == "buffer" ? t_float() : t_int());
+            return mk_buffer(n == "buffer_i32" ? t_int() : t_float());
         }
         if (n == "len") {
             if (a.size() != 1) return t_int();

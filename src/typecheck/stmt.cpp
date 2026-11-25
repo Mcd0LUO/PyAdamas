@@ -581,7 +581,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                             std::format("'{}' object does not support item assignment",
                                         bare_type_name(ot)));
                 } else if (!is_unknown(ot) && ot->kind != TyKind::List &&
-                           ot->kind != TyKind::Optional)
+                           ot->kind != TyKind::Optional && ot->kind != TyKind::Buffer)
                     err(line, col,
                         std::format("'{}' object does not support item assignment",
                                     bare_type_name(ot)));
@@ -625,8 +625,8 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     err(line, col,
                         std::format("'{}' object does not support item assignment",
                                     bare_type_name(ot)));
-            } else if (!is_unknown(ot) && ot->kind != TyKind::Optional) {
-                // 措辞跟 CPython 一致：'range' object does not support item assignment
+            } else if (!is_unknown(ot) && ot->kind != TyKind::Optional &&
+                       ot->kind != TyKind::Buffer) {  // 0.536 连续内存可写；措辞同 CPython
                 err(line, col, std::format("'{}' object does not support item assignment",
                                            bare_type_name(ot)));
             }

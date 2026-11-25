@@ -140,7 +140,7 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         }
         VReg n = expr(*c.args[0]);
         int64_t kind = name == "buffer_i32" ? 1 : (name == "buffer_f32" ? 2 : 0);
-        TypePtr bt = mk_buffer(name == "buffer" ? t_float() : t_int());
+        TypePtr bt = mk_buffer(name == "buffer_i32" ? t_int() : t_float());
         return call_runtime(RtFn::BufferNew, bt, {n, const_int(kind)});
     }
     if (name == "range") {

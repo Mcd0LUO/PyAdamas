@@ -617,10 +617,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DequePopleft:
         case RtFn::DequeLen:
         case RtFn::BufferLen:
-        case RtFn::BufferGetI64:
-        case RtFn::BufferSetI64:
-        case RtFn::BufferGetF64:
-        case RtFn::BufferSetF64:
         case RtFn::DequeMaxlen:
         case RtFn::DequeClear:
         case RtFn::DequeToList:
@@ -805,6 +801,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MethodCall0:        // P4：(obj, method)
             gen_rt_i2(in);
             break;
+        case RtFn::BufferGetI64:       // 0.536：(buffer*, i64 i)
+        case RtFn::BufferGetF64:
+            gen_rt_i2(in);
+            break;
         case RtFn::FileSeek:
         case RtFn::RegexSearch:
         case RtFn::RegexFindAllGroupsStr:
@@ -871,6 +871,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DateNew:
         case RtFn::BigPowMod:    /* (big*, big*, big*) */
         case RtFn::ListAppend:   /* (list*, v, heap) */
+        case RtFn::BufferSetI64: /* 0.536：(buffer*, i64 i, v) */
+        case RtFn::BufferSetF64:
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
         case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
         // P3 tag 版（IR 实参 {op,a,b}）：gen_any_tagged 整段发射。
