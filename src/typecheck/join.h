@@ -311,6 +311,9 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
         return src->sub.empty() ? true : assignable(dst, src->sub[0]);
     if (dst->kind == TyKind::List && src->kind == TyKind::List)
         return assignable(dst->sub[0], src->sub[0]);
+    // 0.543：deque 同 list —— `d: deque[int] = deque()` 的元素类型从 unknown 收窄。
+    if (dst->kind == TyKind::Deque && src->kind == TyKind::Deque)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     // range 不是 list：不能互相赋值（CPython 也是两回事）。
     if (dst->kind == TyKind::Range && src->kind == TyKind::Range)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
