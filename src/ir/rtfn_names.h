@@ -126,6 +126,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictVersion: return "pa_dict_version";
         case RtFn::DictKeyAt: return "pa_dict_key_at";
         case RtFn::BufferNew: return "pa_buffer_new";
+        case RtFn::BufferData: return "pa_buffer_data";
         case RtFn::BufferLen: return "pa_buffer_len";
         case RtFn::BufferGetI64: return "pa_buffer_get_i64";
         case RtFn::BufferSetI64: return "pa_buffer_set_i64";

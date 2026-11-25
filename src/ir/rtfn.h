@@ -87,6 +87,7 @@ enum class RtFn : uint16_t {
     DictVersion,  // (dict*) -> i64  迭代版本号（键集合变化的计数器）
     DictKeyAt,    // (dict*, i64 index) -> i64
     BufferNew,      // (i64 n, i64 kind) -> buffer*   连续内存（0.536）
+    BufferData,     // (buffer*) -> raw ptr（传给 C 的连续内存首址）
     BufferLen,      // (buffer*) -> i64
     BufferGetI64,   // (buffer*, i64 i) -> i64
     BufferSetI64,   // (buffer*, i64 i, i64 v) -> void

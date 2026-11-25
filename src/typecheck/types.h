@@ -909,6 +909,7 @@ inline TypePtr ckind_type(CKind k) {
         case CKind::BufF64:
         case CKind::BufI64:
         case CKind::BufBytes:
+        case CKind::BufBuffer:
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32: return t_int();

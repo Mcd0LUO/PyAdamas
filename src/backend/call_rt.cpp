@@ -617,6 +617,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DequePopleft:
         case RtFn::DequeLen:
         case RtFn::BufferLen:
+        case RtFn::BufferData:
         case RtFn::DequeMaxlen:
         case RtFn::DequeClear:
         case RtFn::DequeToList:

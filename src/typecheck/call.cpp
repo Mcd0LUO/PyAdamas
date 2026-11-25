@@ -114,6 +114,17 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 if (elem == CKind::Int) return e == TyKind::Int ? 1 : -1;
                 return -1;
             }
+            // 0.536：pa_buffer 的连续内存同样按元素类型匹配（float64/i32/f32）。
+            // 无类型 ptr 直接接受；宽度不匹配按 -1 报错，不静默重解释。
+            if (ty->kind == TyKind::Buffer) {
+                if (opaque) return 1;
+                if (ty->sub.empty() || !ty->sub[0]) return 0;
+                TyKind e = ty->sub[0]->kind;
+                if (elem == CKind::None) return 1;
+                if (elem == CKind::Float) return e == TyKind::Float ? 1 : -1;
+                if (elem == CKind::Int) return e == TyKind::Float ? -1 : 1;
+                return 1;
+            }
             if (ty->kind == TyKind::Bytes) return (opaque || elem != CKind::None) ? -1 : 1;
             return 0;
         };

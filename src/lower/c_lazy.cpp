@@ -18,6 +18,7 @@ CKind lazy_arg_kind(TypePtr aty) {
         case TyKind::Bool: return CKind::Int;  // 0/1 按机器字传，C 侧截低字节
         case TyKind::Str: return CKind::Str;
         case TyKind::Bytes: return CKind::BufBytes;
+        case TyKind::Buffer: return CKind::BufBuffer;
         case TyKind::Optional:
             if (!aty->sub.empty() && aty->sub[0]) {
                 if (aty->sub[0]->kind == TyKind::Str) return CKind::OptStr;
