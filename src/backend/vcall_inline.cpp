@@ -167,7 +167,7 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
     }
     if (base < 0) return false;
 
-    struct Candidate { int cls; int function; IntLeaf leaf; };
+    struct Candidate { int cls; int function; IntLeaf leaf; int delta; };
     std::vector<Candidate> candidates;
     const size_t slot = static_cast<size_t>(in.imm);
     for (int i = 0; i < static_cast<int>(m_->classes.size()); ++i) {
@@ -178,10 +178,21 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
         int fn = c.vtable[slot];
         if (fn < 0 || static_cast<size_t>(fn) >= m_->funcs.size()) continue;
         if (!leaf_ok) continue;
-        if (auto leaf = int_leaf(*m_->funcs[fn], c)) {
+        // 多继承的槽里放的是 adjustor thunk（0.509）：守卫要比较 thunk 入口
+        // （运行期槽里就是它），内联体取 thunk 目标的叶子，命中后先补回
+        // delta 让 self 指向目标基类的字段块。
+        int body_fn = fn;
+        int delta = 0;
+        const IRFunction& slot_fn = *m_->funcs[static_cast<size_t>(fn)];
+        if (slot_fn.mi_thunk && slot_fn.mi_thunk_target >= 0 &&
+            static_cast<size_t>(slot_fn.mi_thunk_target) < m_->funcs.size()) {
+            body_fn = slot_fn.mi_thunk_target;
+            delta = slot_fn.mi_thunk_delta;
+        }
+        if (auto leaf = int_leaf(*m_->funcs[static_cast<size_t>(body_fn)], c)) {
             // 小型多态点才值得展开；不对大层次堆一长串守卫。
             if (candidates.size() == 4) return false;
-            candidates.push_back({i, fn, *leaf});
+            candidates.push_back({i, fn, *leaf, delta});
         }
     }
     if (candidates.empty()) {
@@ -238,6 +249,10 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
         label(hit->second);
         targets.erase(hit);
         const auto& leaf = c.leaf;
+        // thunk 命中：self 还指向子类头部，先挪到目标基类的字段块起点，
+        // 叶子体里的字段偏移就是相对那个块算的。
+        if (c.delta != 0 && leaf.kind != IntLeaf::Kind::Constant)
+            line(std::format("addq ${}, {}", c.delta, self));
         if (!dst_unused(in)) {
             if (leaf.kind == IntLeaf::Kind::Constant) {
                 emit_imm_op("movq", leaf.a, "%rax");

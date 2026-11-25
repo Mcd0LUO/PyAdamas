@@ -23,6 +23,8 @@ int Lowerer::build_mi_thunk(int target_fidx, int delta_bytes) {
     int tidx = static_cast<int>(mod_.funcs.size()) - 1;
     wf->ret = rty;
     wf->mi_thunk = true;
+    wf->mi_thunk_target = target_fidx;
+    wf->mi_thunk_delta = delta_bytes;
     push_frame(wf, nullptr);
     int entry = new_block("entry");
     switch_to(entry);

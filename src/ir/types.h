@@ -213,6 +213,11 @@ struct IRFunction {
     // 多继承 adjustor thunk（0.509）：self 已由 thunk 自己调整过，直调点不要再
     // 加一次 delta（否则双重偏移）。
     bool mi_thunk = false;
+    // 多继承 thunk 的目标与偏移（0.518）：后端守卫内联要「看穿」thunk——
+    // 守卫比较 thunk 入口（与 vtable 槽一致），命中后先把 self 加回 delta，
+    // 再内联目标函数的叶子体。
+    int mi_thunk_target = -1;
+    int mi_thunk_delta = 0;
     // 局部槽位（含形参），下标即槽号。参数槽排在最前面，后端按这个
     // 顺序把寄存器 / 栈上的实参搬进来。
     std::vector<TypePtr> slot_ty;
