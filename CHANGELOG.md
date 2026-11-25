@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.551] - 2026-11-25
+
+> feat(typecheck)：**内置模块里用 pya 源码实现的类，注解现在能解析**（`io.StringIO` / `io.BytesIO` 等）。
+>
+> ```python
+> import io
+> s: io.StringIO = io.StringIO()   # 修前：类型 unknown
+> s.write("ab")                   # error: method 'write' is not supported by the code generator yet
+> print(s.getvalue())              # 修后：ab
+> ```
+>
+> 排查结论比预期简单得多：**不需要新 `TyKind`、不需要 tag、不需要动 runtime** ——
+>`stdlib/io.py` 本来就用 pya 源码实现了 `StringIO` / `BytesIO` 两个类（file 协议面齐全：
+>`read/readline/readlines/write/seek/tell/getvalue/close`）。缺的只是 `parse_annotation` 的 Attribute 分支：
+>对内置模块只认几个硬编码名字（`random.Random`、`subprocess.*`、`re.*`、`asyncio.*`），其余 dotted 一律 unknown。
+>
+> 修法（约 4 行）：内置模块分支在硬编码名字之后**再查一次 `mod->classes`**，命中就 `mk_class(...)`。
+>这样「内置模块里用 pya 源码实现的类」（`io.*`、`collections.*`、`contextlib.*` 同理）都能被注解解析。
+>
+> 跨模块**也直接可用**（StringIO 是普通 pya 类，走 0.540 的 class 引用机制），所以不需要 tag 46，
+>也不需要格式版本 18。
+>
+> 回归：`tests/run/ann_stringio.py`（write/getvalue/tell/seek/read/close、`StringIO("hi").readline()`）、
+>`tests/modules/textio_xmod/`（跨模块返回 `io.StringIO` 后 `getvalue()` + `read(1)`）。
+>
+> 基线：syntax 621、default 500、old 505、imports 167（不降）。
+> 闸门：套件 **558** / difftest 507/0 / check_size PASS / ctest 8/8。
 ## [0.550] - 2026-11-25
 
 > test(ir)：记录 **Deque(30) 跨模块 tag 的排除结论**（只加注释，无行为变化）。
