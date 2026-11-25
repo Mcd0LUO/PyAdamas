@@ -515,6 +515,69 @@ PyAdamasList* pa_os_walk(PyAdamasStr* top) {
     return out;
 }
 
+
+/* ── 文件描述符面（0.518 B 部分）：open/read/write/lseek/dup/fdopen ──────
+   O_* 常量由 pysig 声明，值必须与宿主 C 宏一致 —— 下面的静态断言在编译期
+   校验（换平台时数值不符会直接编译失败，不会静默错）。 */
+_Static_assert(O_RDONLY == 0, "O_RDONLY");
+_Static_assert(O_WRONLY == 1, "O_WRONLY");
+_Static_assert(O_RDWR == 2, "O_RDWR");
+_Static_assert(O_CREAT == 64, "O_CREAT");
+_Static_assert(O_EXCL == 128, "O_EXCL");
+_Static_assert(O_TRUNC == 512, "O_TRUNC");
+_Static_assert(O_APPEND == 1024, "O_APPEND");
+_Static_assert(O_NONBLOCK == 2048, "O_NONBLOCK");
+
+/* CPython 的 OSError 文本：`[Errno N] strerror: 'path'`（os_raise 的
+   `what: strerror` 是既有风格，这里只给新的 fd 面用 CPython 口径）。 */
+static void os_raise_path(const char* path, int e) {
+    char buf[512];
+    snprintf(buf, sizeof buf, "[Errno %d] %s: '%s'", e, strerror(e), path);
+    pa_raise_c("OSError", buf);
+}
+
+int64_t pa_os_open(PyAdamasStr* path, int64_t flags, int64_t mode) {
+    int fd = open(path->data, (int)flags, (mode_t)mode);
+    if (fd < 0) os_raise_path(path->data, errno);
+    return (int64_t)fd;
+}
+
+PyAdamasStr* pa_os_read(int64_t fd, int64_t n) {
+    if (n < 0) n = 0;
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) panic_c("out of memory");
+    ssize_t got = read((int)fd, buf, (size_t)n);
+    if (got < 0) {
+        free(buf);
+        os_raise("read", errno);
+    }
+    PyAdamasStr* s = str_new(buf, (int64_t)got);
+    free(buf);
+    return s;
+}
+
+int64_t pa_os_write(int64_t fd, PyAdamasStr* data) {
+    ssize_t w = write((int)fd, data->data, (size_t)data->len);
+    if (w < 0) os_raise("write", errno);
+    return (int64_t)w;
+}
+
+int64_t pa_os_lseek(int64_t fd, int64_t pos, int64_t whence) {
+    off_t r = lseek((int)fd, (off_t)pos, (int)whence);
+    if (r < 0) os_raise("lseek", errno);
+    return (int64_t)r;
+}
+
+int64_t pa_os_dup(int64_t fd) {
+    int nf = dup((int)fd);
+    if (nf < 0) os_raise("dup", errno);
+    return (int64_t)nf;
+}
+
+PyAdamasFile* pa_os_fdopen(int64_t fd, PyAdamasStr* mode) {
+    /* closefd=1：文件对象关闭时一并关掉这个 fd（与 CPython 的 os.fdopen 一致）。 */
+    return pa_file_open(str_new("", 0), fd, mode, -1, -1, 1);
+}
 /* ── os.system：返回 C system() 的 wait status（CPython/Unix 口径）── */
 int64_t pa_os_system(PyAdamasStr* cmd) {
     return (int64_t)system(cmd->data);

@@ -631,6 +631,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AttrDict: return "pa_attr_dict_view";
         case RtFn::AnyIterList: return "pa_any_iter_list";
         case RtFn::AnyIndex: return "pa_any_index";
+        case RtFn::OsOpen: return "pa_os_open";
+        case RtFn::OsRead: return "pa_os_read";
+        case RtFn::OsWrite: return "pa_os_write";
+        case RtFn::OsLseek: return "pa_os_lseek";
+        case RtFn::OsDup: return "pa_os_dup";
+        case RtFn::OsFdopen: return "pa_os_fdopen";
         case RtFn::AnySetIndex: return "pa_any_setindex";
         case RtFn::AnyDelIndex: return "pa_any_delindex";
         case RtFn::ReprAny: return "pa_repr_any";
