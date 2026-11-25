@@ -883,6 +883,20 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
 //   - 实例上的静态/类方法：VCallStatic（类方法补 cls id）；
 //   - 类上的静态/类方法：CallDirect 到该类 vtable 的最终实现；
 //   - 装饰后的普通方法：捕获实例，调用类属性里的包装函数并补 self。
+// B1-min：接收者类型是否足够确定（列表/字典/集合/字符串/具体类实例）。
+bool Lowerer::bm_receiver_ok(const TypePtr& t) {
+    TypePtr r = strip_optional(t);
+    if (!r) return false;
+    switch (r->kind) {
+        case TyKind::List:
+        case TyKind::Dict:
+        case TyKind::Set:
+        case TyKind::Str:
+        case TyKind::Class: return true;
+        default: return false;
+    }
+}
+
 VReg Lowerer::lower_method_value(Attribute& at) {
     ++side_effect_seq_;
 

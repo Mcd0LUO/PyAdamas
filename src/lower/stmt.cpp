@@ -37,6 +37,20 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Assign: {
             auto& a = static_cast<Assign&>(s);
             mark_comp(a.value.get());
+            // B1-min：`name = <recv>.<method>`（接收者静态类型已知、方法唯一解析）
+            // 记成编译期绑定，不产生值；调用点再还原成方法调用。
+            if (a.targets.size() == 1 && a.value->kind == ExprKind::Attribute) {
+                auto* tn = dynamic_cast<Name*>(a.targets[0].get());
+                auto& at = static_cast<Attribute&>(*a.value);
+                if (tn && tc_.type_of(a.value.get()) &&
+                    tc_.type_of(a.value.get())->kind == TyKind::BoundMethod &&
+                    bm_receiver_ok(tc_.type_of(at.value.get()))) {
+                    st_->bm_names[tn->id] = &at;
+                    break;
+                }
+            }
+            if (a.targets.size() == 1)
+                if (auto* tn = dynamic_cast<Name*>(a.targets[0].get())) st_->bm_names.erase(tn->id);
             VReg v = expr(*a.value);
             comp_ctx_node_ = nullptr;
             TypePtr vt = tc_.type_of(a.value.get());

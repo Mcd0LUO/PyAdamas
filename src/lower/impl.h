@@ -156,6 +156,10 @@ struct FuncCtx {
         TypePtr ty;
     };
     std::unordered_map<std::string, MatchEscape> match_escape;
+    // B1-min（0.535）：`push = xs.append` 这类**局部变量**绑定方法。只记
+    // 编译期的「接收者表达式 + 方法名」，调用点还原成一次普通方法调用 ——
+    // 不造运行期对象，所以存进容器/返回/传参仍然按老规矩报错。
+    std::unordered_map<std::string, Attribute*> bm_names;
     std::unordered_map<std::string, TypePtr> extra_locals;
     // 闭包：本函数需要从外层拿的变量，以及被内层捕获、需要转成 cell 的局部名。
     const ClosureMeta* closure = nullptr;
@@ -1001,6 +1005,8 @@ private:
     VReg lower_method_call(Attribute& at, Call& c);
     // 方法值：把 obj.m / C.m 合成成普通函数值的闭包。
     VReg lower_method_value(Attribute& at);
+    // B1-min（0.535）：绑定方法的接收者类型判据。
+    static bool bm_receiver_ok(const TypePtr& t);
     // 按接收者类型拆开的方法调用降级（lower_method_*.cpp）。
     VReg lower_method_native(Attribute& at, Call& c, VReg recv, TypePtr recv_ty, bool opt);
     // vthread 先验（lower/vthread.cpp）

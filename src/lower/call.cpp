@@ -484,6 +484,11 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
 
 VReg Lowerer::lower_call(Call& c) {
     ++side_effect_seq_;
+    // B1-min（0.535）：被调者是绑定了方法的局部变量 —— 还原成对接收者的方法调用。
+    if (c.func->kind == ExprKind::Name) {
+        auto it = st_->bm_names.find(static_cast<Name&>(*c.func).id);
+        if (it != st_->bm_names.end() && it->second) return lower_method_call(*it->second, c);
+    }
     // 内建函数
     if (c.func->kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(*c.func);
