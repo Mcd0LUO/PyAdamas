@@ -67,6 +67,14 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "Path") return new_ty(TyKind::Path);
             if (id == "range") return mk_range(t_int());
             if (id == "Popen") return t_popen();
+            // 0.546：vthread 的通道。跨模块函数拿不到静态类型时 ch.send/recv 会在
+            // 降级期报「not supported by the code generator yet」；裸名给 unknown
+            // 元素类型（send 的值类型不检查），Chan[T] 走下标分支。
+            if (id == "Chan") {
+                auto ct = new_ty(TyKind::Chan);
+                ct->sub = {t_unknown()};
+                return ct;
+            }
             if (id == "buffer") {
                 auto bt = mk_buffer(t_float());
                 bt->celem = CKind::Float;
@@ -142,6 +150,12 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             }
             if ((base == "deque" || base == "Deque") && args.size() == 1)
                 return mk_deque(args[0] ? args[0] : t_unknown());
+            // 0.546：Chan[T] —— 元素类型用于 send 的值类型检查。
+            if (base == "Chan" && args.size() == 1) {
+                auto ct = new_ty(TyKind::Chan);
+                ct->sub = {args[0] ? args[0] : t_unknown()};
+                return ct;
+            }
             if (base == "Queue" && args.size() == 1)
                 return mk_async_queue(args[0]);
             if (base == "Union") {

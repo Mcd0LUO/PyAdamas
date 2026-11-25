@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.546] - 2026-11-25
+
+> fix(typecheck)：**`Chan[T]` / `Chan` 注解**——跨模块 channel 从此可用。
+>
+> 外部验证的「跨模块对象协议第 8 例」：
+>
+> ```python
+> # vtmod.py
+> def producer(ch):
+>     ch.send(42)        # error: method 'send' is not supported by the code generator yet
+> # main.py
+> ch = make_chan(int, 1)
+> go vtmod.producer(ch)
+> ```
+>
+> 同模块内正常，跨模块失败——根因还是**注解不认**：`ch` 没有标注时是 `unknown`，`send`/`recv` 在降级期
+>找不到通道协议；而同模块内编译器能从调用点推出类型。
+>
+> 修法：`annotation.cpp` 的 Name 分支加 `Chan`（元素 unknown）、Subscript 分支加 `Chan[T]`（元素类型参与
+>`send` 的值类型检查）。加上标注后跨模块 `go` + `send`/`recv` 正常：
+>
+> ```python
+> def producer(ch: Chan[int]) -> None:
+>     ch.send(42)        # 42
+> ```
+>
+> 回归 `tests/modules/chan_xmod/`（跨模块 channel + 跨模块 `go`）。
+>
+> 顺带确认：**Decimal/Fraction 跨模块返回值的「打印机器地址」已经不复现**（0.544 的注解映射修好了）——
+>`import nb; print(nb.dec_value())` → `0.3`、`Fraction(1,3)` → `1/3`。
+>
+> 基线：default 500/626、old 505、`--imports` 167（不降）。
+> 闸门：套件 **540** / difftest 505/0 / check_size PASS / ctest 8/8。
 ## [0.545] - 2026-11-25
 
 > fix(lower)：**值类型 struct 的「只声明」局部变量**（A 类段错误）。
