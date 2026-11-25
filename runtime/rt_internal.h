@@ -580,6 +580,8 @@ PyAdamasStr* pa_big_fmt(PyAdamasBig* a, PyAdamasStr* spec); /* format()（rt_for
    1=int32，2=float32。返回的对象由 RC 管理，不需要（也不能）手工 free。 */
 void* pa_buffer_new(int64_t n, int64_t elem_kind);
 void* pa_buffer_data(void* p);
+/* GC 清扫路径：只释放 data，不触碰 RC 头。 */
+void pa_buffer_release_data(void* p);
 int64_t pa_buffer_len(void* p);
 int64_t pa_buffer_elem_kind(void* p);
 int64_t pa_buffer_get_i64(void* p, int64_t i);

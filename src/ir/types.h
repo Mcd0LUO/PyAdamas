@@ -541,6 +541,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncEvent:
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
+        case TyKind::Buffer:  // 0.537: RC-managed contiguous memory
         case TyKind::TypeObj:
         case TyKind::ClassObj:
         case TyKind::AsyncTimeout:

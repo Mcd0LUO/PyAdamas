@@ -1695,3 +1695,26 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 | 返回值 | 声明的返回类型与 `return` 表达式不符 |
 
 **查不出的**：属性是否存在（`x.foo` 一律放行）、可调用性以外的协议、控制流可达性、变量是否一定被赋值。这些在静态上代价太高，或者需要更完整的对象模型，现阶段一律放行。
+
+## 连续内存：`buffer(n)`
+
+`buffer(n)` 分配一块 **RC 管理的连续内存**（`runtime/rt_buffer.c` 的 `pa_buffer`），
+元素是 8 字节标量（`float`/`int`），零初始化；`buffer_i32(n)` / `buffer_f32(n)` 是
+4 字节元素版本。支持 `len(buf)` 与下标读写 `buf[i]` / `buf[i] = v`（越界 panic，
+与 `list` 同口径）；**不支持**切片、迭代、`in`。
+
+生命周期：`buffer` 是普通 RC 对象 —— 赋值给局部变量即持有引用，离开作用域/被重新
+赋值时释放，GC 清扫路径也会释放它的 data。**不需要也不能手工 free**。
+
+传给 C：
+
+```python
+cimport clib as c
+b = buffer(4)          # 4 个 double
+c.memset(b, 0, 32)     # ptr[float] 形参直接收 buffer
+```
+
+宽度规则（0.537）：`buffer(n)` 的元素是 8 字节，可以传给 `ptr[float]`；
+`buffer_i32` / `buffer_f32` 是 **4 字节**，**只能传给裸 `ptr`**（由调用方自己
+给正确的字节数）—— 不允许冒充 `ptr[float]`/`ptr[int]`，否则 C 侧按 8 字节步长
+读会越界。传错宽度是**编译期错误**，不会静默重解释。

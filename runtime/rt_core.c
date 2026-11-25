@@ -3258,6 +3258,9 @@ static void gc_free_body(PyAdamasRc* h) {
     } else if (h->kind == PYADAMAS_RC_STR) {
         // 非 ASCII 串可能挂着懒码点索引（GC 清扫不走 str_pool_put）。
         str_cp_index_free((PyAdamasStr*)((char*)h + PYADAMAS_RC_HDR));
+    } else if (h->kind == PYADAMAS_RC_BUFFER) {
+        // 0.537：buffer 的连续内存块（GC 清扫路径不走 buffer_destroy）。
+        pa_buffer_release_data((char*)h + PYADAMAS_RC_HDR);
     }
     PA_DBG_FREE(h);
 }

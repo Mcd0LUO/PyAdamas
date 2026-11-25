@@ -49,6 +49,14 @@ void* pa_buffer_new(int64_t n, int64_t elem_kind) {
     return b;
 }
 
+void pa_buffer_release_data(void* p) {
+    PyAdamasBuffer* b = (PyAdamasBuffer*)p;
+    if (b && b->magic == PYADAMAS_BUFFER_MAGIC && b->data) {
+        free(b->data);
+        b->data = NULL;
+    }
+}
+
 void* pa_buffer_data(void* p) {
     PyAdamasBuffer* b = (PyAdamasBuffer*)p;
     if (!b || b->magic != PYADAMAS_BUFFER_MAGIC) return NULL;

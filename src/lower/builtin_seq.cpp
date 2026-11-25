@@ -141,6 +141,10 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         VReg n = expr(*c.args[0]);
         int64_t kind = name == "buffer_i32" ? 1 : (name == "buffer_f32" ? 2 : 0);
         TypePtr bt = mk_buffer(name == "buffer_i32" ? t_int() : t_float());
+        // 0.537（f32 方案①）：静态元素宽度记在 celem 上，32 位 buffer 只能传给
+        // 裸 `ptr`（不能冒充 ptr[float]/ptr[int]，否则按 8 字节步长读会越界）。
+        bt->celem = name == "buffer" ? CKind::Float
+                    : (name == "buffer_f32" ? CKind::Float32 : CKind::Int32);
         return call_runtime(RtFn::BufferNew, bt, {n, const_int(kind)});
     }
     if (name == "range") {
