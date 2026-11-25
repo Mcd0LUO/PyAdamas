@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.541] - 2026-11-25
+
+> fix(driver/check)：**`check --imports` 接上跨模块类引用的 loader**（与 build 同口径）。
+>
+> 0.540 给接口加了 **tag 29（跨模块类引用 = 归属模块 + 类名）**，但只有 build 侧注入了 loader；
+>`check.cpp` 仍只走 `builtin_module` 兜底，导致 `check --imports` 遇到「别的模块的类」时落到 unknown，
+>与 build 口径不一致。
+>
+> 改法：`check_load_file` 里 encode→decode 归一那一步给 `decode_module_interface` 传 loader 闭包，
+>直接复用 check 自己的 `check_load(ctx, path, dep)`（**没有新写一套解析**）。
+>
+> 已知遗留（与本改动无关，单独排期）：`check -I . main.py`（`tests/modules/contextlib_xmod`）仍报
+>`module attribute is not callable` —— 用 0.540 的旧二进制复现同一错误，所以是 **check 侧 info 构建**
+>（`check_build_info`）没有导出「装饰后符号的类型」，不在 loader 这条线上。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 529 / difftest 496/0 / check_size PASS / ctest 8/8。
 ## [0.540] - 2026-11-25
 
 > fix(ir,typecheck)：**跨模块类引用带归属模块**（接口格式 v15）+ **`@contextmanager` 跨模块可用**。
