@@ -29,10 +29,40 @@ namespace optdetail {
  *
  * 要求：两条必须**相邻**且操作数相同。中间有任何指令都不动 —— 那可能是
  * 会抛异常的调用，temp 的保护是必要的。 */
+/* 判定一条指令会不会动临时值栈（RcTemp/TempTake/RcCleanup）。 */
+static bool touches_temp_stack(const Inst& in) {
+    if (in.op != IrOp::CallRt) return false;
+    RtFn f = static_cast<RtFn>(in.imm);
+    return f == RtFn::RcTemp || f == RtFn::RcTempTake || f == RtFn::RcCleanup;
+}
+
 bool rc_redundant_pairs(IRFunction& fn) {
     bool changed = false;
     for (auto& b : fn.blocks) {
         auto& ins = b.insts;
+        // 形态 1b（0.532）：`temp(v)` 与 `take(v)` **同块**、中间只有不碰临时值栈
+        // 的指令（field.set / const / bin …）。temp 只把 v 压进临时栈、不改 rc，
+        // take 只是把它移除 —— 两条一起删掉，rc 与栈水位都不变，异常路径也一样
+        // （owner 自己的引用还在）。以前只认**相邻**，`obj.new` + `field.set` 这种
+        // 最常见的实例构造因此一直没被消掉。
+        for (size_t i = 0; i + 1 < ins.size(); ++i) {
+            const Inst& a = ins[i];
+            if (a.op != IrOp::CallRt || static_cast<RtFn>(a.imm) != RtFn::RcTemp) continue;
+            if (a.args.size() != 1) continue;
+            size_t j = i + 1;
+            for (; j < ins.size(); ++j) {
+                if (touches_temp_stack(ins[j])) break;
+            }
+            if (j >= ins.size()) break;
+            const Inst& c = ins[j];
+            if (static_cast<RtFn>(c.imm) != RtFn::RcTempTake) continue;
+            if (c.args.size() != 1 || c.args[0] != a.args[0]) continue;
+            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(j));
+            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(i));
+            changed = true;
+            if (i > 0) --i;
+            continue;
+        }
         for (size_t i = 0; i + 1 < ins.size(); ++i) {
             const Inst& a = ins[i];
             const Inst& c = ins[i + 1];
