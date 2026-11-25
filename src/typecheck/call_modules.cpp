@@ -832,6 +832,22 @@ std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Ca
 
 // @functools.lru_cache / @lru_cache(...) 在类型上是恒等装饰器：
 // 包装函数的签名与被装饰函数相同，调用点仍按原签名检查实参。
+bool TypeChecker::is_contextmanager_expr(const Expr* e) {
+    if (auto* call = dynamic_cast<const Call*>(e)) e = call->func.get();
+    if (auto* at = dynamic_cast<const Attribute*>(e)) {
+        auto* rn = dynamic_cast<const Name*>(at->value.get());
+        if (!rn || at->attr != "contextmanager") return false;
+        auto mod = lookup_module_alias(rn->id);
+        return mod && mod->name == "contextlib";
+    }
+    if (auto* n = dynamic_cast<const Name*>(e)) {
+        if (n->id != "contextmanager") return false;
+        auto* sym = lookup(n->id);
+        return !sym || !sym->from_def;
+    }
+    return false;
+}
+
 bool TypeChecker::is_lru_cache_expr(const Expr* e) {
     if (auto* call = dynamic_cast<const Call*>(e)) e = call->func.get();
     if (auto* at = dynamic_cast<const Attribute*>(e)) {
