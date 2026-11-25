@@ -4,6 +4,54 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.533] - 2026-11-25
+
+> fix(typecheck,lower)：**类实例下标返回 float 的静默错值** + **标注 asyncio 原语反而更差**。
+>
+> 两个都是「另一个 agent 在真实项目里踩到、我们复核确认」的坑（`temp-proj/PITFALLS.md` 的 A1 与 B3/B3b/C1）。
+>
+> ### A1：`__getitem__` 返回 float 时直接使用会打成位模式
+>
+> ```python
+> class Box:
+>     def __getitem__(self, i: int) -> float:
+>         return self.data[i]
+> b: Box = Box([1.5, 2.5, 3.5])
+> print(b[1])          # 修前 4612811918334230528（应为 2.5）
+> v: float = b[1]      # 修前就是对的（标注强制转换）
+> ```
+>
+> 根因两处：
+>1. `typecheck/expr.cpp` 的 subscript 对 `TyKind::Class` 一律返回 unknown —— 改成取 `__getitem__`
+>   的**返回标注**。这一条同时修好 `print`/`str`/`repr`/容器字面量/算术五条路径；
+>2. `lower/print.cpp`：静态类型 unknown 时按 vreg 类型兜底，**只认 float**。为什么只认 float：
+>   unknown 域里整型和堆指针同形，把 Int 也当兜底会让 `122_gen_throw.py` 把字符串指针打成整数
+>   （实测踩到，收窄到 float 后恢复）。
+>
+> 修后：`2.5 2.5 [2.5, 3.5] 3.5`，与 CPython 逐字节一致（`tests/run/getitem_float_unbound.py`）。
+>
+> ### B3b + C1：标注成 asyncio 原语反而比不标注更差
+>
+> ```python
+> lock: asyncio.Lock = asyncio.Lock()
+> async with lock:      # 修前：error: async with requires a class instance with async __aenter__/__aexit__
+> ```
+>
+> 不标注时类型取自初始化表达式的 `AsyncLock`，反而正常。根因：`annotation.cpp` 的 dotted 注解分支
+>解析不到 `asyncio.Lock/Semaphore/Event/Queue` → 符号退化成 unknown。补上映射后，`async with`
+>与 `acquire()`/`release()` 的既有降级路径（`stmt_async.cpp`）就能接上，标注与不标注行为一致。
+>
+> 回归 `tests/run/async_with_annotated.py`：标注局部 Lock、标注 Semaphore、`await acquire()`、
+>`release()`、标注参数传入 —— 5 行与 CPython 一致。
+>
+> ### 判负：B1 方法引用（未做）
+>
+> 在 assign 里拦截 BoundMethod 会让 628 口径从 **499 掉到 484**（15 个文件真的把方法引用存进变量/容器），
+>属于不可接受的新增拒绝，已回退。正确做法是在降级支持 bound method 值（`(recv, slot)` 闭包 + 调用点拆包），
+>单独立项。
+>
+> 基线：default 499/626、old 504、`--imports` 167（不降）。
+> 闸门：套件 **521** / difftest 489/0 / check_size PASS / bench 36/36 / vect-variants PASS / ctest 9/9。
 ## [0.532] - 2026-11-25
 
 > perf(opt)：**RC 临时值配对消除**——0.518 评估的 P2-C（选了低风险的 B 方案）。

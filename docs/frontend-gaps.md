@@ -270,3 +270,17 @@ unknown，全程放宽。0.500 的判负结论仍成立（保留签名会误杀 
 `@types.coroutine`）。要真正建模需要三个合成包装类：CM（`__enter__` 返回原生成器的 yield 类型、
 `__exit__`）、singledispatch 包装（`register` + `__call__`）、`types.coroutine`（awaitable），
 本轮没有落地。
+
+### 8.8 方法引用（bound method）——check 过、build 报错
+
+```python
+xs: list[float] = [1.0]
+push = xs.append        # check ok
+push(2.0)               # build: error: attribute access is only supported as a method call
+```
+
+- 现状：把方法引用存进变量/容器在 `check` 阶段放行，`build` 阶段被拒——两个口径不一致；
+- 为什么没在 check 拦截：实测拦截会让 628 口径从 **499 掉到 484**（15 个文件真的这么写），
+  属于不可接受的新增拒绝；
+- 正确修法：降级支持 bound method 值（`(recv, slot)` 二元组 + 调用点拆包），不是一轮能安全做完的；
+- 规避写法：直接 `xs.append(2.0)`。
