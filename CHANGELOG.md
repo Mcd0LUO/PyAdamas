@@ -25,6 +25,17 @@
 >
 > 验证：13 个常见 stdlib 模块的 `import` 与 5 个 `from ... import ...` 在项目代码里 `check` 全部 ok（无误报）；
 >`tests/modules/contextlib_xmod` 的 `check -I . main.py` 从报错变为 ok。
+> 回归用例：`tests/run/ann_io_from.py`（项目模块 `from io import StringIO` + write/getvalue）。
+>
+> ## 顺带：Deque(30) 的决定性实验（不是撞号，也不是编解码问题）
+>
+> enc 开 tag 30、只改 dec：`case 30 = mk_deque(dec_type(d))` → asyncio/coroutines.py 报 isinstance 错；
+>`case 30 = t_unknown()`（消费元素类型）→ ok；`case 30 = t_unknown()`（不消费）→ ok。
+> 两个 unknown 变体都过 ⇒ **字节流没错位、编解码对称**；问题出在「解成真正的 `Deque` 类型之后」——
+>该文件的 `_COROUTINE_TYPES` tuple 元素在类型合并/推断里被 Deque 参与后不再是「类」，即**类型检查侧**
+>（`join` / tuple 元素推断）的问题。累计排除：① 编解码不对称 ② isinstance 的 tuple 元素本身
+>③ 直接依赖带坏 ④ tag 撞号。tag 30 保持停用；下次收尾的起点已写进注释。
+
 >
 > 尝试过但**没有采用**的修法（已记录，避免重蹈）：在 check 模式下合成 `_GeneratorContextManager` 类——
 >目标用例能过，但 default **500 → 496**、old **505 → 501**（4 个 stdlib 文件因为「装饰 dunder 方法」等被拒）。
