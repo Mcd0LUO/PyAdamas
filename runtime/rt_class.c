@@ -53,17 +53,50 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
 }
 
 
-/* unknown 域 dunder 分派：元数据第 7 个字 -> [__eq__, __lt__, __hash__, -1]。
-   which 越界/不是实例/没有实现都返回 NULL；调用方按签名 cast 后直接调用。
-   调用点是 C 运行时 → 编译方法，方法内的 raise 走展开器（ASan 全量覆盖）。 */
+/* unknown 域 dunder 分派：元数据第 7 个字 -> [__eq__, __lt__, __hash__, __del__,
+   __str__, __repr__]（BUG-3 追加后两项）。which 越界/不是实例/没有实现都
+   返回 NULL；调用方按签名 cast 后直接调用。调用点是 C 运行时 → 编译方法，
+   方法内的 raise 走展开器（ASan 全量覆盖）。 */
 void* pa_instance_dunder_fn(void* obj, int64_t which) {
     const int64_t* vt = inst_vtable(obj);
-    if (!vt || which < 0 || which > 3) return NULL;  /* 0.539: 第 4 项是 __del__ */
+    if (!vt || which < 0 || which > 5) return NULL;  /* 3=__del__ 4=__str__ 5=__repr__ */
     const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 8)[6];
     if (!tab) return NULL;
     int64_t slot = tab[which];
     if (slot < 0) return NULL;
     return (void*)(uintptr_t)vt[slot];
+}
+
+/* BUG-3：实例的 str/repr 文本（unknown 域的 print / 容器 repr 用）。
+   prefer_repr=1 只认 __repr__（容器内的 repr 语义，CPython 口径）；0 先
+   __str__ 再 __repr__（print 语义）。没有可用实现返回 NULL，调用方退回
+   pa_instance_default_str 的 <Name object>（与降级层 class_default_str 同形）。
+   返回**拥有引用**的新串，调用方负责 dec。 */
+PyAdamasStr* pa_instance_str(void* obj, int64_t prefer_repr) {
+    void* fn = pa_instance_dunder_fn(obj, prefer_repr ? 5 : 4);
+    if (fn) return ((PyAdamasStr* (*)(void*))fn)(obj);
+    if (!prefer_repr) {
+        fn = pa_instance_dunder_fn(obj, 5);
+        if (fn) return ((PyAdamasStr* (*)(void*))fn)(obj);
+    }
+    return NULL;
+}
+
+/* 没有 __str__/__repr__ 时的缺省文本：<Name object>。名字取元数据里的
+   限定名最后一段（与 pa_class_repr 的 __name__ 口径一致）。 */
+PyAdamasStr* pa_instance_default_str(void* obj) {
+    const int64_t* vt = inst_vtable(obj);
+    const char* cn = vt ? (const char*)(uintptr_t)(vt - 8)[4] : NULL;
+    const char* nm = (cn && *cn) ? cn : "object";
+    if (cn) {
+        const char* dot = strrchr(cn, '.');
+        if (dot && dot[1]) nm = dot + 1;
+    }
+    char buf[192];
+    int n = snprintf(buf, sizeof buf, "<%s object>", nm);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+    return str_new(buf, n);
 }
 
 /* 实例的运行期类编号；不是类实例返回 -1。读类属性时用它按实际类型

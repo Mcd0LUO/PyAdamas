@@ -368,12 +368,15 @@ std::string AsmGen::gen(const IRModule& m) {
                 for (int s : c.own_slots)
                     quad_dec(emit_.out, emit_.line_buf, s);
                 if (c.del_slot >= 0) has_del_class = true;
-                // dunder 槽表：[__eq__, __lt__, __hash__, __del__]；unknown 域据此分派。
+                // dunder 槽表：[__eq__, __lt__, __hash__, __del__, __str__, __repr__]；
+                // unknown 域据此分派（rt_class.c 的 pa_instance_dunder_fn 按下标取）。
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvtdun", static_cast<int64_t>(i)));
                 quad_dec(emit_.out, emit_.line_buf, c.eq_slot);
                 quad_dec(emit_.out, emit_.line_buf, c.lt_slot);
                 quad_dec(emit_.out, emit_.line_buf, c.hash_slot);
                 quad_dec(emit_.out, emit_.line_buf, c.del_slot);   // 0.539: __del__（-1 = 无）
+                quad_dec(emit_.out, emit_.line_buf, c.str_slot);   // BUG-3: __str__（-1 = 无）
+                quad_dec(emit_.out, emit_.line_buf, c.repr_slot);  // BUG-3: __repr__（-1 = 无）
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lcname", static_cast<int64_t>(i)));
                 emit_.line_buf = "\t.asciz \"";
                 emit_.line_buf += asm_escape(c.qualname);
