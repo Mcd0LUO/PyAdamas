@@ -28,7 +28,7 @@ set(PYADAMAS_SOURCES
   src/main.cpp
   src/backend/tag.cpp
   src/backend/impl.cpp
-  src/backend/target_abi.cpp
+  src/common/target_abi.cpp
   src/driver/util.cpp
   src/driver/link.cpp
   src/driver/build.cpp

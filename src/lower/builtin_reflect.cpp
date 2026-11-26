@@ -1,6 +1,6 @@
 // lower/builtin_reflect.cpp —— 内置函数：反射与属性
 #include "lower/impl.h"
-#include "backend/tag_defs.h"
+#include "common/tag_defs.h"
 #include "ir/module.h"  // fnv1a64：isinstance 的稳定类 id（0.531）
 
 namespace pyadamas {

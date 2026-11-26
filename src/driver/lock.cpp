@@ -16,7 +16,7 @@
 #include <string_view>
 #include <utility>
 
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 #include "driver/modules.h"
 #include "driver/sha256.h"
 #include "driver/util.h"

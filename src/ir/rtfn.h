@@ -628,7 +628,7 @@ enum class RtFn : uint16_t {
     OsClose,               // (i64 fd) -> void
     OsPathIslink,          // (str* path) -> i64 bool  lstat S_ISLNK（stdlib2）
     // P2（0.340，PYADAMAS_TYPE_TAGS）：isinstance(unknown, 内置类型)。
-    // IR 实参 {v, code}：code 是 PaTypeCode（src/backend/tag_defs.h）；codegen 把
+    // IR 实参 {v, code}：code 是 PaTypeCode（src/common/tag_defs.h）；codegen 把
     // tag 从平行 tag 区装填，实际调用 pa_any_type_is(v, tag, code)。
     AnyTypeIs,             // (a, tag_a, code) -> i64 bool
     AnyDictItems,          // (a, tag_a) -> list*  unknown dict 的 (k,v) 对（+1）

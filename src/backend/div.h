@@ -9,7 +9,7 @@
 #include <climits>
 
 #include "common/intmath.h"
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 
 namespace pyadamas {
 

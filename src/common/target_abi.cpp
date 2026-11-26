@@ -1,5 +1,5 @@
 // backend/target_abi.cpp —— 具体目标的 ABI 取值
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 
 #include <cstring>
 

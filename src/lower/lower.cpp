@@ -3,7 +3,7 @@
 
 #include "ir/verify.h"
 #include "opt/opt.h"
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 
 namespace pyadamas {
 

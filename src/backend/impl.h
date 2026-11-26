@@ -40,9 +40,9 @@
 #include "common/block_bitset.h"
 #include "ir/ir.h"
 #include "backend/mach_instr.h"
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 #include "ir/module.h"
-#include "backend/tag_defs.h"
+#include "common/tag_defs.h"
 #include "backend/emit_sink.h"
 #include "backend/slot_query.h"
 #include "backend/value_query.h"
@@ -68,7 +68,7 @@ int64_t big_literal_limbs(const std::string& dec, std::vector<uint32_t>& out);
 // rsp 是栈指针，不在其中；rbp 在——生成函数的帧相对 rsp 寻址，不需要
 // 帧指针，回溯走 .eh_frame，所以它也能拿来存变量。
 //
-// 寄存器角色统一由 TargetABI 描述（见 backend/target_abi.h）：这是换目标的唯一
+// 寄存器角色统一由 TargetABI 描述（见 common/target_abi.h）：这是换目标的唯一
 // 接缝，取值在编译期定死，运行期零开销。
 inline const char* const* kSlotRegs() { return target_abi().callee_pool; }
 // 实验开关：PYADAMAS_RA_POOLCAP=N 把**槽寄存器池**限制到 N 个（N < 6）。

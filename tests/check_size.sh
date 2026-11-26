@@ -104,4 +104,10 @@ if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check >/dev/null 2>&1; the
     exit 1
 fi
 
+# 分层依赖：模块只允许向上依赖（common <- syntax <- typecheck <- lower <- opt <- backend <- driver）。
+if ! bash "$(dirname "$0")/../tools/check_layers.sh" >/dev/null 2>&1; then
+    echo "结果：分层依赖检查失败（运行 tools/check_layers.sh 看详情）。"
+    exit 1
+fi
+
 echo "结果：文件规模检查通过。"

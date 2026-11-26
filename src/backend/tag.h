@@ -13,7 +13,7 @@
     // RC/分派快路径的判据，UNK(0) 一律回退探针 —— 正确性不依赖传播完备。
     // 门控 tag_.tags_enabled = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
     // 门控关的模块（含 26 个热基准）不进任何 tag 分支，asm 逐字节不变。
-    // tag 编码与静态类型映射见 backend/tag_defs.h（含 P2 的 NONE/BOOL/堆子类扩展，
+    // tag 编码与静态类型映射见 common/tag_defs.h（含 P2 的 NONE/BOOL/堆子类扩展，
     // 以及堆 ⇔ 3..5 或 >=8 的判定口径）。
     // tag 与零开销异常状态已拆到 TagLower（src/backend/tag_lower.h）。
     TagLower tag_;
@@ -27,7 +27,7 @@
     // 对方不维护本模块 tag）一律 UNK 回退。入口模块 __entry__ 不可被 import。
     bool global_tag_eligible(int gi) const;
     std::string global_tag_label(int gi) const;
-    // 静态类型导出的 tag（定义在 backend/tag_defs.h；tag_.type_tags 决定 P2 扩展）。
+    // 静态类型导出的 tag（定义在 common/tag_defs.h；tag_.type_tags 决定 P2 扩展）。
     int64_t static_tag_of(const TypePtr& t) const;
     bool vreg_tagged(VReg r) const;
     bool slot_tagged(int s) const;

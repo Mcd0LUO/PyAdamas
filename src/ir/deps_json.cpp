@@ -9,7 +9,7 @@
 
 #include "driver/modules.h"
 #include "ir/module.h"
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 
 namespace pyadamas {
 namespace {

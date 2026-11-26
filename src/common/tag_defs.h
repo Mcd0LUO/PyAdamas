@@ -1,4 +1,4 @@
-// backend/tag_defs.h —— unknown 值平行 tag 的编码与静态类型映射（P3 + P2 扩展）
+// common/tag_defs.h —— unknown 值平行 tag 的编码与静态类型映射（P3 + P2 扩展）
 //
 // 从 backend/impl.h 拆出（文件规模硬限制 1200 行）。tag 是编译器内部
 // 旁路：值仍是 8B i64，UNK(0) 一律回退探针（正确性不依赖传播完备）。

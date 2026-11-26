@@ -59,7 +59,7 @@
 #include "driver/lock.h"
 #include "driver/manifest.h"
 #include "driver/modules.h"
-#include "backend/target_abi.h"
+#include "common/target_abi.h"
 #include "driver/util.h"
 
 using pyadamas::read_file;
