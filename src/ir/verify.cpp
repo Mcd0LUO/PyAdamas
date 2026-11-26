@@ -86,7 +86,18 @@ std::vector<std::string> verify_function(const IRFunction& fn) {
             if (is_gen_resume_op(in.op) && !fn.is_generator)
                 out.push_back(std::format("{}: 块 {} 第 {} 条用了恢复侧生成器指令 {}，但函数不是生成器",
                                           fn.name, b.name, ii, in.text()));
+            // vreg 下标必须落在 vreg_ty 里（0.636）：中端 Pass 新建 vreg
+            // 却忘了往 vreg_ty 追加类型时，下游按下标查会越界读。
+            auto check_vreg_ty = [&](VReg r) {
+                if (r == kNoReg) return;
+                if (static_cast<size_t>(r) >= fn.vreg_ty.size())
+                    out.push_back(std::format("{}: 块 {} 第 {} 条的 vreg %{} 超出 vreg_ty 范围（共 {}）（{}）",
+                                              fn.name, b.name, ii, r, fn.vreg_ty.size(),
+                                              in.text()));
+            };
+            check_vreg_ty(in.dst);
             for_each_operand(in, [&](VReg r) {
+                check_vreg_ty(r);
                 if (def_count.find(r) == def_count.end())
                     out.push_back(std::format("{}: 块 {} 第 {} 条读取了未定义的 vreg %{}（{}）",
                                               fn.name, b.name, ii, r, in.text()));
@@ -129,10 +140,13 @@ std::vector<std::string> verify_function(const IRFunction& fn) {
                 check_target(in.target, "jump");
             } else if (in.op == IrOp::Branch) {
                 check_target(in.target, "branch-true");
-                check_target(in.target2, "branch-false");
+                // target2 < 0 时不再让 check_target 报一次越界（0.636）：
+                // 同一个错误原来会输出两条诊断。
                 if (in.target2 < 0)
                     out.push_back(std::format("{}: 块 {} 的条件跳转没有 false 目标",
                                               fn.name, b.name));
+                else
+                    check_target(in.target2, "branch-false");
             }
         }
     }
@@ -148,7 +162,8 @@ std::vector<std::string> verify_function(const IRFunction& fn) {
                                     in.op == IrOp::StoreSlot ||
                                     in.op == IrOp::SlotAddr;
             if (!is_slot_op) continue;
-            if (in.idx.value < 0) continue;  // -1 = 该指令没用到 idx
+            // 槽位指令必须带非负下标（0.636）：原来 `idx < 0` 直接 continue，
+            // 会把「构造指令时漏填 idx」这种错误静默放过。
             if (in.idx.value < 0 ||
                 static_cast<size_t>(in.idx.value) >= fn.slot_ty.size())
                 out.push_back(std::format("{}: 块 {} 引用了越界槽 s{}（槽数 {}）",
@@ -170,7 +185,8 @@ std::vector<std::string> verify_module(const IRModule& m) {
         // 模块级表下标：越界同样是静默错值（codegen 直接按下标取表项）。
         for (const auto& b : fp->blocks) {
             for (const Inst& in : b.insts) {
-                if (in.idx.value < 0) continue;  // -1 = 该指令没用到 idx
+                // 下标可能在 idx（表下标），也可能在 imm（函数/类下标，0.636）。
+                int64_t idxv = in.idx.value;
                 size_t n = 0;
                 const char* what = nullptr;
                 switch (in.op) {
@@ -179,11 +195,15 @@ std::vector<std::string> verify_module(const IRModule& m) {
                     case IrOp::GlobalAddr:
                         n = m.globals.size(); what = "全局"; break;
                     case IrOp::ConstStr: n = m.strings.size(); what = "字符串池"; break;
+                    case IrOp::ConstBig: n = m.bigs.size(); what = "大整数池"; break;
+                    // 这三种把下标放在 imm 里，idx 保持 -1。
                     case IrOp::FuncAddr:
                     case IrOp::FuncCode:
+                        idxv = in.imm; n = m.funcs.size(); what = "函数表"; break;
                     case IrOp::CallDirect:
                         n = m.funcs.size(); what = "函数表"; break;
-                    case IrOp::ClassAddr: n = m.classes.size(); what = "类表"; break;
+                    case IrOp::ClassAddr:
+                        idxv = in.imm; n = m.classes.size(); what = "类表"; break;
                     case IrOp::CallExtern: n = m.externs.size(); what = "外部符号表"; break;
                     // 外部**变量**在另一张表里（externs 是函数）。
                     case IrOp::LoadExtern:
@@ -191,9 +211,9 @@ std::vector<std::string> verify_module(const IRModule& m) {
                         n = m.extern_vars.size(); what = "外部变量表"; break;
                     default: continue;
                 }
-                if (in.idx.value < 0 || static_cast<size_t>(in.idx.value) >= n)
+                if (idxv < 0 || static_cast<size_t>(idxv) >= n)
                     out.push_back(std::format("{}: 块 {} 引用了越界的{}下标 {}（共 {}）",
-                                              fp->name, b.name, what, in.idx.value, n));
+                                              fp->name, b.name, what, idxv, n));
             }
         }
     }
