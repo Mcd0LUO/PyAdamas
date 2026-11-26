@@ -846,6 +846,36 @@ static void list_inline_pool_put(PyAdamasRc* h) {
     pa_list_inline_pool_count++;
 }
 
+/* 4 槽内联块（64+48+32 = 144B）的池：只服务「请求容量 1..4 的列表字面量」。
+   与 8 槽池分开是**不变量**要求：rc_alloc_core 的池命中路径不重写
+   h->size，同池块的 size 必须恒定（144 vs 176）。上限同样 512。 */
+static PyAdamasRc* pa_list_inline4_pool;
+static int pa_list_inline4_pool_count;
+
+static PA_DBG_UNUSED PyAdamasRc* list_inline4_pool_get(void) {
+    PyAdamasRc* h = pa_list_inline4_pool;
+    if (h) {
+        pa_list_inline4_pool = h->next;
+        pa_list_inline4_pool_count--;
+    }
+    return h;
+}
+
+static void list_inline4_pool_put(PyAdamasRc* h) {
+#ifdef PYADAMAS_ALLOC_DEBUG
+    PA_DBG_FREE(h);
+    return;
+#endif
+    if (pa_list_inline4_pool_count >= LIST_INLINE_POOL_MAX) {
+        free(h);
+        return;
+    }
+    h->next = pa_list_inline4_pool;
+    h->prev = NULL;
+    pa_list_inline4_pool = h;
+    pa_list_inline4_pool_count++;
+}
+
 /* 索引叶子的「归零释放」：普通 RC 路径走 dec_slow 的 rc==0 分支，
    收集期（容器交出引用）走这里。口径与 dec_slow 一致 ——
    撤销索引成员资格 → dtor → freelist 回收。 */
@@ -1875,7 +1905,11 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     else if (kind == PYADAMAS_RC_CPYFLOAT && size == (int64_t)sizeof(int64_t))
         h = float_box_pool_get();
     else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
-        h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get() : list_pool_get();
+        /* 8 槽块先判：append 构建的列表（req==0）走这条，是热路径；
+           4 槽块只服务请求容量 1..4 的字面量，多一次比较无所谓。 */
+        h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get()
+            : extra == PYADAMAS_LIST_INLINE4_BYTES ? list_inline4_pool_get()
+            : list_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
         h = dict_pool_get();
 #endif
@@ -1895,6 +1929,7 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // （dec_slow / gc_free_body），同池块的这四个字段恒定 ——
     //   str_pool:        STR / NULL / NULL（str 分配点全在 rt_core，恒 NULL）
     //   list_pool(48):   LIST / list_destroy / list_gc_release
+    //   list_inline4(80): LIST / list_destroy / list_gc_release
     //   list_inline(112):同上
     //   dict_pool:       DICT / dict_destroy / dict_gc_release
     // 运行期没有任何代码改写活对象的这四个头字段（已 grep 核实），
@@ -2095,12 +2130,18 @@ void pa_rc_dec_slow(void* p) {
         // list_destroy 是空操作（无元素可 dec、无位图可 free、无外部
         // 缓冲可还），整块直接挂回内联池，省一次函数调用 + 三个分支。
         // 条件不满足（增长过 / 混合种类）照走 dtor 原路径。
-        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED) &&
-            h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
+        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED)) {
             PyAdamasList* l = (PyAdamasList*)p;
-            if (l->elem_kind == 0 && !l->heap_bits && l->data == list_inline_at(l)) {
-                list_inline_pool_put(h);
-                return;
+            if (h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
+                if (l->elem_kind == 0 && !l->heap_bits && l->data == list_inline_at(l)) {
+                    list_inline_pool_put(h);
+                    return;
+                }
+            } else if (h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE4_BYTES) {
+                if (l->elem_kind == 0 && !l->heap_bits && l->data == list_inline_at(l)) {
+                    list_inline4_pool_put(h);
+                    return;
+                }
             }
         }
         // **untracked leaf 不在堆链上，跳过 rc_unlink 的函数调用。**
@@ -2119,6 +2160,9 @@ void pa_rc_dec_slow(void* p) {
         else if (h->kind == PYADAMAS_RC_LIST &&
                  h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES)
             list_inline_pool_put(h);
+        else if (h->kind == PYADAMAS_RC_LIST &&
+                 h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE4_BYTES)
+            list_inline4_pool_put(h);
         else if (h->kind == PYADAMAS_RC_DICT && h->size == (int64_t)sizeof(PyAdamasDict))
             dict_pool_put(h);
         else PA_DBG_FREE(h);
@@ -2148,17 +2192,25 @@ void pa_rc_dec_heap_batch(int64_t* vals, int64_t n) {
         }
         if (h->rc <= 0) panic_c("refcount decrement on a freed object");
         // rc == 1：untracked 小元组直接挂回内联池（条件与 dec_slow 一致）。
-        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED) &&
-            h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
-            PyAdamasList* t = (PyAdamasList*)(h + 1);
-            if (t->elem_kind == 0 && !t->heap_bits && t->data == list_inline_at(t)) {
-                // 必须归零再入池：池块的不变量是 rc==0（dec_slow 的
-                // 「dec on freed」panic 靠它挡二次释放；留着 rc==1 会让
-                //  stray dec 静默二次 free → 池里出现重复块 → 两个活对象
-                // 共享一块内存）。0.274 引入时漏了这一步。
-                h->rc = 0;
-                list_inline_pool_put(h);
-                continue;
+        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED)) {
+            if (h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
+                PyAdamasList* t = (PyAdamasList*)(h + 1);
+                if (t->elem_kind == 0 && !t->heap_bits && t->data == list_inline_at(t)) {
+                    // 必须归零再入池：池块的不变量是 rc==0（dec_slow 的
+                    // 「dec on freed」panic 靠它挡二次释放；留着 rc==1 会让
+                    //  stray dec 静默二次 free → 池里出现重复块 → 两个活对象
+                    // 共享一块内存）。0.274 引入时漏了这一步。
+                    h->rc = 0;
+                    list_inline_pool_put(h);
+                    continue;
+                }
+            } else if (h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE4_BYTES) {
+                PyAdamasList* t = (PyAdamasList*)(h + 1);
+                if (t->elem_kind == 0 && !t->heap_bits && t->data == list_inline_at(t)) {
+                    h->rc = 0;
+                    list_inline4_pool_put(h);
+                    continue;
+                }
             }
         }
         pa_rc_dec_slow((void*)(uintptr_t)v);
@@ -3742,6 +3794,12 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     pa_list_inline_pool_count = 0;
+    while (pa_list_inline4_pool) {
+        PyAdamasRc* h = pa_list_inline4_pool;
+        pa_list_inline4_pool = h->next;
+        free(h);
+    }
+    pa_list_inline4_pool_count = 0;
     // float 盒 freelist：缓存引用已在入口归还，清扫过程也可能把盒挂进来。
     while (float_box_pool) {
         PyAdamasRc* h = float_box_pool;

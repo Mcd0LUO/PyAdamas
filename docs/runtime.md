@@ -148,14 +148,22 @@ exact-RC，必须等索引开关定下来再初始化）。于是单字节 ASCII
 每档最多 64 块。复用时 `cap` 按档容量对齐（只会变大），销毁时先 dec 元素再
 回收缓冲。
 
-**小列表合并分配**：容量 <=8 元素的列表（含定长构造快路径 `pa_list_new_filled` /
-`pa_tuple_new_filled`）把 `data` 缓冲内联在「RC 头 + 结构体」同一个 malloc 块
-尾部（`list_inline_pool`，64+48+64=176 字节，最多缓存 64 块），建/销各只需一次
-池操作。内联缓冲是块内指针，**不能 realloc / free**：append / insert / 切片赋值
-增长越过 8 时由 `list_buf_grow` 换 malloc + memcpy，内联区从此闲置；销毁时按
-`data == list_inline_at(l)` 判断是否还外部缓冲，头块按 `h->size`（48+64）整块
-挂回内联池，下次复用重新启用内联缓冲。GC 清扫路径（`gc_free_body`）同样不能
-单独 free 块内的 `data` 指针。
+**小列表合并分配**：小列表把 `data` 缓冲内联在「RC 头 + 结构体」同一个 malloc 块
+尾部，建/销各只需一次池操作。两种块，按 `pa_list_new` 的**请求容量**选（同池块
+的 `h->size` 必须恒定 —— `rc_alloc_core` 池命中不重写头字段）：
+
+- 8 槽块（64+48+64=176 字节，`list_inline_pool`）：请求容量 0（空列表，常见于
+  append 构建）或 5..8，以及定长构造快路径 `pa_list_new_filled` /
+  `pa_tuple_new_filled`；
+- 4 槽块（64+48+32=144 字节，`list_inline4_pool`）：请求容量 1..4 的列表字面量
+  （`[i]`、`[a,b,c]`）。每块省 32 字节（glibc chunk 192→160）：gcbench cycles
+  场景里 20 万个 2 元素 list 的 Maximum resident 47.8MB→41.7MB（−13%）。
+
+两池上限都是 512 块。内联缓冲是块内指针，**不能 realloc / free**：append /
+insert / 切片赋值增长越过内联容量时由 `list_buf_grow` 换 malloc + memcpy，内联区
+从此闲置；销毁时按 `data == list_inline_at(l)` 判断是否还外部缓冲，头块按
+`h->size`（48+64 或 48+32）整块挂回对应内联池，下次复用重新启用内联缓冲。
+GC 清扫路径（`gc_free_body`）同样不能单独 free 块内的 `data` 指针。
 
 `elem_kind` 是元素所有权类别，由降级器按容器静态类型算好：
 
