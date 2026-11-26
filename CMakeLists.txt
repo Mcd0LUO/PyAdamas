@@ -165,6 +165,7 @@ src/opt/intloop.cpp
   src/backend/mach_emit.cpp
   src/ir/ir.cpp
   src/syntax/desugar.cpp
+  src/syntax/desugar_scan.cpp
   src/ir/module.cpp
   src/ir/module_map.cpp
   src/ir/deps_json.cpp
