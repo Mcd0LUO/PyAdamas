@@ -617,6 +617,11 @@ VReg Lowerer::expr(Expr& e) {
             TypePtr raw = tc_.type_of(a.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
+            // P2：接收者是**类对象**（mod.C / 类名当值）时，下面走的虽然也是
+            // Class 分支，但属性解析不到不能落到运行期 AttrGet —— 类对象没有
+            // 属性字典，AttrGet 只会给出 0（静默错值），而单文件路径在类接收者
+            // 分支是编译期报错的。记下这个事实，兜底处按同样口径报错。
+            bool from_class_obj = false;
             if (ot && ot->kind == TyKind::ClassObj) {
                 if (a.attr == "__name__") {
                     VReg cv = expr(*a.value);
@@ -624,7 +629,10 @@ VReg Lowerer::expr(Expr& e) {
                     push_temp(s);
                     return s;
                 }
-                if (!ot->sub.empty()) ot = ot->sub[0];
+                if (!ot->sub.empty()) {
+                    ot = ot->sub[0];
+                    from_class_obj = true;
+                }
             }
             // P4（lang_gaps）：自定义异常类静态类型仍是 Class（名字机制），
             // 值是类对象单例；__name__ 走运行期类名。
@@ -958,6 +966,16 @@ VReg Lowerer::expr(Expr& e) {
                         return const_none();
                     }
                 }
+                // P2 附带：类对象上读 @property（mod.K.p）会把类对象当 self 传给
+                // getter，读实例字段时直接段错误（改动前实测 exit 139）。单文件
+                // 的类接收者分支对 property 名是编译期报错的，这里对齐。
+                // 只影响类对象接收者；实例上的 property 读取不变。
+                if (from_class_obj && ot->cls->property(a.attr)) {
+                    err(e.line, e.col,
+                        std::format("class '{}' has no attribute '{}'", ot->cls->name,
+                                    a.attr));
+                    return const_none();
+                }
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器
                     if (!p->owner || p->getter < 0 ||
@@ -991,6 +1009,15 @@ VReg Lowerer::expr(Expr& e) {
                     VReg obj = expr(*a.value);
                     if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
                     return class_attr_load_dyn(obj, ot->cls, ca);
+                }
+                // 类对象接收者解析不到属性：与单文件（类接收者）分支同口径，
+                // 编译期报错。运行期 AttrGet 对类对象只会返回 0（没有属性字典），
+                // 那样 mod.Color.__members__ / mod.C.运行时类属性 会静默给 0。
+                if (from_class_obj) {
+                    err(e.line, e.col,
+                        std::format("class '{}' has no attribute '{}'", ot->cls->name,
+                                    a.attr));
+                    return const_none();
                 }
                 // 静态没有这个属性：查运行期动态属性表。
                 ot->cls->needs_dict = true;
