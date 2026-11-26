@@ -54,7 +54,12 @@ void Lowerer::lower_for(For& f) {
 }
 
 void Lowerer::lower_for_range(For& f, Call& c) {
+
     if (f.target->kind != ExprKind::Name) {
+        // 放开这条限制试过（0.611）：lower_for_range_core 的 assign_to 对
+        // Subscript/Attribute 目标会段错误（arr[0] / b.x / d[0] 全部 rc=139），
+        // 不单是 bounds_hint 的 static_cast<Name&>。支持它要先让下标赋值的
+        // 整型来源在类型未知时也能落地，属于独立的一块工作；在那之前宁可报错。
         err(f.line, f.col, "for-loop variable must be a name for range()");
         return;
     }
@@ -103,9 +108,14 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 // range 对象当迭代源：边界从对象里读，步长方向运行期定。
 void Lowerer::lower_for_range_obj(For& f, VReg r) {
     if (f.target->kind != ExprKind::Name) {
+        // 放开这条限制试过（0.611）：lower_for_range_core 的 assign_to 对
+        // Subscript/Attribute 目标会段错误（arr[0] / b.x / d[0] 全部 rc=139），
+        // 不单是 bounds_hint 的 static_cast<Name&>。支持它要先让下标赋值的
+        // 整型来源在类型未知时也能落地，属于独立的一块工作；在那之前宁可报错。
         err(f.line, f.col, "for-loop variable must be a name for range()");
         return;
     }
+
     VReg start = call_runtime(RtFn::RangeFirst, t_int(), {r});
     VReg stop = call_runtime(RtFn::RangeStop, t_int(), {r});
     VReg step = call_runtime(RtFn::RangeStep, t_int(), {r});
@@ -240,7 +250,9 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
             c->args.size() == 1 || (c->args.size() >= 2 && int_is(c->args[0].get(), 0));
         bool unit_step = !dyn_step && (c->args.size() < 3 || step == 1);
         const Expr* stop_arg = c->args.size() == 1 ? c->args[0].get() : c->args[1].get();
-        if (zero_start && unit_step && stop_arg->kind == ExprKind::Call) {
+        // 边界提示只对「循环变量是局部名字」成立：下面要按名字查槽。
+        if (f.target->kind == ExprKind::Name && zero_start && unit_step &&
+            stop_arg->kind == ExprKind::Call) {
             const auto& lc = static_cast<const Call&>(*stop_arg);
             if (lc.func->kind == ExprKind::Name &&
                 static_cast<Name&>(*lc.func).id == "len" && lc.args.size() == 1 &&
@@ -503,6 +515,7 @@ void Lowerer::lower_for_seq(For& f) {
                    const_str(seq_ty->kind == TyKind::Dict
                                  ? "dictionary changed size during iteration"
                                  : "Set changed size during iteration")});
+        end_unreachable();  // Raise 是 noreturn：块必须有终结指令
         switch_to(ok_b);
         if (seq_ty->kind == TyKind::Dict && ver_slot >= 0) {
             VReg cur_v = call_runtime(RtFn::DictVersion, t_int(), {seq_val()});
@@ -523,6 +536,7 @@ void Lowerer::lower_for_seq(For& f) {
             call_void(raise_rt(RtFn::Raise),
                       {const_str("RuntimeError"),
                        const_str("dictionary keys changed during iteration")});
+            end_unreachable();  // 同上
             switch_to(kok);
         }
     }
@@ -548,10 +562,23 @@ void Lowerer::lower_for_seq(For& f) {
     VReg iv2 = load_slot(idx, t_int());
     TypePtr et = tc_.type_of(f.target.get());
     if (!et || et->kind == TyKind::Unknown) {
-        if (seq_ty->kind == TyKind::Str)
+        if (seq_ty->kind == TyKind::Str) {
             et = t_str();
-        else if (!seq_ty->sub.empty())
+        } else if (seq_ty->kind == TyKind::Tuple && !seq_ty->variadic &&
+                   seq_ty->sub.size() > 1) {
+            // 定长异构元组 t = ("abc", 42)：各元素类型不同。取 sub[0] 会把 int 元素
+            // 当成 str 去 rc_inc，直接段错误。元素类型全同时沿用 sub[0]（省一次
+            // unknown 分派），否则统一按 unknown 处理。
+            bool homogeneous = true;
+            for (auto& s : seq_ty->sub)
+                if (s->kind != seq_ty->sub[0]->kind) {
+                    homogeneous = false;
+                    break;
+                }
+            et = homogeneous ? seq_ty->sub[0] : t_unknown();
+        } else if (!seq_ty->sub.empty()) {
             et = seq_ty->sub[0];
+        }
     }
     VReg ev;
     VReg sv = seq_val();
