@@ -6,6 +6,30 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.656] - 2026-11-27
+
+> fix(lower)：**类对象上解析不到的属性从「静默给 0」改成编译期报错**（审计 A8-5 同类）。
+>
+> ```python
+> import kenum
+> print(kenum.Color.__members__)   # 修前：0   修后：error: class 'Color' has no attribute '__members__'
+> print(kenum.Color.__qualname__)  # 修前：0   修后：同上
+> ```
+>
+> 单文件里 `print(Color.__members__)` 一直是编译期报错，跨模块却落到运行期 `AttrGet` → `0`
+>（类对象没有属性字典，`AttrGet` 只能给 0）。修法：`lower/expr_assign.cpp` 的 Attribute 读
+>记下 `from_class_obj`（接收者静态类型是 `ClassObj`），静态解析不到属性时直接报错，不再落 `AttrGet`。
+>
+> 扫过 22 个 dunder（枚举类对象，本地/导入两形态）：除 `__name__` 外全部从 `0` 变成与单文件一致的报错；
+>**没有**误伤 `__str__`/`__repr__`（它们在类对象上本来就报错，实例上的照旧）。
+>
+> 顺带挡掉一个**既有崩溃**：类对象上读 `@property`（`mod.K.p`）会把类对象当 self 传 getter，
+>改前 `exit 139`；现在同样报 `class 'K' has no attribute 'p'`。
+>
+> 新增 `tests/strict/class_obj_unknown_attr.py`（`build` 必须拒绝）。套件 **598**。
+>
+> 遗留（既有，未修）：CPython 里 `mod.K.<property>` 返回 property 对象本身，pya 不建模 property 对象，
+>现在给的是明确报错而不是静默值。
 ## [0.655] - 2026-11-27
 
 > fix(typecheck)：**`Color('RED')`（int 值枚举传 str）从运行时段错误变成编译期报错**。
