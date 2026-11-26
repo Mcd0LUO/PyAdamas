@@ -173,6 +173,10 @@ VReg Lowerer::lower_method_str(Attribute& at, Call& c, VReg recv) {
                                                   : StrOp::RemoveSuffix,
                        t_str(), affix, kNoReg, kNoReg);
     }
+    if (at.attr == "isascii") {
+        if (!arg_count(0, 0)) return const_none();
+        return emit_op(StrOp::IsAscii, t_bool(), kNoReg, kNoReg, kNoReg);
+    }
     if (at.attr == "isdigit" || at.attr == "isalpha" || at.attr == "isspace" ||
         at.attr == "isupper" || at.attr == "islower" || at.attr == "isalnum") {
         if (!arg_count(0, 0)) return const_none();

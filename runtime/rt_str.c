@@ -1684,6 +1684,15 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
         }
         case 32: /* encode：str -> bytes 的真实转换（S2） */
             return (int64_t)pa_str_encode(s);
+        case 34: { /* isascii：所有码点 < 0x80 */
+            int64_t off = 0;
+            while (off < s->len) {
+                int n = 0;
+                if (str_cp_at(s, off, &n) >= 0x80) return 0;
+                off += n;
+            }
+            return 1;
+        }
         default:
             pa_raise_c("ValueError", "unknown string method");
     }
@@ -1919,6 +1928,11 @@ int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int6
         }
         case 32: /* decode：bytes -> str 的真实转换（S2） */
             return (int64_t)pa_bytes_decode(s);
+        case 34: { /* isascii：所有字节 < 0x80 */
+            for (int64_t i = 0; i < s->len; ++i)
+                if ((unsigned char)s->data[i] >= 0x80) return 0;
+            return 1;
+        }
         default:
             pa_raise_c("ValueError", "unknown bytes method");
     }

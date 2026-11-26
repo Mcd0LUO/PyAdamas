@@ -41,7 +41,7 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                     "removesuffix", "splitlines", "casefold", "swapcase", "partition",
                     "rpartition",   "isnumeric", "isalnum",  "isdecimal", "isidentifier",
                     "isprintable",  "istitle",   "expandtabs", "translate", "maketrans",
-                    "format_map",   "rsplit",    "ljust",
+                    "format_map",   "rsplit",    "ljust", "isascii",
                 };
                 return ms.count(m) > 0;
             }
@@ -626,7 +626,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "isdigit" || name == "isalpha" || name == "isspace" ||
                 name == "isupper" || name == "islower" || name == "isnumeric" ||
                 name == "isalnum" || name == "isdecimal" || name == "isidentifier" ||
-                name == "isprintable" || name == "istitle")
+                name == "isprintable" || name == "istitle" || name == "isascii")
                 return t_bool();
             if (name == "format") return t_str();
             if (name == "zfill" || name == "ljust" || name == "rjust" || name == "center" ||
