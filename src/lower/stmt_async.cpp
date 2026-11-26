@@ -44,6 +44,8 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         switch_to(body);
         FuncCtx::Cleanup cf;
         cf.kind = FuncCtx::Cleanup::Kind::LockRelease;
+        // 异步生成器：注册清理标记，.aclose() 提前关闭时才会跑这里的清理。
+        if (st_->is_generator) cleanup_gen_mark();
         cf.handler_slot = hs;
         cf.land = land;
         cf.mgr_slot = ms;
@@ -70,7 +72,7 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         store_slot(msgs, tmsg);
         call_void(RtFn::ExcClear, {});
         call_void(RtFn::LockRelease, {load_slot(ms, ct)});
-        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        emit_rethrow_from_slots(ts, msgs);
         end_unreachable();
         switch_to(end);
         return;
@@ -110,6 +112,8 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         switch_to(body);
         FuncCtx::Cleanup cf;
         cf.kind = FuncCtx::Cleanup::Kind::SemRelease;
+        // 异步生成器：注册清理标记，.aclose() 提前关闭时才会跑这里的清理。
+        if (st_->is_generator) cleanup_gen_mark();
         cf.handler_slot = hs;
         cf.land = land;
         cf.mgr_slot = ms;
@@ -136,7 +140,7 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         store_slot(msgs, tmsg);
         call_void(RtFn::ExcClear, {});
         call_void(RtFn::SemRelease, {load_slot(ms, ct)});
-        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        emit_rethrow_from_slots(ts, msgs);
         end_unreachable();
         switch_to(end);
         return;
@@ -188,7 +192,7 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         store_slot(msgs, tmsg);
         call_void(RtFn::ExcClear, {});
         call_void(RtFn::TimeoutExit, {load_slot(ms, ct)});
-        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        emit_rethrow_from_slots(ts, msgs);
         end_unreachable();
         switch_to(end);
         return;
@@ -214,6 +218,10 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         switch_to(body);
         FuncCtx::Cleanup cf;
         cf.kind = FuncCtx::Cleanup::Kind::TaskGroupCancel;
+        // 注意：这里统一按「取消子任务」处理，包括 `return` 这种无异常退出。
+        // CPython 的语义是正常退出应等待子任务完成（TaskGroupExit）、只有异常才取消。
+        // 我们的 Cleanup 展开机制在 return 路径上不支持再次 suspend_on_awaitable，
+        // 所以先按取消实现——这是已知的语义偏差，不是遗漏。
         cf.handler_slot = hs;
         cf.land = land;
         cf.mgr_slot = ms;
@@ -243,7 +251,7 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         store_slot(msgs, tmsg);
         call_void(RtFn::ExcClear, {});
         call_void(RtFn::TaskGroupCancel, {load_slot(ms, ct)});
-        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        emit_rethrow_from_slots(ts, msgs);
         end_unreachable();
         switch_to(end);
         return;
@@ -286,10 +294,16 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         }
         return wf->ret;
     };
-    TypePtr en_ret = wrapped_ret(en, "__aenter__");
-    TypePtr ex_ret = wrapped_ret(ex, "__aexit__");
-    if (!en_ret || en_ret->kind != TyKind::Coroutine || !ex_ret ||
-        ex_ret->kind != TyKind::Coroutine) {
+    bool sig_reported = false;
+    auto wrapped_ret_chk = [&](const MethodInfo* m, const char* nm) -> TypePtr {
+        TypePtr r = wrapped_ret(m, nm);
+        if (!r) sig_reported = true;
+        return r;
+    };
+    TypePtr en_ret = wrapped_ret_chk(en, "__aenter__");
+    TypePtr ex_ret = wrapped_ret_chk(ex, "__aexit__");
+    if (!sig_reported && (!en_ret || en_ret->kind != TyKind::Coroutine || !ex_ret ||
+                          ex_ret->kind != TyKind::Coroutine)) {
         err(item.context->line, item.context->col,
             std::format("async with '{}': __aenter__/__aexit__ must return a coroutine",
                         ct->cls->name));
@@ -337,6 +351,8 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
 
     FuncCtx::Cleanup cf;
     cf.kind = FuncCtx::Cleanup::Kind::AsyncWith;
+        // 异步生成器：注册清理标记，.aclose() 提前关闭时才会跑这里的清理。
+        if (st_->is_generator) cleanup_gen_mark();
     cf.handler_slot = hs;
     cf.land = land;
     cf.mgr_slot = ms;
@@ -424,16 +440,25 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         // 二次释放（实测 `refcount decrement on a freed object`）。
         // 用 store_slot_raw 而不是 store_slot：后者会顺手 dec 旧值，
         // 那就和 RaiseOwn 的那次 dec 撞车了。
-        VReg ex_type = load_slot(ts, t_str());
-        VReg ex_msg = load_slot(msgs, t_str());
-        store_slot_raw(ts, const_int(0));
-        store_slot_raw(msgs, const_int(0));
-        call_void(RtFn::RaiseOwn, {ex_type, ex_msg});
+        emit_rethrow_from_slots(ts, msgs);
         end_unreachable();
     }
     switch_to(end);
 }
 
 
+
+
+// 从 (type, message) 两个临时槽重新抛出。Raise 是 noreturn，longjmp 之后槽永远走不到
+// 释放点；RaiseOwn 拷进异常对象后自己 dec。槽必须先**只写不清**地清掉（store_slot_raw）：
+// 异常一路 longjmp 到 coro_step 的 setjmp 兜底，那里会逐槽 dec，留着旧指针会二次释放。
+// 四个异步原语（Lock/Semaphore/Timeout/TaskGroup）和通用 __aexit__ 共用这一段。
+void Lowerer::emit_rethrow_from_slots(int ts, int msgs) {
+    VReg ex_type = load_slot(ts, t_str());
+    VReg ex_msg = load_slot(msgs, t_str());
+    store_slot_raw(ts, const_int(0));
+    store_slot_raw(msgs, const_int(0));
+    call_void(RtFn::RaiseOwn, {ex_type, ex_msg});
+}
 
 }  // namespace pyadamas

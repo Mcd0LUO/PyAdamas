@@ -121,6 +121,8 @@ private:
 
     // noreturn 调用之后把当前块收尾，避免后端把后续块当成顺序落下。
     void end_unreachable();
+    // 从 (type, message) 临时槽重新抛出（RaiseOwn + store_slot_raw 清槽）。
+    void emit_rethrow_from_slots(int ts, int msgs);
 
     VReg alloc(TypePtr ty);
 
