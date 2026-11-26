@@ -268,6 +268,44 @@ bool attach_module_input(pyadamas::Program& prog, const std::string& entry_path,
 
 }  // namespace
 
+static int cmd_deps(const std::string& path,
+                    const std::vector<std::string>& include_dirs,
+                    const std::string& module_map_path,
+                    const std::string& manifest_flag,
+                    const std::string& output,
+                    bool verbose,
+                    bool json_out,
+                    bool locked) {
+    (void)json_out;  // deps 只有 JSON 一种输出；--json 是显式别名
+            Program prog;
+            prog.verbose = verbose;
+            prog.rebuild = true;
+            if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked))
+                return 1;
+            if (!load_program(path, include_dirs, prog)) return 1;
+            if (!prepare_program(prog, false, false)) return 1;
+            std::error_code root_ec;
+            const std::string root_abs = std::filesystem::weakly_canonical(
+                std::filesystem::path(path).parent_path(), root_ec).string();
+            const std::string cwd = std::filesystem::current_path().string();
+            const std::string json = pyadamas::module_graph_json(prog, root_abs, cwd);
+            if (output.empty()) {
+                std::fwrite(json.data(), 1, json.size(), stdout);
+            } else {
+                std::ofstream out(output, std::ios::binary);
+                if (!out) {
+                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+                    return 1;
+                }
+                out << json;
+                if (!out) {
+                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+                    return 1;
+                }
+            }
+            return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -525,34 +563,9 @@ int main(int argc, char** argv) {
 
         // deps：只建模块图与接口（不降级、不汇编），输出确定性 JSON。
         if (mode == "deps") {
-            (void)json_out;  // deps 只有 JSON 一种输出；--json 是显式别名
-            Program prog;
-            prog.verbose = verbose;
-            prog.rebuild = true;
-            if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked))
-                return 1;
-            if (!load_program(path, include_dirs, prog)) return 1;
-            if (!prepare_program(prog, false, false)) return 1;
-            std::error_code root_ec;
-            const std::string root_abs = std::filesystem::weakly_canonical(
-                std::filesystem::path(path).parent_path(), root_ec).string();
-            const std::string cwd = std::filesystem::current_path().string();
-            const std::string json = pyadamas::module_graph_json(prog, root_abs, cwd);
-            if (output.empty()) {
-                std::fwrite(json.data(), 1, json.size(), stdout);
-            } else {
-                std::ofstream out(output, std::ios::binary);
-                if (!out) {
-                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
-                    return 1;
-                }
-                out << json;
-                if (!out) {
-                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
-                    return 1;
-                }
-            }
-            return 0;
+            return cmd_deps(path, include_dirs, module_map_path, manifest_flag,
+                            output, verbose,
+                            json_out, locked);
         }
 
         Program prog;
