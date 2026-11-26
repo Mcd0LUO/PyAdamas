@@ -1,0 +1,3 @@
+cmodule("bufwidth")
+
+def memset(p: ptr[int], v: int, n: int) -> ptr[int]: pass

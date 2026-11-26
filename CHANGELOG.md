@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.558] - 2026-11-26
+
+> fix(typecheck)：**两条 C 互操作的坑改成编译期明确报错**（原来是段错误 / 误导信息）。
+>
+> ### 1. lambda 作 C 回调 → 段错误（A 类）
+>
+> ```python
+> c.qsort(xs, 3, 8, lambda a, b: a[0] - b[0])
+> # 修前：Segmentation fault（lambda 形参无类型，体内 a[0] 降级成通用索引，把裸指针当 list 读）
+> # 修后：error: lambda cannot be used as a C callback: its parameters have no types, so
+> #        pointer indexing inside it would be miscompiled; define a named function with
+> #        ptr[T] parameters
+> ```
+>
+> lambda 在脱糖后是 `__pyadamas$lambda_N`，形参**无从标注**；命名函数（含捕获闭包）是完整可用的，
+>所以按「拒绝 lambda、保留命名函数」处理。回调的 C 侧跳板机制本身没问题。
+>
+> ### 2. `buffer_i32` / `buffer_f32` 传 `ptr[int]` / `ptr[float]` 的报错误导
+>
+> 修前：`argument 'p' of 'memset' expects list[int] for 'ptr[int]', got 'buffer[int]'` ——
+>用户看到「expects list」完全猜不到真实原因是**元素宽度**（4 字节 buffer 冒充 8 字节指针会越界读）。
+>修后：
+>
+> ```
+> error: argument 'p' of 'memset' cannot take this buffer: it has 4-byte elements,
+>        but list[int] for 'ptr[int]' is 8-byte; pass the bare 'ptr' (with a byte count)
+>        or use buffer(n) (8-byte elements)
+> ```
+>
+> 两条都加进反例集：`tests/fail/callback_lambda.py`、`tests/fail/buffer_ptr_width.py`
+>（配合 `tests/fail/bufwidth.cpya` 的最小声明）。
+>
+> 基线：syntax 621、default 500、old 505、imports **168**（不降）。
+> 闸门：套件 562 / difftest 509/0 / check_size PASS / bench 36/36 / perf warn=0 fail=0 / ctest 8/8。
 ## [0.557] - 2026-11-26
 
 > fix(typecheck)：**`Optional[T]` 上的方法调用不再误报**（`T` 只要真有这个方法）。

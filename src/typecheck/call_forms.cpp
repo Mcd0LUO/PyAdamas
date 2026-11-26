@@ -1,6 +1,7 @@
 // typecheck/call_forms.cpp —— call 按被调表达式形态拆分
 #include "driver/build.h"
 #include "typecheck/typecheck.h"
+#include <cstdio>
 
 #include "common/re_groups.h"
 
@@ -193,6 +194,17 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                             return;
                         }
                         const FuncInfo& fn = *at->fn;
+                        // 0.558：lambda 的形参没有类型，体内 `a[0]` 会按 unknown 降级成通用
+                        // 索引（把裸指针当 list 读）→ 段错误。命名函数（含捕获闭包）是正确的，
+                        // 所以这里明确拒绝 lambda，给出可执行的替代方案。
+                        // lambda 被脱糖成 __pyadamas$lambda_N（形参没有标注，也无从标注）。
+                        if (fn.name.rfind("__pyadamas$lambda", 0) == 0) {
+                            err(arg->line, arg->col,
+                                "lambda cannot be used as a C callback: its parameters have "
+                                "no types, so pointer indexing inside it would be "
+                                "miscompiled; define a named function with ptr[T] parameters");
+                            return;
+                        }
                         if (fn.varargs || fn.pos.size() != cp.cb_params.size()) {
                             err(arg->line, arg->col,
                                 std::format("callback '{}' expects {} parameter(s)", cp.name,

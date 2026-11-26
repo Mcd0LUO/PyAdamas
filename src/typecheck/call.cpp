@@ -192,6 +192,21 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                         want = "list[int] for 'ptr[int]'";
                     else
                         want = "list[float], list[int] or bytes for 'ptr'";
+                    if (ty && ty->kind == TyKind::Buffer) {
+                        // buffer 被拒的真实原因是**元素宽度**，不是「类型不对」：
+                        // buffer_i32/buffer_f32 是 4 字节元素，冒充 ptr[int]/ptr[float]
+                        // 会让 C 侧按 8 字节步长读越界。别让用户去猜「expects list」。
+                        const bool narrow = ty->celem == CKind::Int32 ||
+                                            ty->celem == CKind::Float32;
+                        err(line, col,
+                            std::format("argument '{}' of '{}' cannot take this buffer: "
+                                        "it has {}-byte elements, but {} is {}-byte; pass the "
+                                        "bare 'ptr' (with a byte count) or use buffer(n) "
+                                        "(8-byte elements)",
+                                        p.name, fn->name, narrow ? 4 : 8, want,
+                                        p.cptr_elem == CKind::Float ? 8 : 8));
+                        return;
+                    }
                     err(line, col,
                         std::format("argument '{}' of '{}' expects {}, got '{}'", p.name,
                                     fn->name, want, type_name(ty)));
