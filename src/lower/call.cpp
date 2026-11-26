@@ -1078,6 +1078,18 @@ VReg Lowerer::lower_struct_builtin(const std::string& name, Call& c) {
         return const_int(0);
     }
     if (name == "sizeof") {
+        // 0.560：C 类型名（sizeof(int32) / sizeof(ptr[float])）是编译期常量。
+        Expr* a0 = c.args[0].get();
+        if (a0->kind == ExprKind::Name) {
+            bool found = false;
+            int64_t sz = c_type_size(static_cast<Name&>(*a0).id, &found);
+            if (found) return const_int(sz);
+        }
+        if (a0->kind == ExprKind::Subscript) {
+            auto& sub = static_cast<Subscript&>(*a0);
+            if (auto* bn = dynamic_cast<Name*>(sub.value.get()); bn && bn->id == "ptr")
+                return const_int(8);
+        }
         // 编译期常量：类型检查阶段已经保证实参是 struct 类型或值。
         TypePtr t = tc_.type_of(c.args[0].get());
         if (t && t->kind == TyKind::Struct && t->st) return const_int(t->st->size);

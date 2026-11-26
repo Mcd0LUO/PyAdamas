@@ -1753,6 +1753,20 @@ c.memcmp(xs, ys, len(xs) * 8)      # 正确：24 字节
 c.memcmp(xs, ys, len(xs))          # 错：只比较了前 8 个字节（一个 int）
 ```
 
+
+`sizeof` 能给你这些宽度，不用写魔法数字（都是**编译期常量**，零运行时开销）：
+
+```python
+sizeof(int)        # 8    sizeof(int32)   # 4
+sizeof(int16)      # 2    sizeof(int8)    # 1
+sizeof(uint64)     # 8    sizeof(bool)    # 1
+sizeof(float)      # 8    sizeof(float32) # 4
+sizeof(ptr)        # 8    sizeof(ptr[float])  # 8
+sizeof(Point)      # 值类型 struct 的实际布局大小
+```
+
+于是上面的调用可以写成 `c.memcmp(xs, ys, len(xs) * sizeof(int))`，宽度跟着类型走，改类型不用改数字。
+
 这条**不会**在编译期报错 —— len() 的结果就是个 int，编译器无从判断它该被当成元素数还是字节数。
 写 C 调用时请把 * 8 / * 4 显式写出来，或者用 buffer（它的宽度是类型的一部分：8 字节的 buffer
 可以传 ptr[float]，4 字节的只能传裸 ptr）。

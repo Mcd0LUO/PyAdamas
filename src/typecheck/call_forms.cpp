@@ -87,6 +87,23 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
                 for (auto& arg : c.args) expr(*arg);
                 return n.id == "sizeof" ? t_int() : t_unknown();
             }
+            // 0.560：sizeof 也接受 C 类型名（sizeof(int32) / sizeof(ptr[float])），
+            // 让「传给 C 的字节数」不用写死魔法数字。
+            if (n.id == "sizeof") {
+                Expr* arg0 = c.args[0].get();
+                if (arg0->kind == ExprKind::Name) {
+                    auto& nm = static_cast<Name&>(*arg0);
+                    bool found = false;
+                    c_type_size(nm.id, &found);
+                    if (found) return t_int();
+                }
+                // ptr[T] 在类型系统里是 8 字节指针
+                if (arg0->kind == ExprKind::Subscript) {
+                    auto& sub = static_cast<Subscript&>(*arg0);
+                    if (auto* bn = dynamic_cast<Name*>(sub.value.get()); bn && bn->id == "ptr")
+                        return t_int();
+                }
+            }
             TypePtr at = expr(*c.args[0]);
             if (n.id == "sizeof") {
                 if (!at || at->kind != TyKind::Struct)

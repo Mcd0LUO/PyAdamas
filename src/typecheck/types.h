@@ -292,6 +292,29 @@ struct StructFieldInfo {
 
 // 值类型 struct 的布局。v1 只允许 int / float / bool 字段：
 // 分别对应 C 的 int64_t / double / _Bool，布局与 C 完全一致。
+// 0.560：sizeof(T) 的编译期字节数（只覆盖 C 互操作会用到的定宽类型）。
+// 8 字节：int/int64/uint64/float/ptr；4：int32/uint32/float32；2：16 位；1：8 位与 bool。
+inline int64_t c_type_size(const std::string& n, bool* found) {
+    struct Ent { const char* name; int64_t size; };
+    static const Ent table[] = {
+        {"int", 8},     {"int64", 8},   {"i64", 8},     {"uint64", 8},  {"u64", 8},
+        {"float", 8},   {"f64", 8},     {"float64", 8}, {"ptr", 8},
+        {"int32", 4},   {"i32", 4},     {"uint32", 4},  {"u32", 4},
+        {"float32", 4}, {"f32", 4},
+        {"int16", 2},   {"i16", 2},     {"uint16", 2},  {"u16", 2},
+        {"int8", 1},    {"i8", 1},      {"uint8", 1},   {"u8", 1},
+        {"bool", 1},    {"char", 1},
+    };
+    for (auto& e : table) {
+        if (n == e.name) {
+            if (found) *found = true;
+            return e.size;
+        }
+    }
+    if (found) *found = false;
+    return 0;
+}
+
 struct StructInfo {
     std::string name;
     // 同 ClassInfo::alive：StructInfo 由 TypeChecker::all_structs_ 拥有。
