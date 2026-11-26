@@ -112,9 +112,17 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             return t_unknown();
         ot = ot->sub[0];
     }
+    // 记下「这是类对象」这个事实（0.647）：下面是 `mod.C.x` 的接收者判定，
+    // is_class_receiver 只认裸 Name，跨模块的 `a2.C` 是 Attribute，会被当成
+    // 实例属性去查字段——字段在接口里有，于是按实例偏移在类对象上读槽，
+    // 静默给出 -1 / 空串（审计 A8-1）。
+    bool from_class_obj = false;
     if (ot->kind == TyKind::ClassObj) {
         if (a.attr == "__name__") return t_str();
-        if (!ot->sub.empty()) ot = ot->sub[0];
+        if (!ot->sub.empty()) {
+            ot = ot->sub[0];
+            from_class_obj = true;
+        }
     }
     if (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr) {
         const StructInfo* s = ot->st;
@@ -322,8 +330,8 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             return gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret
                                                    : t_unknown();
         }
-        if (is_class_receiver(a)) {
-            // 类接收者：`C.x` / `cls.x` 只可能是类属性或方法，
+        if (is_class_receiver(a) || from_class_obj) {
+            // 类接收者：`C.x` / `cls.x` / `mod.C.x` 只可能是类属性或方法，
             // 实例字段在类上不存在（同名时也不能被它挡住）。
             if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
             if (const MethodInfo* m = ot->cls->method(a.attr))
