@@ -96,7 +96,21 @@ void Lowerer::install_mi_thunks(const ClassInfoPtr& ci, int cid) {
         int start = entry.second;
         if (!base) continue;
         auto bcid = class_ids_.find(base);
-        if (bcid == class_ids_.end()) continue;
+        if (bcid == class_ids_.end()) {
+            // 导入的非主基类：拿不到它的 vtable，装不了 thunk。以前是静默 continue，
+            // 于是 `from mod import Base2; class Sub(Base1, Base2): ...` 里通过
+            // Sub 调 Base2 的方法会走未调整 self 的外部符号（静默错）。
+            // 该基类没有方法时不受影响；有方法就明确报不支持。
+            bool has_methods = false;
+            for (auto& m : base->methods)
+                if (m.kind == MethodKind::Normal && !m.decorated) has_methods = true;
+            if (has_methods)
+                err(0, 0,
+                    std::format("multiple-inheritance base '{}' is imported from another "
+                                "module; its methods cannot be re-based here yet",
+                                base->name));
+            continue;
+        }
         const auto& bvt = mod_.classes[static_cast<size_t>(bcid->second)].vtable;
         for (const MethodInfo& m : base->methods) {
             if (m.kind != MethodKind::Normal || m.decorated || m.slot < 0) continue;
