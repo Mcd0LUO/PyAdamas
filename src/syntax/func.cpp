@@ -42,6 +42,18 @@ ExprPtr Parser::parse_annotation_expr() {
     return e;
 }
 
+void Parser::skip_type_params() {
+    if (!check(Tok::LBRACKET)) return;
+    int depth = 0;
+    do {
+        if (check(Tok::LBRACKET)) ++depth;
+        else if (check(Tok::RBRACKET)) --depth;
+        else if (check(Tok::NEWLINE) || check(Tok::END))
+            throw err("unterminated type parameter list");
+        advance();
+    } while (depth > 0);
+}
+
 StmtPtr Parser::parse_funcdef(std::vector<ExprPtr> decorators, bool is_async) {
         int ln = cur().line, cl = cur().col;
         advance();  // def
@@ -49,6 +61,7 @@ StmtPtr Parser::parse_funcdef(std::vector<ExprPtr> decorators, bool is_async) {
         node->is_async = is_async;
         node->decorators = std::move(decorators);
         node->name = expect(Tok::NAME, "function name").text;
+        skip_type_params();  // PEP 695：def f[T](...) —— 类型参数擦除
         expect(Tok::LPAREN, "'(' after function name");
         node->args = parse_arguments();
         expect(Tok::RPAREN, "')' after parameters");
@@ -142,6 +155,7 @@ StmtPtr Parser::parse_classdef(std::vector<ExprPtr> decorators) {
         auto node = node_at<ClassDef>(ln, cl);
         node->decorators = std::move(decorators);
         node->name = expect(Tok::NAME, "class name").text;
+        skip_type_params();  // PEP 695：class C[T]: —— 类型参数擦除
         if (match(Tok::LPAREN)) {
             if (!check(Tok::RPAREN)) {
                 while (true) {

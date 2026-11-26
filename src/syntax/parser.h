@@ -39,6 +39,10 @@ public:
 
 private:
     std::vector<Token> toks_;
+    // 0.566：PEP 695 的 `[T]` / `[T: Bound, *Ts, **P]` 类型参数表 —— 我们做擦除，
+    // 解析后直接丢弃（泛型在 PyAdamas 里本来就是擦除的）。
+    void skip_type_params();
+    bool at_type_params() const { return check(Tok::LBRACKET); }
     size_t pos_ = 0;
     bool mentions_big_ = false;
     ExprPtr parse_annotation_expr();
