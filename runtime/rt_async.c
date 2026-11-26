@@ -146,12 +146,36 @@ void loop_ensure(void) {
 
 void ready_push(void* c) { pa_list_append(loop_ready, (int64_t)c, 2); }
 
+/* 0.652：就绪队列改成「头指针 + 批量压缩」。
+ *
+ * 原实现每次 pop 都把整个数组前移一格（memmove O(n)）：20000 个就绪任务、
+ * 40 万次切换时这是 85% 的总时间（perf：__memmove_evex_unaligned_erms）。
+ * 现在是 O(1) 取头，只在「头指针过半且 ≥1024」时压缩一次，均摊 O(1)。
+ *
+ * 已消费的槽位显式清零：loop_ready 本身是 GC 根，槽里留旧指针会让
+ * 已经调度过的任务被错误地保活到下一次压缩。清零不 dec —— 引用已经
+ * 转移给调用方（与原实现一致）。 */
+static int64_t ready_head;
+
 void* ready_pop(void) {
-    if (!loop_ready || loop_ready->len == 0) return NULL;
-    void* c = (void*)loop_ready->data[0];
-    memmove(&loop_ready->data[0], &loop_ready->data[1],
-            sizeof(int64_t) * (size_t)(loop_ready->len - 1));
-    loop_ready->len--;
+    if (!loop_ready || ready_head >= loop_ready->len) {
+        if (loop_ready) loop_ready->len = 0;
+        ready_head = 0;
+        return NULL;
+    }
+    void* c = (void*)loop_ready->data[ready_head];
+    loop_ready->data[ready_head] = 0;
+    ++ready_head;
+    if (ready_head >= loop_ready->len) {
+        loop_ready->len = 0;
+        ready_head = 0;
+    } else if (ready_head >= 1024 && ready_head * 2 >= loop_ready->len) {
+        int64_t rest = loop_ready->len - ready_head;
+        memmove(&loop_ready->data[0], &loop_ready->data[ready_head],
+                sizeof(int64_t) * (size_t)rest);
+        loop_ready->len = rest;
+        ready_head = 0;
+    }
     return c;
 }
 
@@ -167,7 +191,10 @@ void list_clear_owned(PyAdamasList* l) {
     if (!l) return;
     int64_t n = l->len;
     l->len = 0;
-    for (int64_t i = 0; i < n; ++i) pa_rc_dec((void*)l->data[i]);
+    for (int64_t i = 0; i < n; ++i) {
+        if (!l->data[i]) continue;  // 0.652：就绪队列的已消费槽位清零过
+        pa_rc_dec((void*)l->data[i]);
+    }
 }
 
 void* pending_take(void* w) {

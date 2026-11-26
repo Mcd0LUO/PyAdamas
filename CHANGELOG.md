@@ -6,6 +6,35 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.652] - 2026-11-27
+
+> perf(async)：**就绪队列 pop 从 O(n) 改 O(1)** —— 协程基准 `1.61 s → 0.18 s`（8.9×）。
+>
+> 复现（`/src/luo-proj/coroutine/pya/main.py`）：20000 个任务 × 20 次 `await sleep(0)`。
+>
+> perf 定位：**85.4% 的时间在 `__memmove_evex_unaligned_erms`**。
+>
+> ```c
+> void* ready_pop(void) {
+>     void* c = (void*)loop_ready->data[0];
+>     memmove(&loop_ready->data[0], &loop_ready->data[1],   // ← 每次 pop 前移整个数组
+>             sizeof(int64_t) * (size_t)(loop_ready->len - 1));
+>     loop_ready->len--;
+> }
+> ```
+>
+> 20000 个就绪任务时每次 pop 要搬 ~160KB，40 万次切换 = 数十 GB 的 memmove，
+>这正是「1 万任务 439 ms、2 万任务 1542 ms」超线性的来源。
+>
+> 改成**头指针 + 批量压缩**：O(1) 取头，只在「头指针过半且 ≥1024」时压缩一次（均摊 O(1)）。
+>已消费槽位显式清零（`loop_ready` 是 GC 根，留着旧指针会让调度过的任务被错误保活）；
+>清零不 `dec`，因为引用已转移给调用方（与原实现一致）；`list_clear_owned` 跳过 0 槽位。
+>
+> | 基准 | 修前 | 修后 | 对照 |
+> |---|---|---|---|
+> | coroutine 20K×20 | 1610–1620 ms | **180–190 ms** | Go 315–423 ms、CPython 691–834 ms |
+>
+> 套件 **595**；ASan（4 个 async 用例 + 协程基准本身）全部 `errors=0`。
 ## [0.651] - 2026-11-27
 
 > merge：edgefix 分支的三个**静默错值**修复（来自 `edgeprobe/REPORT.md`）。
