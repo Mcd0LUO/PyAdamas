@@ -6,6 +6,27 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.675] - 2026-11-27
+
+> docs：确认并记录一个对「怎么验证优化遍」很关键的事实——
+>**所有 IR 优化遍只在 `-O2` 跑**。
+>
+> ```c
+> // src/opt/opt.cpp:12
+> void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
+>     if (opt_level < 2) return;
+> ```
+>
+> 推论（三条，都影响测试策略）：
+>
+> 1. **`-O0` 与 `-O1` 的产物相同**（除了 `src/lower/` 里 2 处 `opt_level >= 2` 的门控，
+>    例如 SIMD min/max 也只在 -O2 开）；
+> 2. 因此 `tools/difftest.sh`（比对 `-O0` vs `-O2`）**覆盖了 `src/opt/` 的全部 25 个 pass**——
+>    任何 pass 改错语义都会在 difftest 里暴露成输出不一致；
+> 3. 反过来：**只在 `-O1` 与 `-O2` 之间才会出现的差异，现有测试抓不到**（因为 -O1 不跑 pass）。
+>    以后若要加「中间档」优化，必须同时加 `-O1` vs `-O2` 的对拍。
+>
+> 这条也解释了为什么今晚两轮 codegen 融合（0.666 / 0.667）都必须跑全量 difftest 而不是抽样。
 ## [0.674] - 2026-11-27
 
 > perf(memory)：**小 list 改用 4 槽内联块** —— gcbench RSS **47.8 MB → 41.4 MB（−12.8%）**，
