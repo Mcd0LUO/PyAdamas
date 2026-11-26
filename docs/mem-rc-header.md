@@ -22,8 +22,13 @@ int64_t marked;        // 8   标志位 **+ young 链表下标**
 ## 2. 开销占比（实测）
 
 gcbench cycles 200K：`Maximum resident` **47.8 MB**（3 次：47,800 / 47,868 / 47,804 KB）。
-每个 2 元素 list 的块构成：`header(64) + PyAdamasList(48) + data(32) = 144B`（glibc chunk 160）。
-头部占 **44%**。
+
+每个 2 元素 list 的块构成：`header(64) + PyAdamasList(48) + 内联缓冲(8×8=64) = 176B`
+（`PYADAMAS_LIST_INLINE_CAP` 是 **8**，见 `runtime/rt_internal.h:294`；glibc chunk ≈192）。
+头部占 **36%**；内联缓冲占 36%——两者相当。
+
+**推论**：把 `INLINE_CAP` 从 8 调到 4（2 元素 list 完全够用）能省 32B/对象 ≈ 6.4MB ≈ **RSS −13%**，
+代价是「超过 4 元素的小 list」要多一次 realloc。这条比压缩头更容易验证，已在单独的实验里量化。
 
 ## 3. 两个硬冲突（2026-11-28 复核）
 
