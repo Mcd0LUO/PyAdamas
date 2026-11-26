@@ -256,7 +256,49 @@ private:
             std::vector<StmtPtr> pre;
             desugar_stmt(*s, pre, class_body);
             for (auto& d : pre) out.push_back(std::move(d));
+            // 0.574：@global_enum 脱糖 —— 把类体里的成员名提升成模块级别名。
+            // 纯语法改写（不需要枚举知识）：class Day(Enum): MONDAY = 0 之后补一条
+            // MONDAY = Day.MONDAY，类型检查与降级都按普通赋值处理。
+            std::vector<StmtPtr> aliases;
+            if (s->kind == StmtKind::ClassDef) {
+                auto& cd = static_cast<ClassDef&>(*s);
+                bool ge = false;
+                for (auto& d : cd.decorators) {
+                    std::string dn;
+                    if (auto* nm = dynamic_cast<Name*>(d.get())) dn = nm->id;
+                    else if (auto* at = dynamic_cast<Attribute*>(d.get())) dn = at->attr;
+                    if (dn == "global_enum") ge = true;
+                }
+                if (ge) {
+                    for (auto& bs : cd.body) {
+                        if (bs->kind != StmtKind::Assign) continue;
+                        auto& as = static_cast<Assign&>(*bs);
+                        if (as.targets.size() != 1 || as.targets[0]->kind != ExprKind::Name)
+                            continue;
+                        auto& nm = static_cast<Name&>(*as.targets[0]);
+                        if (nm.id.starts_with("__")) continue;
+                        auto lhs = std::make_unique<Name>(nm.id);
+                        lhs->line = as.line;
+                        lhs->col = as.col;
+                        auto rhs_cls = std::make_unique<Name>(cd.name);
+                        rhs_cls->line = as.line;
+                        rhs_cls->col = as.col;
+                        auto attr = std::make_unique<Attribute>();
+                        attr->value = std::move(rhs_cls);
+                        attr->attr = nm.id;
+                        attr->line = as.line;
+                        attr->col = as.col;
+                        auto stmt = std::make_unique<Assign>();
+                        stmt->targets.push_back(std::move(lhs));
+                        stmt->value = std::move(attr);
+                        stmt->line = as.line;
+                        stmt->col = as.col;
+                        aliases.push_back(std::move(stmt));
+                    }
+                }
+            }
             out.push_back(std::move(s));
+            for (auto& a : aliases) out.push_back(std::move(a));
         }
         body = std::move(out);
     }
