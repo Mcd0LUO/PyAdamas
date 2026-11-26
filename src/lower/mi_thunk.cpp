@@ -110,6 +110,10 @@ void Lowerer::install_mi_thunks(const ClassInfoPtr& ci, int cid) {
             if (fidx < 0 || fidx >= static_cast<int>(mod_.funcs.size())) continue;
             // 槽里必须是该基类的真实实现（没被更靠前的类覆盖）。祖先布局里
             // 已经装过 thunk 的，先看 cur_f 是不是那个真实实现。
+            // 先确认槽里确实是该基类的真实实现（没被更靠前的类或本类覆盖），
+            // 再考虑复用祖先的 thunk。顺序反了的话，子类重写的方法会被祖先
+            // 那份 thunk 静默覆盖回旧实现。
+            if (cur_f != fidx) continue;
             auto rit = reuse.find(m.slot);
             if (rit != reuse.end()) {
                 vt[static_cast<size_t>(m.slot)] = rit->second;
@@ -121,7 +125,6 @@ void Lowerer::install_mi_thunks(const ClassInfoPtr& ci, int cid) {
                              fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size())
                                  ? mod_.funcs[static_cast<size_t>(fidx)]->env_slot
                                  : -99);
-            if (cur_f != fidx) continue;
             const IRFunction* callee = mod_.funcs[static_cast<size_t>(fidx)].get();
             if (!callee || callee->env_slot >= 0) continue;
             vt[static_cast<size_t>(m.slot)] = build_mi_thunk(fidx, 8 * start);
