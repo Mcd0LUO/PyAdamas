@@ -1,5 +1,6 @@
 // lower/class.cpp —— 类属性、类定义与构造包装
 #include "lower/impl.h"
+#include <algorithm>
 #include <cstdio>
 
 #include "opt/opt.h"
@@ -110,6 +111,10 @@ VReg Lowerer::class_attr_load_dyn(VReg obj, const ClassInfo* stat, const ClassAt
         if (kca->owner == ca->owner && !k->cowed_attrs.count(ca->name)) continue;
         overrides.push_back({k, kca});
     }
+    // classes_ 是 unordered_map：不排序的话，类属性动态派发的 if-链顺序随哈希桶变化，
+    // 生成的代码会因此漂移（difftest 曾在跨 TU 时抓到过同类问题）。
+    std::sort(overrides.begin(), overrides.end(),
+              [](const auto& a, const auto& b) { return a.first->name < b.first->name; });
     if (overrides.empty()) return class_attr_load(stat, ca);
 
     int tmp = new_borrow_slot(ca->ty);
