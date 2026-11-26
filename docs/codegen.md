@@ -639,7 +639,7 @@ done:
 
 ```bash
 ./build/dev/pyadamas asm script.py            # 看生成的汇编，带 IR 注释
-PYADAMAS_KEEP_ASM=1 ./build/dev/pyadamas run x.py # 保留中间 .s
+ls build/<preset>/modcache/*/mod.s             # 中间 .s 在模块缓存里（键 = 模块名+版本+源码哈希）
 ./build/dev/pyadamas build x.py -o x && gdb ./x
 objdump -d --no-show-raw-insn ./x | less
 ```

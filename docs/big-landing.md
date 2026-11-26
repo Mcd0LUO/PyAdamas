@@ -57,7 +57,7 @@
 
 ## 实测闸门
 
-稳定候选：本树 `build/pyadamas`、`build/rt.o`、`build/rt_asan.o`。以下命令在 `/tmp/wt-big2` 运行；全套顺序执行，避免固定端口的网络用例相互干扰。
+稳定候选：本树 `build/pyadamas`、`build/rt.o`、`build/rt_asan.o`（0.357 当时的构建目录；**现在**的构建产物在 `build/<preset>/`，如 `build/lead/pyadamas`，见 [HANDOFF.md](HANDOFF.md)）。以下命令在 `/tmp/wt-big2` 运行；全套顺序执行，避免固定端口的网络用例相互干扰。
 
 | 检查 | 实测 |
 |---|---|

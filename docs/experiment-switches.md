@@ -1,4 +1,4 @@
-# 实验开关结账表（0.481）
+# 实验开关结账表（0.481 起；表内最新条目 0.531）
 
 > 2026-11-24 收尾（[next-round-plan.md](next-round-plan.md) §8.2-3）。每个开关只允许三种结论：
 > **默认开** / **保持 opt-in**（写清理由与触发条件）/ **删代码**。本表是唯一清单：
@@ -17,7 +17,7 @@
 | `PYADAMAS_LOOP_OPT` | **3**（默认开：bit0 跳转线程化 + bit1 仿射 BCE） | `main.cpp`；`1`→3、`0`→0、数字掩码 4–7 开发期 A/B | **默认开（现状）** | bit0 纯 CFG 等价变换（nqueens −2.9%，其余中性；含单块直线循环体的函数由 pass 内部跳过，避免破坏向量化）；bit1 仿射 BCE。**bit2（同块 load 去重）实测负收益**，只能显式掩码开。`docs/intloop-design.md` §2 |
 | `PYADAMAS_BORROW_OPT` | **关** | `main.cpp`（`prog.borrow_opt`；manifest 行 `borrowopt`） | **保持 opt-in** | 命中即纯赢、不命中 asm 逐字节不变：12 基准里 obj_dispatch 300.59→202.24 ms（**−32.7%**，指令数 −43.2%）、dict_wordfreq −6.5%、sort_struct −2.6%，其余 15 例产物不变。**但日常语料没有可测收益**：`bench/daily` 23 例（其中 5 例命中借用）BURST=20 × 15 轮聚合 **−0.1%**（全在 ±1% 噪声带内；`bench/daily` 的命中用例都 <30ms）。命中 5 例：a5_todo_cli / b1_log_parse / b2_normalize / b3_template / b5_re_extract。**缺的证据**：①一个 ≥100ms、借用能命中的真实语料用例，测得 ≥2% 且 p25 同向；②或 3 倍长的日常语料集上聚合越过 ±1% 噪声带。在此之前默认化 = 用所有权正确性风险换一个量不出来的收益。`docs/borrow-loop-design.md` §8/§9 |
 | `PYADAMAS_VECT` | **开** | `main.cpp`；`PYADAMAS_VECT=0` 显式关；manifest 行 `vect` | **默认开（现状）** | 5/12 基准命中：matmul −86.5%、spectral_norm −59.6%、sieve −51.9%、nbody −45.2%、mandelbrot −36.3%（masked）；其余 7 个 0 标记，已判负归档（`docs/vectorization-coverage.md` §10） |
-| `PYADAMAS_TYPE_TAGS` | **关** | `main.cpp`（`prog.type_tags`；manifest 行 `typetags`）；`LANG_GAPS=1` 会强制打开 | **保持 opt-in** | 这是**语义**开关不是性能开关：unknown 值追加 NONE/BOOL/精确堆子类，解锁 `isinstance`/`repr`/`pprint`（`docs/numeric-types-design.md` §2）。默认关 = 保持 0.340 以来的表示与产物不变。**触发**：P4 语义默认化（异常类当值 / file 协议 / dataclass）整批评估时一起翻默认值 |
+| `PYADAMAS_TYPE_TAGS` | **按需自动开**（不设环境变量时，源码出现 `isinstance` 就开；`=1` 强制开、`=0` 强制关） | `main.cpp`（`prog.type_tags`；manifest 行 `typetags`）+ `driver/program_opts.cpp` 的 `program_wants_type_tags()`；`LANG_GAPS=1` 会强制打开 | **默认开（按需）** | 0.528 起默认开。这是**语义**开关不是性能开关：unknown 值追加 NONE/BOOL/精确堆子类，解锁 `isinstance`/`repr`/`pprint`（`docs/numeric-types-design.md` §2）。关着时 `isinstance(x, int/bool/bytes)` 对动态值是**静默错值**（只有 str/list/dict/float 有探针）；全量强制开又给每个 unknown 值多一个 tag 字（`src/main.cpp` 注释记 12 基准 matmul +660%、spectral_norm +148%），所以折中成「按需开 + 显式逃生口」 |
 | `PYADAMAS_GC_INCR_MARK` | **关** | 运行时 `runtime/rt_core.c`（`pa_gc_init` 读一次缓存） | **保持 opt-in** | GC 并发化阶段1 原型：major 走分片标记 + Yuasa 删除屏障 + 门控插入屏障。默认关时行为/asm/leak **逐字不变**；0.444 修过它开启后的 shutdown UAF。没有性能数字（原型不追性能）。**触发**：GC 阶段2（并发标记）立项时整体评估 |
 | ~~`PYADAMAS_SIMD`~~ | **已删除（0.480）** | `main.cpp`：残留报错（rc=2） | **删代码（已完成）** | 特化模板对当前 IR 全部失配（12 基准 asm 零 `SIMD` 标记、指令数与关掉向量化逐位相同）→ 1304 → 149 行，默认产物逐字节不变。`docs/simd-vectorization-design.md` 顶部 |
 

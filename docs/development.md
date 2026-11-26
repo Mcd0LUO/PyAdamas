@@ -238,7 +238,7 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 | 推断出的顶层类型 | `pyadamas types x.py` |
 | 降级后的 IR | `pyadamas ir x.py` |
 | 生成的汇编 | `pyadamas asm x.py` |
-| 保留中间 `.s` | `PYADAMAS_KEEP_ASM=1 pyadamas run x.py` |
+| 保留中间 `.s` | `ls build/<preset>/modcache/*/mod.s`（模块缓存目录；`PYADAMAS_CACHE_DIR` 可改缓存根） |
 | 单步调试生成程序 | `pyadamas build x.py -o x && gdb ./x` |
 | 地址 → 源码行 | `addr2line -e x -f <addr>`（`build` 默认带 DWARF 行号） |
 | 查看 DWARF 行号表 | `readelf --debug-dump=decodedline x` |

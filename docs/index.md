@@ -24,7 +24,7 @@
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
 | [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？第三层 / 块级分裂为什么被判负？全局提升为何最终以「入口私有标量全局」落地？ | `src/backend/regalloc.cpp` |
 | [experiment-switches.md](experiment-switches.md) | **实验开关结账表**：每个开关的默认值、结论（默认开/保持 opt-in/删代码）、证据与触发条件；A/B 工具 `tools/flagbench.sh` 的用法 | `src/main.cpp`、`runtime/rt_core.c` |
-| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：当前 5/12 命中（含 masked）、剩余 7 个的逐条判负与前置清单 | `backend/vect*.cpp`、`backend/masked.cpp` |
+| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：当前 5/12 命中（含 masked）、7 个 0 触发基准各自的第一道拒绝门（IR 证据）与逐条判负 | `backend/vect*.cpp`、`backend/masked.cpp`、`src/opt/vect_planner_loop.cpp` |
 | [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/backend/regalloc.cpp` |
 | [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt/loop.cpp` |
 | [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower/impl_slots.cpp` `runtime/rt_core.c` |
@@ -32,7 +32,6 @@
 | [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower/builtin.cpp` |
 | [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver/build.cpp` |
 | [nightly-summary.md](nightly-summary.md) | 2026-11-22/23 夜间迭代 + 白天语义审计的总账：模块化、性能两张表、向量化覆盖、bug 清单、剩余工作 | — |
-| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：哪些基准/循环触发、8 个 0 触发基准各自的第一道拒绝门（IR 证据） | `src/opt/vect_planner_loop.cpp` `src/backend/vect.cpp` |
 | [big-landing.md](big-landing.md) | 定宽大整数 `big` 怎么落地？静态/动态接入与剩余缺口 | `src/typecheck/` `runtime/rt_big.c` |
 | [testing.md](testing.md) | 全闸门怎么跑：checkall 三种模式、并行度、性能基线与并发安全 | `tools/checkall.sh` `tests/` |
 | [next-round-plan.md](next-round-plan.md) | 下一阶段（0.471 起）路线图：P0/P1/P2 的验收标准与每轮闸门 | — |
@@ -144,9 +143,9 @@
 | 体积 | `bash tests/check_size.sh` | **仍失败**：`src/typecheck/typecheck.cpp` 1227、`src/cimport/cdecl_parse.cpp` 1271（>1200） |
 | 内存（**默认不跑**） | 见 [semantics-audit-playbook.md §13](semantics-audit-playbook.md) | 仅当改动触及 `runtime/` 内存路径或 lowering 所有权时**定点**跑，且用过滤器 + `JOBS=16` |
 
-性能与能力的当前口径见 [nightly-summary.md](nightly-summary.md)：12 个经典基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 一致
+性能与能力的 **0.470 口径**见 [nightly-summary.md](nightly-summary.md)：12 个经典基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 一致
 （nbody 109,040,119 条 ≈ −45.31%、spectral_norm 94,637,438 ≈ −61.75%、sieve −8.58%、matmul −4.52%，相对夜间/0.418 基线），
-向量化覆盖 **4 个基准 / 9 个循环**（matmul、spectral_norm、nbody、sieve），其余 8 个基准的阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)。
+向量化覆盖 **4 个基准 / 9 个循环**（matmul、spectral_norm、nbody、sieve），其余 8 个基准的阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)（这是 0.470 的数字；该文档 §0 的 0.479 收尾口径已是 5/12 命中、7 个 0 触发）。
 
 剩余主要缺口（与 [next-round-plan.md](next-round-plan.md) 对齐）：8 个基准的向量化（masked 向量化 / 嵌套循环 / 调用屏障）、装饰后的 `__iter__`（内建迭代路径不查类属性包装函数）、未初始化变量读取返回 0（需哨兵/数据流分析）、
 P4 删特化（spectral_norm 仍约 1.13× 依赖特化）、asyncio 边角、异常对象 traceback/列号/`.debug_info`、字符串码点语义 S3、
