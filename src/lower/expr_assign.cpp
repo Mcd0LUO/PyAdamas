@@ -1,4 +1,5 @@
 // lower/expr_assign.cpp —— 赋值目标与表达式主分派
+#include <cstdio>
 #include "lower/impl.h"
 
 namespace pyadamas {
@@ -432,6 +433,15 @@ VReg Lowerer::expr(Expr& e) {
                 auto cid = class_ids_.find(st_->class_self_ty);
                 VReg raw = const_int(cid == class_ids_.end() ? 0 : cid->second);
                 return retype(raw, mk_class(const_cast<ClassInfo*>(st_->class_self_ty)));
+            }
+            // 0.578：类体求值表（栈顶那层）——带标注的类体赋值是字段，
+            // 不在 class_body_attrs 里，必须先在这里命中。
+            if (!st_->class_body_vals.empty()) {
+                auto& top = st_->class_body_vals.back();
+                if (auto it = top.find(n.id); it != top.end()) {
+                    if (ir_is_heap(vreg_ty(it->second))) rc_inc(it->second);
+                    return it->second;
+                }
             }
             if (int cs = comp_slot(n.id); cs >= 0)
                 return load_slot(cs, st_->fn->slot_ty[cs]);

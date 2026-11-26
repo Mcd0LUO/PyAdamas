@@ -449,6 +449,13 @@ void relocate_early_fin_blocks(IRFunction& fn, FuncCtx& st) {
 
 int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label,
                                    const ClassInfo* owner) {
+    struct CbvGuard {
+        std::vector<std::unordered_map<std::string, VReg>>& v;
+        explicit CbvGuard(std::vector<std::unordered_map<std::string, VReg>>& s) : v(s) {
+            v.emplace_back();
+        }
+        ~CbvGuard() { v.pop_back(); }
+    } cbv_guard(st_->class_body_vals);
     if (f.is_async) {
         int kind = (info && info->is_async_generator) ? 2 : 1;
         return compile_suspendable_function(f, info, label, kind, owner);

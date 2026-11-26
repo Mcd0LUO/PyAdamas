@@ -183,6 +183,8 @@ struct FuncCtx {
     // 类体命名空间：类属性名 → 隐藏全局下标。只在降级类体语句时非空，
     // 让 `y = x + 1` 里的 x 解析到前面定义的类属性。
     std::unordered_map<std::string, int> class_body_attrs;
+    // 类体求值表（分层）：类体/函数体各一层，避免同名嵌套串帧。
+    std::vector<std::unordered_map<std::string, VReg>> class_body_vals;
     // for k in range(len(a))：循环体里 a[k] 天然在界内。body 里一旦给 a/k
     // 赋值（写槽）就作废；调用等副作用由 side_effect_seq_ 统一挡。
     struct BoundsHint {

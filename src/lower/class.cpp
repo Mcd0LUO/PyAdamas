@@ -404,6 +404,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
 
     // 类体里的非声明语句：在类定义点执行。普通赋值是类属性，写进隐藏
     // 全局（方法体里读到的也是这一份）；其余语句仍然按模块全局处理。
+    st_->class_body_vals.emplace_back();  // 0.578：类体一层
     st_->class_body_attrs.clear();
     for (auto& s : c.body) {
         // 方法别名（`__str__ = short`）：类型检查阶段已经建成「共享实现的
@@ -483,7 +484,20 @@ void Lowerer::lower_classdef(ClassDef& c) {
             class_attr_store(ci.get(), ca, cur, cur_ty);
             continue;
         }
-        if (s->kind == StmtKind::AnnAssign || s->kind == StmtKind::Pass) continue;
+        if (s->kind == StmtKind::AnnAssign) {
+            auto& a = static_cast<AnnAssign&>(*s);
+            if (a.value && a.target->kind == ExprKind::Name) {
+                auto& nm = static_cast<Name&>(*a.target);
+                VReg v = expr(*a.value);
+                TypePtr vt = tc_.type_of(a.value.get());
+                if (!st_->class_body_vals.empty()) st_->class_body_vals.back()[nm.id] = v;
+                if (const ClassAttrInfo* ca = ci->class_attr(nm.id);
+                    ca && ca->owner == ci.get())
+                    class_attr_store(ci.get(), ca, v, vt);
+            }
+            continue;
+        }
+        if (s->kind == StmtKind::Pass) continue;
         if (s->kind == StmtKind::Expr) {
             auto& e = static_cast<ExprStmt&>(*s);
             if (e.value->kind == ExprKind::Constant &&
@@ -523,9 +537,12 @@ void Lowerer::lower_classdef(ClassDef& c) {
                             continue;
                         }
                     }
+                    VReg v = expr(*as.value);
+                    TypePtr vt = tc_.type_of(as.value.get());
                     st_->class_body_attrs[nm.id] = class_attr_slot(ci.get(), ca);
-                    class_attr_store(ci.get(), ca, expr(*as.value),
-                                     tc_.type_of(as.value.get()));
+                    if (!st_->class_body_vals.empty())
+                        st_->class_body_vals.back()[nm.id] = v;
+                    class_attr_store(ci.get(), ca, v, vt);
                     continue;
                 }
             }
@@ -533,6 +550,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
         stmt(*s);
     }
     st_->class_body_attrs.clear();
+    if (!st_->class_body_vals.empty()) st_->class_body_vals.pop_back();
 
     if (need_class_obj) {
         TypePtr cls_ty = mk_class(ci.get());
