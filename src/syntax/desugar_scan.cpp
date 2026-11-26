@@ -68,12 +68,88 @@ bool body_binds(const std::vector<StmtPtr>& body, const std::string& n) {
     return false;
 }
 
+static bool pattern_binds(const Pattern* p, const std::string& n) {
+    if (!p) return false;
+    if ((p->kind == PatternKind::Capture || p->kind == PatternKind::As) && p->name == n)
+        return true;
+    if (!p->rest.empty() && p->rest == n) return true;
+    for (auto& it : p->items)
+        if (pattern_binds(it.get(), n)) return true;
+    for (auto& kv : p->pairs)
+        if (pattern_binds(kv.second.get(), n)) return true;
+    for (auto& sp : p->positional)
+        if (pattern_binds(sp.get(), n)) return true;
+    for (auto& a : p->attrs)
+        if (pattern_binds(a.second.get(), n)) return true;
+    return false;
+}
+
+// 表达式里是否出现了绑定 n 的海象运算符（0.637）。
+// stmt_binds 只看语句结构，walrus 藏在任意表达式位置，这里递归扫常见的
+// 容器节点；扫不到的形态最多是"漏判成内建"，不会误判。
+static bool expr_binds(const Expr* e, const std::string& n) {
+    if (!e) return false;
+    switch (e->kind) {
+        case ExprKind::NamedExpr: {
+            auto& x = static_cast<const NamedExpr&>(*e);
+            if (x.target && x.target->kind == ExprKind::Name &&
+                static_cast<const Name&>(*x.target).id == n)
+                return true;
+            return expr_binds(x.value.get(), n);
+        }
+        case ExprKind::Call: {
+            auto& c = static_cast<const Call&>(*e);
+            if (expr_binds(c.func.get(), n)) return true;
+            for (auto& a : c.args)
+                if (expr_binds(a.get(), n)) return true;
+            for (auto& k : c.keywords)
+                if (expr_binds(k.value.get(), n)) return true;
+            return false;
+        }
+        case ExprKind::BinOp: {
+            auto& b = static_cast<const BinOp&>(*e);
+            return expr_binds(b.left.get(), n) || expr_binds(b.right.get(), n);
+        }
+        case ExprKind::UnaryOp:
+            return expr_binds(static_cast<const UnaryOp&>(*e).operand.get(), n);
+        case ExprKind::BoolOp: {
+            for (auto& v : static_cast<const BoolOp&>(*e).values)
+                if (expr_binds(v.get(), n)) return true;
+            return false;
+        }
+        case ExprKind::Compare: {
+            auto& c = static_cast<const Compare&>(*e);
+            if (expr_binds(c.left.get(), n)) return true;
+            for (auto& r : c.comparators)
+                if (expr_binds(r.get(), n)) return true;
+            return false;
+        }
+        case ExprKind::Subscript: {
+            auto& s = static_cast<const Subscript&>(*e);
+            return expr_binds(s.value.get(), n) || expr_binds(s.slice.get(), n);
+        }
+        case ExprKind::Attribute:
+            return expr_binds(static_cast<const Attribute&>(*e).value.get(), n);
+        case ExprKind::IfExp: {
+            auto& i = static_cast<const IfExp&>(*e);
+            return expr_binds(i.test.get(), n) || expr_binds(i.body.get(), n) ||
+                   expr_binds(i.orelse.get(), n);
+        }
+        case ExprKind::Lambda:
+            return expr_binds(static_cast<const Lambda&>(*e).body.get(), n);
+        case ExprKind::Starred:
+            return expr_binds(static_cast<const Starred&>(*e).value.get(), n);
+        default: return false;
+    }
+}
+
 bool stmt_binds(const Stmt& s, const std::string& n) {
     switch (s.kind) {
         case StmtKind::Assign: {
             auto& a = static_cast<const Assign&>(s);
             for (auto& t : a.targets)
                 if (target_binds(t.get(), n)) return true;
+            if (expr_binds(static_cast<const Assign&>(s).value.get(), n)) return true;
             return false;
         }
         case StmtKind::AnnAssign:
@@ -87,6 +163,7 @@ bool stmt_binds(const Stmt& s, const std::string& n) {
         }
         case StmtKind::While: {
             auto& w = static_cast<const While&>(s);
+            if (expr_binds(w.cond.get(), n)) return true;
             return body_binds(w.body, n) || body_binds(w.orelse, n);
         }
         case StmtKind::If: {
@@ -141,9 +218,27 @@ bool stmt_binds(const Stmt& s, const std::string& n) {
             return false;
         }
         case StmtKind::Match: {
-            for (auto& c : static_cast<const Match&>(s).cases)
+            auto& m = static_cast<const Match&>(s);
+            if (expr_binds(m.subject.get(), n)) return true;
+            for (auto& c : m.cases) {
+                // 模式里的捕获（case [a, *rest] / case _ as filter）也是当前作用域的绑定。
+                if (pattern_binds(c.pattern.get(), n)) return true;
+                if (expr_binds(c.guard.get(), n)) return true;
                 if (body_binds(c.body, n)) return true;
+            }
             return false;
+        }
+        case StmtKind::Delete: {
+            // 函数里 del x 同样让 x 成为局部名。
+            for (auto& t : static_cast<const Delete&>(s).targets)
+                if (target_binds(t.get(), n)) return true;
+            return false;
+        }
+        case StmtKind::Expr:
+            return expr_binds(static_cast<const ExprStmt&>(s).value.get(), n);
+        case StmtKind::Return: {
+            auto* rv = static_cast<const Return&>(s).value.get();
+            return rv ? expr_binds(rv, n) : false;
         }
         default: return false;
     }
