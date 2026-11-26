@@ -1735,6 +1735,26 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 
 
 
+
+`.cpya` 里声明的 C struct 可以直接**构造**，值语义与 C 布局：
+
+```python
+cimport szstruct as c
+
+p = c.pair(3.0, 4.0)    # 按字段顺序；只写前几个也行
+q = c.pair()            # 全 0
+print(p.a, sizeof(p))   # 3.0 16
+```
+
+C 的头文件里那种**数组类型的全局变量**（`extern char *tzname[2]`）用 `array[ptr, N]` 声明，
+取到的是**符号地址**（C 里数组名本来就退化成 `&arr[0]`）：
+
+```python
+# 在 .cpya 里：
+#   arr_values: array[ptr, 3]
+print(c.arr_values)     # 和 C 侧取到的地址一致，可以当 char** 之类传给别的 C 函数
+```
+
 ### 字节数 vs 元素数：C 函数只认字节
 
 所有 C 函数的 size/length 参数都是**字节数**，PyAdamas 不会替你乘元素宽度（它也猜不出 C 侧怎么解释）：

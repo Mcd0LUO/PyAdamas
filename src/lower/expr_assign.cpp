@@ -568,6 +568,7 @@ VReg Lowerer::expr(Expr& e) {
                         Inst in;
                         in.op = IrOp::LoadExtern;
                         in.idx = Operand::ext(vidx);
+                        in.imm = v.addr_of ? 1 : 0;  // 0.562：数组变量取符号地址
                         in.ty = vt;
                         return def_heap(vt, std::move(in));
                     }

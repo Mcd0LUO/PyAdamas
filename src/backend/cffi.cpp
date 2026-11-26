@@ -373,6 +373,12 @@ void AsmGen::gen_load_extern(const Inst& in) {
         const IRExternVar& v = m_->extern_vars[static_cast<size_t>(in.idx)];
         const std::string dst = dst_op(in.dst);
         const std::string sym = v.symbol + "(%rip)";
+        // 0.562：array[ptr, N] 声明的 extern 变量 —— 取符号地址（C 数组名退化）。
+        if (in.imm == 1) {
+            line(std::format("leaq {}(%rip), %rax", v.symbol));
+            move_to(dst, "%rax");
+            return;
+        }
         switch (v.kind) {
             case CKind::Float:
                 line("movsd " + sym + ", %xmm0");

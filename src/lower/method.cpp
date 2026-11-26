@@ -681,6 +681,14 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     for (auto& e : decl->externs)
         if (e.py_name == at.attr) ex = &e;
     if (!ex) {
+        // 0.562：.cpya 的 C struct 构造（c.pair() / c.pair(1.0, 2.0)）：
+        // 值语义 + C 布局，直接复用值类型 struct 的构造路径。
+        for (auto& cs : decl->structs) {
+            if (cs.name != at.attr) continue;
+            if (StructInfo* st = tc_.struct_info(cs.name))
+                return lower_struct_construct(c, st);
+            break;
+        }
         err(c.line, c.col,
             std::format("cimport '{}' has no function '{}'", n->id, at.attr));
         return const_none();

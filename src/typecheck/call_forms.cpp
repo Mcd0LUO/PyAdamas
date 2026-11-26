@@ -259,6 +259,27 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                                 check_cb(kw.value.get(), x.params[i]);
                     return rt;
                 }
+                // 0.562：.cpya 的 C struct 构造：c.pair() / c.pair(1.0, 2.0)。
+                for (auto& cs : cd->structs) {
+                    if (cs.name != a.attr) continue;
+                    StructInfo* st = struct_info(cs.name);
+                    if (!st) break;
+                    for (size_t i = 0; i < c.args.size() && i < st->fields.size(); ++i) {
+                        // 先类型检查实参（否则 type_of 全是 unknown，降级会走通用的
+                        // pa_any_to_f64，把 double 的位模式当整数换成 4.6e18）。
+                        TypePtr at = expr(*c.args[i]);
+                        if (at && at->kind != TyKind::Unknown &&
+                            st->fields[i].ty && st->fields[i].ty->kind != TyKind::Unknown &&
+                            !assignable(st->fields[i].ty, at))
+                            err(c.args[i]->line, c.args[i]->col,
+                                std::format("field '{}' of C struct '{}' expects '{}', got '{}'",
+                                            st->fields[i].name, st->name,
+                                            type_name(st->fields[i].ty), type_name(at)));
+                    }
+                    for (size_t i = st->fields.size(); i < c.args.size(); ++i) expr(*c.args[i]);
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return mk_struct(st);
+                }
                 err(c.line, c.col,
                     std::format("cimport '{}' has no function '{}'", vn->id, a.attr));
                 for (auto& arg : c.args) expr(*arg);

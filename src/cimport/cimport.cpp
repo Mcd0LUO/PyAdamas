@@ -652,8 +652,20 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     if (!aa.annotation)
                         pydecl::fail(aa.line, std::format("'{}' needs a type annotation", pyname));
                     std::string why;
-                    auto ct = ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
-                    if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
+                    // 0.562：array[ptr, N] —— 数组类型的 extern 变量，不做 C 类型解析，
+                    // 直接暴露符号地址（ptr）。C 里数组名本来就退化成 &arr[0]。
+                    bool is_array_var = false;
+                    if (auto* sub = dynamic_cast<const Subscript*>(aa.annotation.get()))
+                        if (auto* bn = dynamic_cast<const Name*>(sub->value.get());
+                            bn && bn->id == "array")
+                            is_array_var = true;
+                    std::optional<CTypeRef> ct;
+                    if (is_array_var) {
+                        ct = CTypeRef{CKind::Ptr};
+                    } else {
+                        ct = ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
+                        if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
+                    }
                     // extern var：无值，或值是一个 extern_var("c_name") 调用。
                     std::string var_symbol = pyname;
                     bool is_var = !aa.value;
@@ -679,11 +691,21 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     if (is_var) {
                         if (ct->kind == CKind::Callback)
                             pydecl::fail(aa.line, "callback type is not supported for extern var");
-                        if (!ct->dims.empty())
+                        // 0.562：array[T, N] —— 数组类型的 extern 变量，暴露成符号地址（ptr）。
+                        // C 里数组名本来就退化成一个指向首元素的指针，语义一致。
+                        bool addr_of = false;
+                        if (auto* sub = dynamic_cast<const pyadamas::Subscript*>(aa.annotation.get())) {
+                            if (auto* bn = dynamic_cast<const pyadamas::Name*>(sub->value.get());
+                                bn && bn->id == "array") {
+                                addr_of = true;
+                            }
+                        }
+                        if (!addr_of && !ct->dims.empty())
                             pydecl::fail(aa.line,
                                          std::format("array-typed extern var '{}' is not "
-                                                     "supported (use ptr[{}] and index it)",
-                                                     pyname, pydecl::annotation_base_name(aa.annotation.get())));
+                                                     "supported (declare it as array[ptr, N] "
+                                                     "to expose the symbol address)",
+                                                     pyname));
                         if (ct->kind == CKind::Struct)
                             pydecl::fail(aa.line,
                                          std::format("struct/union variable '{}' must be declared "
@@ -696,6 +718,8 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                         cv.kind = ct->kind;
                         cv.struct_name = ct->stname;
                         cv.elem = ct->elem;
+                        cv.addr_of = addr_of;
+                        if (addr_of) cv.kind = CKind::Ptr;
                         decl.vars.push_back(std::move(cv));
                         break;
                     }

@@ -109,6 +109,9 @@ struct CVar {
     std::string struct_name;
     // ptr[T] 的标量元素种类（用于解引用）。
     CKind elem = CKind::None;
+    // 0.562：数组类型的 extern 变量（char *tzname[2]）—— 取**符号地址**而不是读值。
+    // C 里数组名本来就退化成 &arr[0]，所以这里语义与 C 一致。
+    bool addr_of = false;
 };
 
 struct CConst {

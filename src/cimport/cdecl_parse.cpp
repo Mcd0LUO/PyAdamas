@@ -917,8 +917,20 @@ struct Cdecl {
                 continue;
             }
             if (array) {
-                warn(d[0], std::format("skipped array variable '{}'", name));
-                ++skipped;
+                // 0.562：数组变量 -> array[ptr, N]（暴露符号地址，C 数组名退化语义）。
+                // 长度只是文档信息，访问靠调用方按元素类型自己索引。
+                int64_t n = 0;
+                for (size_t q = j; q < ve; ++q) {
+                    if (!(d[q].k == Tok::Punc && d[q].s == "[")) continue;
+                    size_t close = find_matching(d, q, "[", "]");
+                    if (close >= ve) break;
+                    if (auto v = eval_const(d, q + 1, close, macro_env)) n = *v;
+                    break;
+                }
+                if (n <= 0) n = 1;
+                vars.push_back(std::format("{}: array[ptr, {}]", name,
+                                           static_cast<long long>(n)));
+                emitted_names.insert(name);
                 continue;
             }
             if (!by_value_known(t)) {
