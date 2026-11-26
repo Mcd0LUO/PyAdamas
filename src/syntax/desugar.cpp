@@ -17,6 +17,7 @@
 // 每次执行都创建新的闭包。类体里的 `f = lambda self, ...: ...` 在脱糖阶段
 // 改写成方法定义；类体字段默认值里的 lambda 与类体生成器表达式仍不展开
 // （后者按 list 构造）。
+#include <unordered_set>
 #include "syntax/desugar_fold.h"
 #include "syntax/desugar.h"
 
@@ -248,6 +249,7 @@ private:
         return true;
     }
 
+    int dec_tmp_seq_ = 0;  // 0.575：装饰器临时名序号
     void desugar_body(std::vector<StmtPtr>& body, bool class_body) {
         std::vector<StmtPtr> out;
         out.reserve(body.size());
@@ -260,6 +262,72 @@ private:
             // 纯语法改写（不需要枚举知识）：class Day(Enum): MONDAY = 0 之后补一条
             // MONDAY = Day.MONDAY，类型检查与降级都按普通赋值处理。
             std::vector<StmtPtr> aliases;
+            // 0.575：未知装饰器脱糖成 `f = deco(f)`，**从下往上**（源码顺序的逆序）。
+            // 参数化装饰器先求值到临时名，保证表达式只求值一次。
+            if (!class_body && s->kind == StmtKind::FunctionDef) {
+                auto& fd = static_cast<FunctionDef&>(*s);
+                static const std::unordered_set<std::string> known = {
+                    "staticmethod", "classmethod",  "property",      "setter",
+                    "getter",       "deleter",      "dataclass",     "abstractmethod",
+                    "override",     "final",        "global_enum",   "global_str",
+                    "member",       "unique",       "wraps",         "lru_cache",
+                    "cache",        "contextmanager", "cached_property",
+                    "total_ordering", "no_type_check", "flag",       "nonmember",
+                    "overload",      "runtime_checkable", "singledispatch",
+                    "singledispatchmethod", "dataclass_transform", "deprecated",
+                    "type_check_only", "sealed",      "coroutine",     "enum",
+                };
+                std::vector<ExprPtr> unknown_decs;
+                for (auto& d : fd.decorators) {
+                    // 只对**简单名字**装饰器（@deco）脱糖：带参/属性形式维持既有行为，
+                    // 避免把 @functools.xxx(...) 这类表达式从装饰器位置挪走。
+                    if (d->kind != ExprKind::Name) {
+                        if (d->kind == ExprKind::Attribute) {
+                            std::string an = static_cast<Attribute&>(*d).attr;
+                            if (!an.empty() && known.count(an)) continue;
+                        }
+                        continue;
+                    }
+                    std::string dn = static_cast<Name&>(*d).id;
+                    if (!dn.empty() && known.count(dn)) continue;
+                    unknown_decs.push_back(std::move(d));
+                }
+                fd.decorators.erase(
+                    std::remove(fd.decorators.begin(), fd.decorators.end(), nullptr),
+                    fd.decorators.end());
+                for (auto rit = unknown_decs.rbegin(); rit != unknown_decs.rend(); ++rit) {
+                    auto tmpname = "__pyadamas$dec_" + std::to_string(dec_tmp_seq_++);
+                    auto tmp_lhs = std::make_unique<Name>(tmpname);
+                    tmp_lhs->line = fd.line;
+                    tmp_lhs->col = fd.col;
+                    auto tmp_as = std::make_unique<Assign>();
+                    tmp_as->targets.push_back(std::move(tmp_lhs));
+                    tmp_as->value = std::move(*rit);
+                    tmp_as->line = fd.line;
+                    tmp_as->col = fd.col;
+                    aliases.push_back(std::move(tmp_as));
+                    auto lhs = std::make_unique<Name>(fd.name);
+                    lhs->line = fd.line;
+                    lhs->col = fd.col;
+                    auto arg = std::make_unique<Name>(fd.name);
+                    arg->line = fd.line;
+                    arg->col = fd.col;
+                    auto fn = std::make_unique<Name>(tmpname);
+                    fn->line = fd.line;
+                    fn->col = fd.col;
+                    auto call = std::make_unique<Call>();
+                    call->func = std::move(fn);
+                    call->args.push_back(std::move(arg));
+                    call->line = fd.line;
+                    call->col = fd.col;
+                    auto as = std::make_unique<Assign>();
+                    as->targets.push_back(std::move(lhs));
+                    as->value = std::move(call);
+                    as->line = fd.line;
+                    as->col = fd.col;
+                    aliases.push_back(std::move(as));
+                }
+            }
             if (s->kind == StmtKind::ClassDef) {
                 auto& cd = static_cast<ClassDef&>(*s);
                 bool ge = false;

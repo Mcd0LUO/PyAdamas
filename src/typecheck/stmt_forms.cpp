@@ -180,6 +180,18 @@ void TypeChecker::check_u64_literals() {
 }
 
 void TypeChecker::stmt_assign(Assign& a) {
+        // 0.575：装饰器脱糖产生的合成赋值（f = __pyadamas$dec_N(f)）——
+        // 类型检查侧对装饰器的处理保持原样，这里只把 RHS 过一遍（求副作用），
+        // 不参与「标注/from_def 冲突」那套规则。
+        if (a.value && a.value->kind == ExprKind::Call) {
+            auto& c0 = static_cast<Call&>(*a.value);
+            if (auto* fn0 = dynamic_cast<Name*>(c0.func.get());
+                fn0 && fn0->id.starts_with("__pyadamas$dec_")) {
+                expr(*a.value);
+                for (auto& t : a.targets) expr(*t);
+                return;
+            }
+        }
         // d = globals() 之后 d[k] = v 等价于模块级动态注入，记下别名
         if (a.value->kind == ExprKind::Call) {
             auto& c = static_cast<Call&>(*a.value);
