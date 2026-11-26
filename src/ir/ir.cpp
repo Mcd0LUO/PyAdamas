@@ -598,6 +598,34 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
         // 在对象已被 GC 释放后会读悬空内存（实测 heap-use-after-free）。
         if (!unknown_only_in_containers(g.ty, 0)) return true;
 
+    // **0.650：动态元素容器的探测是 O(n) 的。**
+    // `list[unknown]` / `set[unknown]` / `dict[unknown, *]` 这类容器的元素
+    // 走动态探针（pa_rc_inc_unknown / pa_rc_dec_unknown）：索引关闭时
+    // unknown_is_heap 只能**线性遍历堆链**确认「这个字是不是堆对象」。
+    // 200K 自引用 list 的基准里这一步占 93.7%（perf 实测 mov (%rax),%rax），
+    // 整体 8.6 秒；索引开着时是 O(1) 位图查询。
+    //
+    // 判据取「容器元素域是 unknown」——这是唯一会走动态探针的形态；
+    // 元素域具体（list[int] 等）的容器走 elem_kind 位图，不需要索引。
+    for (const auto& fp : m.funcs) {
+        for (const auto& vt : fp->vreg_ty) {
+            if (!vt) continue;
+            switch (vt->kind) {
+                case TyKind::List:
+                case TyKind::Set:
+                case TyKind::Deque:
+                    if (!vt->sub.empty() && vt->sub[0] &&
+                        vt->sub[0]->kind == TyKind::Unknown)
+                        return true;
+                    break;
+                case TyKind::Dict:
+                    for (const auto& sub : vt->sub)
+                        if (sub && sub->kind == TyKind::Unknown) return true;
+                    break;
+                default: break;
+            }
+        }
+    }
     // 运行期类型检查也靠这张注册表确认「这个机器字确实是某类堆对象」：
     // super()、isinstance、异常匹配、unknown 值上的容器/字符串模式。
     // 这些调用即使操作数静态类型确定也会走索引，不能关。
