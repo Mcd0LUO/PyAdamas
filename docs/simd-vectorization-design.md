@@ -140,7 +140,7 @@ bb_incr:  %ji = load.slot sJ
 
 原型选**codegen 直接 lowering**：vreg 层已是 SSA、槽位提升已把 total/j 放进寄存器，
 发射层拿得到一切物理位置信息（`slot_mop`/`src_mop`），无需新 IR 语义。新增
-`src/backend/simd.cpp`（codegen 文件已贴近 1200 行闸门，向量化 lowering 独立成文件），
+`src/backend/simd.cpp`（codegen 文件已贴近 1200 行闸门，向量化 lowering 独立成文件；**0.480 已随特化模板一起删除**，本文只作历史存档，见文首状态），
 在 `AsmGen::gen_block` 开头挂钩：匹配成功 → 发「守卫 + 向量循环 + 跳标量尾」，
 随后**让原有指令发射机器照常发射全部标量指令作为尾循环/fallback**（§4）。
 匹配失败 → 一个字节都不发，走原路径。

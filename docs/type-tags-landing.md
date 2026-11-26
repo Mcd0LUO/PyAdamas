@@ -63,7 +63,7 @@
 `pa_any_type(v, tag)` → PA_TYPE_NONE/BOOL/INT/FLOAT/STR/BYTES/LIST/DICT/
 TUPLE/SET/OBJECT/CLASS/OTHER。有精确 tag 用 tag；HEAP 读头 kind；UNK 先
 探针。`pa_any_type_is(v, tag, code)` 是 isinstance 谓词：object 匹配一切，
-int 接受 bool（CPython 口径），其余精确相等。类型码与 `src/backend/tag_defs.h` 的
+int 接受 bool（CPython 口径），其余精确相等。类型码与 `src/common/tag_defs.h` 的
 PaTypeCode 逐字对应。
 
 `pa_repr_any_t(v, tag)` / `pa_print_any_repr_t(v, tag)`：None→None、

@@ -128,7 +128,7 @@ awk "/^class AsmGen/,0" src/backend/impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 判据是「被别的内联函数调用 / 在热路径上」。
 
 类体成员程序化比对：原 320 个 = 新 5 个文件拼起来 320 个，missing/extra 均为空。
-`backend/vect.h` / `backend/simd.h` / `backend/emit.h` 仍是**在类体内 `#include`**
+`backend/vect.h` / `backend/emit.h` 仍是**在类体内 `#include`**
 的片段，机制不变（类体里不许出现 `namespace` / `#include` —— 踩过）。
 
 ### 5.3 验证
