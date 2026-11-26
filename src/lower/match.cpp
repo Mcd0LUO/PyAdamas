@@ -57,6 +57,23 @@ void Lowerer::lower_match(Match& m) {
             emit(std::move(br));
             switch_to(gok);
         }
+        // 捕获在这里才写回外层作用域（0.628）：原来 bind_name 里立即写，
+        // `case [x, 2]` 匹配失败时 x 已经覆盖了外部同名变量。
+        for (auto& [nm, slot] : comp_slots_.back()) {
+            auto eit = st_->match_escape.find(nm);
+            if (eit == st_->match_escape.end()) continue;
+            auto& e = eit->second;
+            TypePtr soty = st_->fn->slot_ty[static_cast<size_t>(slot)];
+            if (!soty) soty = t_unknown();
+            VReg cv = load_slot(slot, soty);
+            if (e.kind == 1) {
+                write_cell(nm, cv, soty);
+                continue;
+            }
+            VReg ev = coerce(cv, soty, e.ty);
+            if (e.kind == 2) store_global(e.idx, ev);
+            else store_slot(e.idx, ev);
+        }
         stmts(c.body);
         comp_slots_.pop_back();
         if (!terminated()) {
@@ -139,18 +156,6 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
 
     auto bind_name = [&](const std::string& name, VReg v, TypePtr vty) {
         if (name.empty() || name == "_") return;
-        auto bind_escape = [&]() {
-            auto eit = st_->match_escape.find(name);
-            if (eit == st_->match_escape.end()) return;
-            auto& e = eit->second;
-            if (e.kind == 1) {
-                write_cell(name, v, vty);
-                return;
-            }
-            VReg ev = coerce(v, vty, e.ty);
-            if (e.kind == 2) store_global(e.idx, ev);
-            else store_slot(e.idx, ev);
-        };
         auto& scope = comp_slots_.back();
         auto it = scope.find(name);
         bool duplicate =
@@ -159,26 +164,22 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             // 同一模式里重复捕获：Python 要求值相等。
             TypePtr oldty = st_->fn->slot_ty[it->second];
             VReg old = load_slot(it->second, oldty ? oldty : t_unknown());
-            Inst cmp;
-            cmp.op = IrOp::Cmp;
-            cmp.cop = CmpKind::Eq;
-            cmp.a = v;
-            cmp.b = old;
-            test(def(t_bool(), std::move(cmp)));
+            // 类型感知的相等（0.628）：裸 Cmp 对字符串/容器比的是指针，
+            // `case [x, x]` 遇到两个「内容相同但不是同一对象」的字符串会误判。
+            test(lower_cmp_single(old, oldty ? oldty : t_unknown(), v, vty, CmpOp::Eq,
+                                  p.line, p.col));
             return;
         }
         if (it != scope.end()) {
             // OR 预声明的共享槽：哪个分支成功就写哪个。
             store_slot(it->second, v);
             if (or_local) or_local->insert(name);
-            bind_escape();
             return;
         }
         int slot = st_->fn->new_slot(vty ? vty : t_unknown());
         scope[name] = slot;
         store_slot(slot, v);
         if (or_local) or_local->insert(name);
-        bind_escape();
     };
 
     auto match_equal = [&](ExprPtr& lit) {
