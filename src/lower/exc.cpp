@@ -328,7 +328,12 @@ void Lowerer::lower_raise(Raise& r) {
             err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
-        for (auto& kw : c.keywords) expr(*kw.value);
+        // CPython：raise 的异常构造不接受关键字参数（TypeError）。原来这里只求值
+        // 副作用、静默丢弃，等于把用户写错的东西吞掉。
+        if (!c.keywords.empty()) {
+            err(c.line, c.col, "raise does not accept keyword arguments");
+            return;
+        }
         // 多位置参：逐个字符串化收集成 list[str]，交给运行期建 args 和消息。
         // 单参数保持旧语义（消息=str，e.args == [msg]），避免行为回归。
         if (c.args.size() > 1) {
@@ -665,10 +670,8 @@ void Lowerer::lower_assert(Assert& a) {
         msg = const_str("assertion failed");
     }
     call_void(raise_rt(RtFn::Raise), {const_str("AssertionError"), msg});
-    Inst jj;
-    jj.op = IrOp::Jump;
-    jj.target = ok;
-    emit(std::move(jj));
+    // Raise 是 noreturn：别发 Jump 到 ok（那会在 CFG 里造一条假的失败→成功边）。
+    end_unreachable();
 
     switch_to(ok);
 }
@@ -1062,6 +1065,15 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         // 在 return 之前执行）。注册一个只内联 finalbody 的清理项：此时已经
         // 在外层 landing pad 里 EhLeave 过，不能再动 pa_eh_depth 与临时水位
         // （那正是原来 ZeroCostEh 清理项在 handler 里导致双重释放的原因）。
+        // 先登记 ExcDone（内层先跑），再登记 FinallyBody：早退时 finally 先跑、
+        // 再收尾异常上下文。少了 ExcDone，except 体里 return/break/continue 会
+        // 让 ExcAcceptValue 压的 PyAdamasExcSave 与 current_exc 永久泄漏
+        // （与 lower_try_core 同款清理）。
+        {
+            FuncCtx::Cleanup done;
+            done.kind = FuncCtx::Cleanup::Kind::ExcDone;
+            st_->cleanups.push_back(done);
+        }
         if (has_fin) {
             FuncCtx::Cleanup fb;
             fb.kind = FuncCtx::Cleanup::Kind::FinallyBody;
@@ -1070,6 +1082,7 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         }
         stmts(hb.h->body);
         if (has_fin) st_->cleanups.pop_back();
+        st_->cleanups.pop_back();  // ExcDone
         if (shadow >= 0) comp_slots_.pop_back();
         if (terminated()) {
             // except 体里 return/break/continue 是合法的：异常已经被这个 handler
@@ -1104,20 +1117,24 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         }
         stmts(t.orelse);
         if (has_fin) st_->cleanups.pop_back();
-        Inst je2;
-        je2.op = IrOp::Jump;
-        je2.target = has_fin ? fin_block : end;
-        emit(std::move(je2));
+        if (!terminated()) {
+            Inst je2;
+            je2.op = IrOp::Jump;
+            je2.target = has_fin ? fin_block : end;
+            emit(std::move(je2));
+        }
     }
 
     if (has_fin) {
         // 正常路径（try 体结束 / handler 体结束）落到这里：跑 finalbody 后进 end。
         switch_to(fin_block);
         stmts(t.finalbody);
-        Inst jf;
-        jf.op = IrOp::Jump;
-        jf.target = end;
-        emit(std::move(jf));
+        if (!terminated()) {
+            Inst jf;
+            jf.op = IrOp::Jump;
+            jf.target = end;
+            emit(std::move(jf));
+        }
     }
 
     switch_to(end);
