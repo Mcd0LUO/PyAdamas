@@ -318,5 +318,36 @@ bool AsmGen::can_fuse_int_bin_temp(const Inst& in, const Inst& nx) const {
     return true;
 }
 
+// 同一条「结果留在 %rax」的判据，把消费者从 Bin 扩到两种「紧邻即用」的
+// 情形：①直接调用（CallDirect）的实参，②本块 return 的返回值。
+//
+// 为什么安全（不碰 ABI）：
+//  * 值只在相邻两条指令之间活；调用实参装载的第一条就是
+//    `movq %rax, <arg 寄存器>`，之前没有任何指令碰 %rax（栈实参用 %r10
+//    中转，ptag 编组会用 %rax 中转 → 那条路径被 call_ptag_words==0 关掉）；
+//  * return 的 gen_return 就是 `movq src, %rax`，源已经是 %rax 时直接跳过；
+//  * 只放行非浮点、非堆类型（int/bool）：没有 RC/GC 所有权转移，也不涉及
+//    多字返回结构；单次使用 + 不跨块保证没有第二个读者。
+//  * 被调函数仍然按原 ABI 收实参；改动只发生在调用点把临时值留在哪个寄存器。
+bool AsmGen::can_fuse_bin_value_use(const Inst& in, const Inst& nx) const {
+    if (opt_ < 2) return false;
+    if (in.op != IrOp::Bin || in.dst == kNoReg) return false;
+    if (!in.ty) return false;
+    if (ir_is_float(in.ty) || ir_is_heap(in.ty)) return false;
+    if (in.ty->kind != TyKind::Int && in.ty->kind != TyKind::Bool) return false;
+    if (in.dst >= use_count_.size() || use_count_[in.dst] != 1) return false;
+    if (cross_block_[in.dst]) return false;
+    if (tag_.tags_enabled && is_unk_ty(ty_of(in.dst))) return false;
+    if (nx.op == IrOp::Return) return nx.a == in.dst;
+    if (nx.op != IrOp::CallDirect) return false;
+    bool arg = false;
+    for (VReg v : nx.args)
+        if (v == in.dst) { arg = true; break; }
+    if (!arg) return false;
+    // tag 数组编组（tag.cpp 的 move_to）在装实参之前会用 %rax 当内存中转，
+    // 会把刚留在 %rax 的值冲掉；有平行 tag 数组的调用点不走这条融合。
+    if (call_ptag_words(nx) > 0) return false;
+    return true;
+}
 
 }  // namespace pyadamas

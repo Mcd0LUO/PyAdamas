@@ -421,7 +421,9 @@ void AsmGen::gen_return(const Inst& in) {
             emit2(MOp::kXorl, kEax, kEax);
         } else if (is_fp(in.a)) {
             emit2(MOp::kMovsd, src_mop(in.a), kXmm0);
-        } else {
+        } else if (src_mop(in.a).text != "%rax") {
+            // 值已经在 %rax（can_fuse_bin_value_use 把 Bin 结果留在那）→ 跳过
+            // `movq %rax, %rax`；其余情况照原样搬进返回寄存器。
             emit2(MOp::kMovq, src_mop(in.a), kRax);
         }
         // P3-1b：unknown 返回经 %rdx 带 tag（门控关/生成器空操作）。

@@ -668,6 +668,7 @@ void AsmGen::gen_block(const Block& b) {
             bool fp_temp = false;
             bool bin_cmp_branch = false;
             bool int_bin_temp = false;
+            bool bin_value_use = false;
             // 拷贝合并：目标值和左操作数被分到同一个临时寄存器时，直接原地
             // 算就行，不必再借 %xmm1 中转（否则还要多一条 movsd）。
             bool dst_coalesced =
@@ -685,6 +686,12 @@ void AsmGen::gen_block(const Block& b) {
                 // 整数 Bin 结果只被下一条 Bin 用：留在 %rax。
                 dst_loc_ = "%rax";
                 int_bin_temp = true;
+            } else if (i + 1 < b.insts.size() &&
+                       can_fuse_bin_value_use(in, b.insts[i + 1])) {
+                // 整数 Bin 结果只被紧邻的直接调用实参 / return 用：留在 %rax，
+                // 省掉「临时槽 store → 立刻 load 回来」的往返（fib 每调用 2 条）。
+                dst_loc_ = "%rax";
+                bin_value_use = true;
             } else if (i + 1 < b.insts.size() && can_fuse_global(in, b.insts[i + 1])) {
                 fused_global = b.insts[i + 1].idx;
                 dst_loc_ = "%rax";
@@ -743,6 +750,10 @@ void AsmGen::gen_block(const Block& b) {
             }
             if (int_bin_temp) {
                 // 整数 Bin 结果留在 %rax 供下一条 Bin 直接使用。
+                alias_[in.dst] = "%rax";
+            }
+            if (bin_value_use) {
+                // 同上：下一条（CallDirect 实参装载 / Return）从 %rax 取。
                 alias_[in.dst] = "%rax";
             }
 

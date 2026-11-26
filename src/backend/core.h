@@ -330,6 +330,9 @@
     // 整数 Bin 结果只被紧邻的下一条整数 Bin 使用时，先留在 %rax（或复用
     // 目标寄存器），省掉「结果 → 临时槽 → 再读回」的 store/load。
     bool can_fuse_int_bin_temp(const Inst& in, const Inst& nx) const;
+    // 单次使用的整数 Bin 结果被紧邻的调用实参 / return 消费：留在 %rax，
+    // 跳过「临时槽 store + load」的往返（fib 这类递归每个调用省 2 条）。
+    bool can_fuse_bin_value_use(const Inst& in, const Inst& nx) const;
 
     // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
     // 一次内存往返 + `cmpq $0` 全部省掉。循环条件走的就是这条路。
