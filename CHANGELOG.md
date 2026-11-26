@@ -4,6 +4,119 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+<!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
+
+## [0.651] - 2026-11-27
+
+> merge：edgefix 分支的三个**静默错值**修复（来自 `edgeprobe/REPORT.md`）。
+>
+> - **MI 显式基类调用**：`C.m(obj)` 直调不做多继承字段块平移，`A.__init__(self); B.__init__(self)`
+>  导致 B 的字段覆盖 A 的（`2 0 3` → `1 2 3`）；新增 `explicit_self_type()` + `mi_block_offset`。
+> - **`del` 作用域**：`del x` 后访问原来打印 `0`，现在编译期拒绝 `name 'x' is not defined (deleted above)`，
+>  删除可见性继承进同作用域嵌套块。
+> - **异构实例 repr**：无公共基类的实例列表 `print` 出裸指针；dunder 槽表扩成 `[eq,lt,hash,del,str,repr]`，
+>  新增 `pa_instance_str` / `pa_instance_default_str`，四个 unknown 出口全部接上。
+>
+> 套件 594；ASan（三个新用例 + 两个 dunder 用例）全 0 报错。
+
+## [0.650] - 2026-11-27
+
+> perf(gc)：**动态元素容器的 unknown 探测从 O(n) 降到 O(1)**——循环引用基准 `8601 ms → 82 ms`（105×）。
+>
+> perf 指令级定位：93.7% 周期在 `unknown_is_heap()` 的 `mov (%rax),%rax`（遍历 GC 堆链）。
+>`list[unknown]`/`set[unknown]`/`dict[unknown,*]` 的元素走动态探针，而编译器在 exact-RC 模式下
+>关掉了索引 → 每次 append/释放 O(堆大小) → O(n²)。修法：`ir_module_needs_unknown_index` 里，
+>只要出现元素域为 unknown 的容器就保留索引。A/B 对照（未标注 list append 2M）24–27ms vs 25–26ms，无可测回归。
+
+## [0.649] - 2026-11-27
+
+> fix(driver)：重复的子模块 import 让入口**永久缓存 miss**（审计 A4）。`from pkg import a` 写两遍 →
+>`u.deps` 出现重复项，而 manifest 读回是 map 语义，`deps.size()` 恒不等。两处去重后 manifest 恢复单条。
+
+## [0.648] - 2026-11-27
+
+> fix(typecheck+lower)：跨模块 `mod.K.cm()` / `mod.K.sm()` 全部失败（审计 A8-2）。两处都只认裸 Name 接收者，
+>补上「接收者静态类型是 ClassObj 且写法是属性链」。实测 5/6/7/5 与 CPython 一致。
+
+## [0.647] - 2026-11-27
+
+> fix(typecheck)：跨模块 `mod.C.<字段名>` 静默读到垃圾值（审计 A8-1，`-1`/空串）。
+>`is_class_receiver()` 只认裸 Name，`a2.C` 走实例属性分支按实例偏移在类对象上读槽。
+>补 `from_class_obj` 后与单模块一致：`class 'C' has no attribute 'LIMIT'`。
+
+## [0.646] - 2026-11-27
+
+> fix(driver)：`case` 分支体里的 `import` 不进依赖图（审计 A1）。`scan_imports_stmt` 的 switch 漏了 `Match`；
+>修前 build 报「cannot resolve module」+ 误导性第二错，check 却报 ok。
+
+## [0.645] - 2026-11-27
+
+> fix(match)：映射模式键判重。`{0.0, -0.0}` 与 `{10**20, 10**20}` 原来漏判，
+>`{2**53+1, 2**53}` 反而误报（double 精度丢失）。整数改精确十进制、`-0.0` 归一化（须在取负之后）、Big 参与判重。
+
+## [0.644] - 2026-11-27
+
+> fix(ir)：跨模块类引用（tag 29）的接口生命周期显式化。`Dec::loaded` 是局部对象，`Type::cls` 是裸指针；
+>当前靠 Program 持有 ModuleInfo 才没炸。加 `ModuleInfo::imported_refs` 把隐式约定变成显式所有权。
+>「`unordered_map` 致 interface_hash 非确定」**不成立**：编码遍历的三张表都是 `std::map`。
+
+## [0.643] - 2026-11-27
+
+> 订正 0.642 的**假阳性记录**：用例里的 `a, *b = [1, 2, 3]` 一直是红的（星号解包赋值 codegen 未实现），
+>我用 `grep -c 'ran ok'` 数通过数把它掩盖了。教训：通过数必须与失败列表交叉核对。
+
+## [0.642] - 2026-11-27
+
+> fix(syntax)：`with (C(), C()):` 无 `as` 的多上下文管理器（原来被当元组，报「需要 __enter__」）；
+>星号赋值目标 `*a = [1,2]` 现在明确拒绝（PEP 8/语法）；裸 `except:` 不在末尾时报错。
+
+## [0.641] - 2026-11-27
+
+> fix(match)：字面量模式边界。裸 `*` 不再静默当 `*_`；补 `bytes` 字面量；负 Big（`case -10**20:`）可匹配；
+>`case 1 + 2j:` 支持（保留成 BinOp 交给降级求值，因为 Constant 的 Complex 实部固定 0）。
+
+## [0.640] - 2026-11-27
+
+> fix(syntax)：lambda 的 keyword-only 默认值原来塞进 `defaults`（`lambda a, *, b=2` 报「缺 b」）→ 改 `kw_defaults`；
+>lambda/classdef 重置 `async_depth_`/`loop_depth_`；`/` 的位置与次数校验；`lambda **kw,:` 尾逗号；
+>`annotation_mentions_big` 补 ListExpr。
+
+## [0.639] - 2026-11-27
+
+> fix(syntax)：`f"{x=:.1f}"` 自文档化表达式强行设 `!r` → 运行期 `Invalid format specifier for str`；
+>只有无格式说明符时才默认 `!r`。f-string 表达式里的 `#` 注释（PEP 701）跳过（限定在表达式部分，
+>格式说明符里的 `#` 是标志位）。`genexp_depth_` 置位时机提前到解析元素之前（PEP 530 的 `(await f(x) for ...)`）。
+
+## [0.638] - 2026-11-27
+
+> fix(desugar)：`[sum(x + y for y in ys) for x in xs]` 原来报 `undefined name 'x'`——内层生成器要捕获外层
+>推导式的循环变量，而推导式是就地展开的。`has_lambda` 现在把 GeneratorExp 本身当信号，外层提升成生成器。
+>混合装饰器顺序（`@m.outer` + `@deco` 得 11 而非 20）：只有整栈都是未知简单名字装饰器时才走 aliases 路径。
+
+## [0.637] - 2026-11-27
+
+> fix(desugar)：作用域扫描补三类绑定——`match` 的 case 模式捕获、海象运算符 `:=`、`del`。
+>修前 `if (range := my_range) …` 之后的 `range(3)` 仍被当内建改写成计数循环。
+
+## [0.636] - 2026-11-27
+
+> fix(verify)：`FuncAddr`/`FuncCode`/`ClassAddr` 的目标在 `imm` 却按 `idx` 校验（被 `idx<0` 跳过，等于没查）；
+>补 `ConstBig`；槽位指令的负下标不再无条件放行；`Branch` 缺 false 目标不再重复报错；补 `vreg_ty` 边界检查。
+
+## [0.635] - 2026-11-27
+
+> fix(ir)：索引分析三处口径——裸 unknown 全局在 `can_skip_index_maint` 被放行（与 `needs_unknown_index` 冲突，UAF 风险）；
+>`ListAppend` 的元素实参被误标为「纯容器用途」；`ClassAddr`/`FuncAddr`/`FuncCode` 的 `idx_kind_ok` 映射错位。
+
+## [0.634] - 2026-11-27
+
+> fix(ir)：5 个 asyncio 类型（Task/Future/AsyncEvent/AsyncLock/AsyncQueue）跨模块编码**穿透成 ClassObj**（tag 26），
+>导入方会把 `asyncio.Lock` 当构造器。并入「按 unknown 编码」组。
+
+## [0.633] - 2026-11-27
+
+> fix(minmax)：生成器路径手写 `IrOp::Cmp` 而没走 `take_new`，big 元素按堆指针比较 → 全 big 时错误结果、
+>混合 int/big 时段错误。统一改走 `lower_cmp_single`；unknown/big 元素类型明确拒绝；空序列 `Raise` 后补终结指令。
 ## [0.558] - 2026-11-26
 
 > fix(typecheck)：**两条 C 互操作的坑改成编译期明确报错**（原来是段错误 / 误导信息）。
