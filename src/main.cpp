@@ -728,25 +728,8 @@ static int parse_options(int argc, char** argv, Options& o) {
     return 0;
 }
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr,
-                     "pyadamas —— Python 语法外壳的编译器\n"
-                     "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
-                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
-                     "[--asan|--ubsan] [-o out|--out out] [--json] [--o.locked] "
-                     "[--manifest file] [--module-map file] <file.py>\n",
-                     argv[0]);
-        return 2;
-    }
-
-    Options o;
-
-    static const std::vector<std::string> kModes = {"tokens", "ast",  "check", "types", "ir",
-                                                    "asm",    "build", "run",  "deps",  "cdecl",
-                                                    "resolve"};
-    if (int rc = parse_options(argc, argv, o)) return rc;
+// 0.601：main 的分发体。解析完选项后做模式校验并调用对应的 cmd_*。
+static int run_compiler(Options& o) {
     if (o.mode.empty()) o.mode = "ast";
     // resolve 可以只给项目目录（甚至什么都不给：用 cwd），不需要入口文件。
     if (o.path.empty() && o.mode != "resolve") {
@@ -757,7 +740,7 @@ int main(int argc, char** argv) {
                               o.mode == "ir" || o.mode == "build" || o.mode == "run";
     if (!package_mode && (o.locked || !o.manifest_flag.empty())) {
         std::fprintf(stderr,
-                     "error: --o.locked/--manifest are only supported by "
+                     "error: --locked/--manifest are only supported by "
                      "resolve/build/run/asm/ir/deps\n");
         return 2;
     }
@@ -807,4 +790,23 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s: internal error: %s\n", o.path.c_str(), e.what());
     }
     return 1;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr,
+                     "pyadamas —— Python 语法外壳的编译器\n"
+                     "\n"
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
+                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
+                     "[--asan|--ubsan] [-o out|--out out] [--json] [--locked] "
+                     "[--manifest file] [--module-map file] <file.py>\n",
+                     argv[0]);
+        return 2;
+    }
+
+    Options o;
+
+    if (int rc = parse_options(argc, argv, o)) return rc;
+    return run_compiler(o);
 }
