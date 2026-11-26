@@ -453,6 +453,8 @@ void emit_rethrow_from_slots(int ts, int msgs);
         int parent = -1;  // 标志为 0 时读哪里
     };
     int class_attr_global(const ClassInfo* owner, const std::string& name, TypePtr ty);
+    // A8-3：类属性声明者那份的存储槽（导入类是定义模块的外部全局）。
+    int class_attr_decl_slot(const ClassAttrInfo* ca);
     ClassAttrStorage class_attr_storage(const ClassInfo* recv, const ClassAttrInfo* ca);
     int class_attr_slot(const ClassInfo* recv, const ClassAttrInfo* ca);
     VReg class_attr_load(const ClassInfo* recv, const ClassAttrInfo* ca);

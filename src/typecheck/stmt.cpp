@@ -397,7 +397,13 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                                     type_name(f->ty), type_name(value)));
                 return;
             }
-            if (ot->kind == TyKind::ClassObj && !ot->sub.empty()) ot = ot->sub[0];
+            // A8-3：接收者是不是「类对象」（mod.C / type 值）。类属性跨模块
+            // 只读，写要给出明确诊断，而不是落到运行期 setattr。
+            bool recv_class_obj = false;
+            if (ot->kind == TyKind::ClassObj && !ot->sub.empty()) {
+                ot = ot->sub[0];
+                recv_class_obj = true;
+            }
             if (ot->kind == TyKind::Class) {
                 if (!ot->cls) return;
                 if (!ot->cls->complete && ot->cls != cur_class_) return;  // 骨架，无从判断
@@ -417,6 +423,21 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                             std::format("property '{}' setter cannot accept '{}'", at->attr,
                                         type_name(value)));
                     return;
+                }
+                // 跨模块类属性（A8-3）：值与「已拥有」标志都在定义模块里，
+                // 导入方写它会破坏 COW 语义，明确报错（以前落到运行期
+                // setattr() on an object without dynamic attributes）。
+                if (recv_class_obj && !is_class_receiver(*at)) {
+                    if (const ClassAttrInfo* ca = ot->cls->class_attr(at->attr)) {
+                        if (!ca->writable) {
+                            err(line, col,
+                                std::format("class attribute '{}.{}' of an imported class is "
+                                            "read-only across modules; assign it in the "
+                                            "module that defines '{}'",
+                                            ot->cls->name, at->attr, ot->cls->name));
+                            return;
+                        }
+                    }
                 }
                 // `C.x = v`：改的是这个类自己的那份类属性存储
                 if (is_class_receiver(*at)) {

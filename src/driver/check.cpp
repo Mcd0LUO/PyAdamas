@@ -86,6 +86,31 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
             std::map<std::string, std::vector<int>> key_slots;
             std::vector<const pyadamas::ClassInfo*> mro(cls->mro.begin(), cls->mro.end());
             if (mro.empty()) mro.push_back(cls);
+            // A8-3：类属性（与 build.cpp 的扁平导出同一口径，check 侧也不能少，
+            // 否则 check 比 build 严：mod.C.X 在 check --imports 下误报）。
+            for (const pyadamas::ClassInfo* k : mro) {
+                for (auto& ca : k->class_attrs) {
+                    if (flat->class_attr(ca.name)) continue;  // 最近声明者胜出
+                    bool is_method = false;
+                    for (const pyadamas::ClassInfo* mk : mro)
+                        if (mk && mk->own_method(ca.name)) { is_method = true; break; }
+                    if (is_method) continue;
+                    pyadamas::ClassAttrInfo a;
+                    a.name = ca.name;
+                    a.ty = ca.ty;
+                    a.owner = flat.get();
+                    a.writable = false;
+                    if (!ca.external_symbol.empty()) {
+                        a.external_symbol = ca.external_symbol;
+                    } else {
+                        std::string decl_mod = k->imported() ? k->origin_module : runtime_name;
+                        std::string decl_cls = k->imported() ? k->external_name() : k->name;
+                        a.external_symbol = pyadamas::module_global_symbol(
+                            decl_mod, std::format("__pa_cattr_{}_{}", decl_cls, ca.name));
+                    }
+                    flat->class_attrs.push_back(std::move(a));
+                }
+            }
             for (const pyadamas::ClassInfo* k : mro) {
                 if (!k) continue;
                 for (auto& m : k->methods) {

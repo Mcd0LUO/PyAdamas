@@ -812,6 +812,15 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             }
             e.u32(static_cast<uint32_t>(c.match_args.size()));
             for (auto& ma : c.match_args) e.str(ma);
+            // A8-3：类属性段（名 + 类型 + 是否可写 + 定义模块的存储符号）。
+            // 导入方把 owner 指回本类，降级时按 external_symbol 声明外部全局。
+            e.u32(static_cast<uint32_t>(c.class_attrs.size()));
+            for (auto& ca : c.class_attrs) {
+                e.str(ca.name);
+                enc_type(e, ca.ty);
+                e.u8(ca.writable ? 1 : 0);
+                e.str(ca.external_symbol);
+            }
             e.u32(static_cast<uint32_t>(c.methods.size()));
             for (auto& m : c.methods) {
                 e.str(m.name);
@@ -924,6 +933,18 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
             }
             uint32_t nma = d.u32();
             for (uint32_t j = 0; j < nma; ++j) cls->match_args.push_back(d.str());
+            // A8-3：类属性。owner 指回本类（读路径按 MRO 里的声明类查），
+            // 值从定义模块导出的全局读。
+            uint32_t nca = d.u32();
+            for (uint32_t j = 0; j < nca; ++j) {
+                ClassAttrInfo ca;
+                ca.name = d.str();
+                ca.ty = dec_type(d);
+                ca.writable = d.u8() != 0;
+                ca.external_symbol = d.str();
+                ca.owner = cls.get();
+                cls->class_attrs.push_back(std::move(ca));
+            }
             uint32_t nm = d.u32();
             for (uint32_t j = 0; j < nm; ++j) {
                 MethodInfo m;
