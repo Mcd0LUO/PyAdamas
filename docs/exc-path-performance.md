@@ -26,8 +26,10 @@ $ perf record -e cycles:u /tmp/ex_pya
 
 - `pa_eh_throw` 自身很干净：一次 wrapper 分配、几个字段赋值、一次 `_Unwind_RaiseException`。
 - 时间几乎全在 **libgcc 的展开器**里：DWARF CFI 逐帧解析 + 每个 FDE 调用一次 personality。
-- 我们的 personality（`runtime/rt_personality.c`，677 行）**自采样占比是 0.00%**，
-  说明它不是热点；热点是「逐帧走一遍」这个动作本身，以及 phase1/phase2 **走两遍**。
+- 我们的 personality 与 LSDA 解析合计约 **7%**（`pa_personality` 3.47% + `pa_read_encoded` 3.58%，
+  `perf record -F 12000 -e cycles:u` 同口径）。**更正**：本文早期版本写「自采样 0.00%」是按
+  `-g` 调用树的口径读的，那口径会把被内联的解析记到调用方，不能用来判断占比。
+- 结论不变：**热点是 libgcc 的展开器（71%）**，不是我们的 personality。
 
 ## 3. 可选方向（按风险从低到高）
 
@@ -46,6 +48,23 @@ phase1（找 handler）与 phase2（清理）会遍历同一串帧。若把「IP
 - 改动集中在 `runtime/rt_personality.c` + `rt_eh.c` 的 wrapper；
 - 收益不确定（未见 profile 显示 personality 是大头，但它是 libgcc 匿名帧之外的必然成本）；
 - 风险：缓存键必须含「帧的 CFA/SP」，增量标记/信号等边角要小心。
+
+### B 的实测结论（2026-11-28，已实现后回退）
+
+32 项 `(CFA, IP) → (landing pad, filter, kind)` 静态缓存，phase2 直接命中：
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| 指令数 | 1,619,547,710 | 1,595,854,780（**−1.46%**） |
+| cycles:u（绑核 5 次中位） | 624.0M | 624.4M（**±0%**） |
+| 墙钟（绑核 7 轮中位） | 223 ms | 222 ms（噪声内） |
+| `pa_read_encoded` 占比 | 3.58% | 2.09%（−42%，缓存确实生效） |
+
+**结论：LSDA 二次解析确实砍掉了一半，但总时间一动不动** —— 这部分工作原本被摊在 libgcc
+指针追逐的停顿里，乱序执行把它藏掉了。libgcc 自己的占比反而从 71.22% 升到 75.92%。
+实现已全部还原（`git status` 干净），不留复杂度。
+
+**因此：方案 B 不值得做。** 唯一有量级收益的是方案 A。
 
 ### C. 明确文档化 `--no-zero-cost-exc`（零成本）
 热路径上频繁真的抛异常时，编译期开关已经能回退到 setjmp（33ms，与 CPython 持平）。
