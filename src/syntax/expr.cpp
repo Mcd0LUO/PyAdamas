@@ -413,18 +413,28 @@ ExprPtr Parser::parse_atom() {
                 return n;
             }
             case Tok::STRING:
+            case Tok::TSTRING:
             case Tok::FSTRING: {
                 // Python 允许相邻字面量拼接，且 string 与 f-string 可混用：
                 //   ('a' f'{x}' 'b')  →  JoinedStr
                 std::vector<Token> parts;
-                while (check(Tok::STRING) || check(Tok::FSTRING)) parts.push_back(advance());
+                while (check(Tok::STRING) || check(Tok::FSTRING) || check(Tok::TSTRING))
+                    parts.push_back(advance());
                 // str / f-string 与 bytes 不能混拼（CPython 同款报错）。
                 if (check(Tok::BYTES))
                     throw err("cannot mix bytes and nonbytes literals");
 
                 bool has_f = std::ranges::any_of(parts, [](const Token& p) {
-                    return p.kind == Tok::FSTRING;
+                    return p.kind == Tok::FSTRING || p.kind == Tok::TSTRING;
                 });
+                // 0.567：t-string 与 f-string 不能混拼（CPython 同款报错）。
+                bool has_t = std::ranges::any_of(parts, [](const Token& p) {
+                    return p.kind == Tok::TSTRING;
+                });
+                if (has_t && std::ranges::any_of(parts, [](const Token& p) {
+                        return p.kind == Tok::FSTRING;
+                    }))
+                    throw err("cannot mix t-string and f-string literals");
 
                 if (!has_f) {
                     std::string merged;
@@ -436,6 +446,7 @@ ExprPtr Parser::parse_atom() {
                 }
 
                 auto j = node_at<JoinedStr>(ln, cl);
+                j->is_template = has_t;
                 for (auto& p : parts) {
                     if (p.kind == Tok::STRING) {
                         if (p.text.empty()) continue;
@@ -843,6 +854,7 @@ std::unique_ptr<JoinedStr> Parser::parse_fstring(const Token& tok) {
             auto fv = std::make_unique<FormattedValue>();
             fv->line = tok.line;
             fv->col = tok.col;
+            fv->expr_src = expr_src;  // t-string 的 Interpolation.expression
             if (self_doc) fv->conversion = 'r';
 
             // 解析内嵌表达式：重新走一遍 lex + parse。

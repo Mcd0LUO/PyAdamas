@@ -335,7 +335,7 @@ private:
     static bool is_ident_char(unsigned char c) { return is_ident_start(c) || std::isdigit(c); }
     static bool is_string_prefix_char(char c) {
         switch (std::tolower(static_cast<unsigned char>(c))) {
-            case 'r': case 'b': case 'f': case 'u': return true;
+            case 'r': case 'b': case 'f': case 'u': case 't': return true;
             default: return false;
         }
     }
@@ -619,11 +619,12 @@ private:
 
     // ---- 字符串 ----
     void scan_string(const std::string& prefix) {
-        bool is_raw = false, is_f = false, is_bytes = false;
+        bool is_raw = false, is_f = false, is_bytes = false, is_t = false;
         for (char c : prefix) {
             switch (std::tolower(static_cast<unsigned char>(c))) {
                 case 'r': is_raw = true; break;
                 case 'f': is_f = true; break;
+                case 't': is_t = true; break;
                 case 'b': is_bytes = true; break;
                 default: break;
             }
@@ -637,7 +638,11 @@ private:
         // 普通字符串在词法层直接反转义。
         std::string body;
         Tok kind;
-        if (is_f) {
+        if (is_t) {
+            // 0.567：t-string 和 f-string 同文法，只是结果类型不同（Template）。
+            body = read_fstring_body(quote, triple);
+            kind = Tok::TSTRING;
+        } else if (is_f) {
             body = read_fstring_body(quote, triple);
             kind = Tok::FSTRING;
         } else if (is_raw) {

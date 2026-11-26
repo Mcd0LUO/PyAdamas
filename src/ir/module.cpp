@@ -410,6 +410,7 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::StatResult: e.u8(42); break;
         case TyKind::CompletedProcess: e.u8(43); break;
         case TyKind::Random: e.u8(44); break;
+        case TyKind::Template: e.u8(47); break;  // 0.567：PEP 750 Template/Interpolation
         case TyKind::Range:  // 45：带元素类型
             e.u8(45);
             enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
@@ -619,6 +620,7 @@ TypePtr dec_type(Dec& d) {
         case 42: return t_stat();
         case 43: return t_completed();
         case 44: return t_random();
+        case 47: return t_template();  // 0.567：PEP 750 Template/Interpolation
         case 45: return mk_range(dec_type(d));
         case 29: {
             // 0.540：别的模块的类引用 —— (归属模块, 类名)，解析推迟到类表解码后。

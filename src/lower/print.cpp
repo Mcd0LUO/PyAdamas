@@ -42,6 +42,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             break;
         }
         case TyKind::Tuple: print_seq(v, ty, true, false, line, col); break;
+        case TyKind::Template: {  // 0.567：t-string
+            VReg s = call_runtime(RtFn::TemplateRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::TypeObj:
             call_void(RtFn::PrintStr, {const_str("<class '")});
             call_void(RtFn::PrintStr, {v});

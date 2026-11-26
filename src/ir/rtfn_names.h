@@ -132,6 +132,16 @@ inline const char* rt_name(RtFn f) {
         case RtFn::BufferSetI64: return "pa_buffer_set_i64";
         case RtFn::BufferGetF64: return "pa_buffer_get_f64";
         case RtFn::BufferSetF64: return "pa_buffer_set_f64";
+        case RtFn::TemplateNew: return "pa_template_new";
+        case RtFn::InterpNew: return "pa_interp_new";
+        case RtFn::TemplateStrings: return "pa_template_strings";
+        case RtFn::TemplateInterps: return "pa_template_interps";
+        case RtFn::TemplateValues: return "pa_template_values";
+        case RtFn::InterpValue: return "pa_interp_value";
+        case RtFn::InterpExpr: return "pa_interp_expr";
+        case RtFn::InterpConv: return "pa_interp_conv";
+        case RtFn::InterpFmt: return "pa_interp_fmt";
+        case RtFn::TemplateRepr: return "pa_template_repr";
         case RtFn::ListContains: return "pa_list_contains";
         case RtFn::ListContainsI64: return "pa_list_contains_i64";
         case RtFn::ListContainsF64: return "pa_list_contains_f64";

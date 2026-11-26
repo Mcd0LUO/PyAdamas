@@ -88,6 +88,8 @@ enum class TyKind : uint8_t {
     Chan,         // make_chan(T, cap) 通道；sub[0] 是元素类型
     // ── P3（docs/numeric-types-design.md §1/§4）──追加在尾部，既有编号不动。
     Big,          // big：任意精度整数，BigInt 堆对象（rt_big.c），BIG tag=12
+    Template,     // 0.567：PEP 750 t"..." 的结果；Interpolation 也用这个 kind
+
 };
 
 struct Type;
@@ -791,6 +793,12 @@ inline const TypePtr& t_complex() {
     static TypePtr v = new_ty(TyKind::Complex);
     return v;
 }
+// 0.567：t-string 的 Template / Interpolation（同一 kind，属性名区分）。
+inline TypePtr t_template() {
+    static TypePtr v = new_ty(TyKind::Template);
+    return v;
+}
+
 inline const TypePtr& t_str() {
     static TypePtr v = new_ty(TyKind::Str);
     return v;

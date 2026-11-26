@@ -1747,6 +1747,31 @@ print(p.a, sizeof(p))   # 3.0 16
 ```
 
 
+
+### t-string：`t\"...\"`（PEP 750，3.14）
+
+语法和 f-string 一样，但结果是**结构化模板**而不是拼好的字符串：
+
+```python
+name = "world"
+t = t"Hello {name}!"
+
+t.strings                              # ['Hello ', '!']     静态片段（插值数 + 1）
+len(t.interpolations)                  # 1
+i = t.interpolations[0]
+i.value                                # 'world'   求值结果
+i.expression                           # 'name'    源码原文
+i.conversion                           # 'r' / 's' / 'a' / ''
+i.format_spec                          # '' 或 '>10'
+t.values                               # ['world']  只取值
+type(t)                                # <class 'Template'>
+```
+
+用途是让下游库（SQL 驱动、HTML 转义、日志）拿到结构而不是成品字符串，从而做参数化/转义。
+
+两点简化，与 CPython 不同：`strings`/`interpolations`/`values` 是 **list**（CPython 是 tuple），
+`repr` 是 `Template(strings=N, interpolations=M)`。遍历、`''.join(...)` 这类用法不受影响。
+
 ### C 的数组变量：`T[N]`
 
 `.cpya` 里定长数组用 `T[N]` 声明，和 C 的声明同序：

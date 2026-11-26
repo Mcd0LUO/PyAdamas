@@ -678,6 +678,27 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'type' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            // 0.567：PEP 750 的 Template / Interpolation 属性。
+            if (ot && ot->kind == TyKind::Template) {
+                VReg tv = expr(*a.value);
+                if (a.attr == "strings")
+                    return call_runtime(RtFn::TemplateStrings, mk_list(t_str()), {tv});
+                if (a.attr == "interpolations")
+                    return call_runtime(RtFn::TemplateInterps, mk_list(t_template()), {tv});
+                if (a.attr == "values")
+                    return call_runtime(RtFn::TemplateValues, mk_list(t_unknown()), {tv});
+                if (a.attr == "value")
+                    return call_runtime(RtFn::InterpValue, t_unknown(), {tv});
+                if (a.attr == "expression")
+                    return call_runtime(RtFn::InterpExpr, t_str(), {tv});
+                if (a.attr == "conversion")
+                    return call_runtime(RtFn::InterpConv, t_str(), {tv});
+                if (a.attr == "format_spec")
+                    return call_runtime(RtFn::InterpFmt, t_str(), {tv});
+                err(e.line, e.col,
+                    std::format("'Template' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::File) {
                 VReg fv = expr(*a.value);
                 if (opt) fv = guard_not_none(fv, std::format("attribute '{}'", a.attr));

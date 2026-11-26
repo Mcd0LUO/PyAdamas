@@ -134,7 +134,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // 内嵌表达式的类型（str 被当成 int 格式化）。
                 auto& j = static_cast<JoinedStr&>(e);
                 for (auto& v : j.values) expr(*v);
-                return t_str();
+                // 0.567：t"..." 是 Template 对象，不是 str。
+                return j.is_template ? t_template() : t_str();
             }
             case ExprKind::FormattedValue: {
                 auto& f = static_cast<FormattedValue&>(e);

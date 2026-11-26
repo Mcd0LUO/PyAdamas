@@ -450,6 +450,56 @@ VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
 }
 
 VReg Lowerer::lower_joined(JoinedStr& j) {
+    // 0.567：t-string -> Template(strings, interpolations)。
+    // strings 的条数恒为 interpolations + 1（空片段也保留），与 PEP 750 一致。
+    if (j.is_template) {
+        TypePtr lty = mk_list(t_str());
+        std::vector<VReg> strs, interps;
+        std::string lit;
+        auto flush = [&]() {
+            strs.push_back(const_str(lit));
+            lit.clear();
+        };
+        for (auto& part : j.values) {
+            if (part->kind == ExprKind::Constant) {
+                auto& c = static_cast<Constant&>(*part);
+                if (c.ck != Constant::CK::Str) {
+                    err(part->line, part->col, "non-string literal inside t-string");
+                    continue;
+                }
+                lit += c.s;
+                continue;
+            }
+            auto& fv = static_cast<FormattedValue&>(*part);
+            flush();
+            VReg val = expr(*fv.value);
+            VReg conv = const_str(fv.conversion == 'r'   ? "r"
+                                  : fv.conversion == 's' ? "s"
+                                  : fv.conversion == 'a' ? "a"
+                                                          : "");
+            VReg fmt = fv.format_spec
+                           ? lower_joined(static_cast<JoinedStr&>(*fv.format_spec))
+                           : const_str("");
+            VReg ip = call_runtime(RtFn::InterpNew, t_template(),
+                                   {val, const_str(fv.expr_src), conv, fmt});
+            interps.push_back(ip);
+        }
+        flush();
+        VReg slist = call_runtime(RtFn::ListNew, lty,
+                                  {const_int(static_cast<int64_t>(strs.size())), const_int(1)});
+        for (VReg v : strs) {
+            retain_elem(v, 1);
+            call_void(RtFn::ListAppend, {slist, v, const_int(1)});
+        }
+        TypePtr ity = mk_list(t_template());
+        VReg ilist = call_runtime(RtFn::ListNew, ity,
+                                  {const_int(static_cast<int64_t>(interps.size())), const_int(1)});
+        for (VReg v : interps) {
+            retain_elem(v, 1);
+            call_void(RtFn::ListAppend, {ilist, v, const_int(1)});
+        }
+        return call_runtime(RtFn::TemplateNew, t_template(), {slist, ilist});
+    }
     VReg acc = const_str("");
     bool first = true;
     for (auto& part : j.values) {

@@ -155,6 +155,18 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
         unsupported.push_back("attribute on a type object");
         return t_unknown();
     }
+    // 0.567：PEP 750 的 Template / Interpolation（同一 kind，按属性名区分）。
+    if (ot->kind == TyKind::Template) {
+        if (a.attr == "strings") return mk_list(t_str());
+        if (a.attr == "interpolations") return mk_list(t_template());
+        if (a.attr == "values") return mk_list(t_unknown());
+        if (a.attr == "value") return t_unknown();
+        if (a.attr == "expression" || a.attr == "conversion" || a.attr == "format_spec")
+            return t_str();
+        err(a.line, a.col,
+            std::format("'Template' object has no attribute '{}'", a.attr));
+        return t_unknown();
+    }
     if (ot->kind == TyKind::File) {
         if (a.attr == "closed") return t_bool();
         if (a.attr == "name" || a.attr == "mode" || a.attr == "encoding" ||

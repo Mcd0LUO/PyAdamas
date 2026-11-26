@@ -37,6 +37,7 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::AsyncGenerator: return "async_generator";
         case TyKind::Future: return "future";
         case TyKind::File: return "file";
+        case TyKind::Template: return "Template";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
         case TyKind::StatResult: return "os.stat_result";

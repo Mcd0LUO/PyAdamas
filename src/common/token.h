@@ -21,6 +21,7 @@ enum class Tok : uint8_t {
     COMPLEX,
     STRING,    // 普通字符串（text 为反转义后的内容）
     BYTES,     // 字节串（lexer 负责切分，类型与运行时按 bytes 处理）
+    TSTRING,   // t-string（PEP 750）：text 同 FSTRING，插值结构由 parser 处理
     FSTRING,   // f-string（text 为引号内原文，反转义与插值由 parser 处理）
     NAME,
 
@@ -86,6 +87,7 @@ inline const char* tok_name(Tok t) {
         case Tok::STRING: return "STRING";
         case Tok::BYTES: return "BYTES";
         case Tok::FSTRING: return "FSTRING";
+        case Tok::TSTRING: return "TSTRING";
         case Tok::NAME: return "NAME";
         case Tok::KW_AND: return "and";
         case Tok::KW_AS: return "as";

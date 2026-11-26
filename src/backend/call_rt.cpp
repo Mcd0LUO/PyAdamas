@@ -681,6 +681,14 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::OsWalk:
         case RtFn::OsSystem:
         case RtFn::TimeMktime:
+        case RtFn::TemplateRepr:      // 0.567：(template*) -> str
+        case RtFn::TemplateStrings:   // 0.567：(template*) -> list*
+        case RtFn::TemplateInterps:
+        case RtFn::TemplateValues:
+        case RtFn::InterpValue:       // 0.567：(interp*) -> i64 / str
+        case RtFn::InterpExpr:
+        case RtFn::InterpConv:
+        case RtFn::InterpFmt:
         case RtFn::AnyNegT:
             gen_rt_i1(in);
             break;
@@ -809,6 +817,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MethodCall0:        // P4：(obj, method)
             gen_rt_i2(in);
             break;
+        case RtFn::TemplateNew:        // 0.567：(strings, interps)
         case RtFn::BufferGetI64:       // 0.536：(buffer*, i64 i)
         case RtFn::BufferGetF64:
             gen_rt_i2(in);
@@ -834,6 +843,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListContainsI64:
         case RtFn::ListContainsStr:
         case RtFn::ListEq:
+        case RtFn::InterpNew:  // 0.567：(value, expr, conv, fmt)
         case RtFn::DictEq:
         case RtFn::ListSortedBy:
         case RtFn::DictBump:

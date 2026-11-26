@@ -160,6 +160,7 @@ struct FormattedValue : Expr {
     // 转换标志: -1 无, 's'/'r'/'a' 各对应 !s !r !a
     int conversion = -1;
     ExprPtr format_spec;  // 可空，对应 :>10 这类
+    std::string expr_src;  // 0.567：t-string 的 Interpolation.expression（源码原文）
     FormattedValue() : Expr(ExprKind::FormattedValue) {}
     void dump(std::ostream& os, int ind) const override {
         pad(os, ind);
@@ -178,6 +179,7 @@ struct FormattedValue : Expr {
 // 既是 f-string 容器，也承载格式说明符里的字面量拼接
 struct JoinedStr : Expr {
     std::vector<ExprPtr> values;  // Constant(str) 或 FormattedValue
+    bool is_template = false;     // 0.567：t"..." -> Template 对象，不是 str
     JoinedStr() : Expr(ExprKind::JoinedStr) {}
     void dump(std::ostream& os, int ind) const override {
         pad(os, ind);

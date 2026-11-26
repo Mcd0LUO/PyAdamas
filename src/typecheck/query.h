@@ -179,6 +179,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Exception:
             return t->name.empty() ? "Exception" : t->name;
         case TyKind::File: return "file";
+        case TyKind::Template: return "Template";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
         case TyKind::StatResult: return "os.stat_result";

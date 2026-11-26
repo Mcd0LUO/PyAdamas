@@ -93,6 +93,17 @@ enum class RtFn : uint16_t {
     BufferSetI64,   // (buffer*, i64 i, i64 v) -> void
     BufferGetF64,   // (buffer*, i64 i) -> f64
     BufferSetF64,   // (buffer*, i64 i, f64 v) -> void
+    // 0.567：PEP 750 t-string
+    TemplateNew,      // (list* strings, list* interps) -> template*
+    InterpNew,        // (i64 value, str expr, str conv, str fmt) -> interp*
+    TemplateStrings,  // (template*) -> list*
+    TemplateInterps,  // (template*) -> list*
+    TemplateValues,   // (template*) -> list*
+    InterpValue,      // (interp*) -> i64
+    InterpExpr,       // (interp*) -> str
+    InterpConv,       // (interp*) -> str
+    InterpFmt,        // (interp*) -> str
+    TemplateRepr,     // (template*) -> str
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
     ListContainsI64,  // (list*, i64) -> i64     list[int] 的成员查找（无分派）
     ListContainsF64,  // (list*, f64) -> i64     list[float] 的成员查找
