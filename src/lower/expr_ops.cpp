@@ -259,8 +259,9 @@ VReg Lowerer::lower_binop(BinOp& b) {
             case TyKind::Bytes: bad = b.op != Tok::PLUS; break;
             case TyKind::List:
             case TyKind::Tuple:
-            case TyKind::Set:
-            case TyKind::Dict: bad = true; break;
+            case TyKind::Set: bad = true; break;
+            // 0.565：dict 的 `|`（PEP 584）走 copy + update。
+            case TyKind::Dict: bad = b.op != Tok::VBAR; break;
             default: break;
         }
         if (bad) {
@@ -272,6 +273,13 @@ VReg Lowerer::lower_binop(BinOp& b) {
     }
     VReg l = expr(*b.left);
     VReg r = expr(*b.right);
+    // 0.565：`d1 | d2` —— 等价 copy(d1) 再 update(d2)，右操作数覆盖同名键。
+    if (ty && ty->kind == TyKind::Dict && b.op == Tok::VBAR) {
+        VReg out = call_runtime(RtFn::DictCopy, ty, {l});
+        VReg other = coerce(r, rt, ty);
+        call_void(RtFn::DictUpdate, {out, other});
+        return out;
+    }
     // 类实例的算术运算：先试左操作数的 dunder，再试右操作数的反射版。
     if ((lt && lt->kind == TyKind::Class) || (rt && rt->kind == TyKind::Class)) {
         VReg dr = lower_dunder_binop(l, lt, r, rt, b.op, false);

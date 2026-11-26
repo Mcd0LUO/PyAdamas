@@ -393,10 +393,8 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
         auto non_none = [](const TypePtr& t) -> TypePtr {
             if (!t) return t;
             if (t->kind == TyKind::Optional) {
-                // 0.563：`ptr[T]` 的内部表示就是 Optional[int] + celem，收窄**不能**把它
-                // 拆成纯 int —— 否则 `p = c.malloc_f(16); if p is not None: p[0] = 1.0`
-                // 会报 "'int' object does not support item assignment"。指针形状原样保留，
-                // 运行期的 guard_not_none 仍然会检查。
+                // 0.563：`ptr[T]` 就是 Optional[int]+celem，收窄不能拆成纯 int（否则 p[i] 报
+                // "int 不可下标"）；形状原样保留，运行期 guard_not_none 照旧检查。
                 if (t->celem != CKind::None || !t->cdims.empty()) return t;
                 return t->sub.empty() ? t_unknown() : t->sub[0];
             }
@@ -562,11 +560,8 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             auto st = expr(*sub->slice);
             if (ot && ot->kind == TyKind::StructTime) { err(line, col, kStructTimeImmutable); return; }
             if (sub->slice->kind == ExprKind::Slice) {
-                // 切片赋值：运行时展开，但**元素类型必须检查**。原实现只确认
-                // 「对象可变」就放过，于是 `l: list[int]; l[0:1] = ['hello']`
-                // 编译通过、运行时把字符串指针写进 int 列表，后续按 int 读出来
-                // 是垃圾（实测 96042627193968 这类值）。检查方式与单元素赋值
-                // （下面的 merge_elem）一致：值是序列就逐个元素对，否则整体对。
+                // 切片赋值：元素类型必须检查（否则 `l: list[int]; l[0:1] = ['hello']`
+                // 会把字符串指针写进 int 列表，读出来是垃圾）；与 merge_elem 同口径。
                 auto& sl = static_cast<SliceExpr&>(*sub->slice);
                 if (sl.lower) expr(*sl.lower);
                 if (sl.upper) expr(*sl.upper);

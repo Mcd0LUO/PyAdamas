@@ -6,7 +6,7 @@
 // 运行时库函数。名字固定，后端按枚举直接生成调用，
 // 不经过符号查找，也不允许用户代码直接引用。
 enum class RtFn : uint16_t {
-    ListNew,     // (i64 cap) -> list*
+    ListNew,     // (i64 cap, i64 elem_kind) -> list*
     ListAppend,  // (list*, i64 v, i64 heap) -> void  heap: 0 非堆 / 1 堆 / 2 unknown
     ListGet,     // (list*, i64) -> i64
     ListSet,     // (list*, i64, i64, i64 heap) -> void（0.303 种类维护）

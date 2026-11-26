@@ -82,12 +82,23 @@ StmtPtr Parser::parse_try() {
             ExceptHandler h;
             if (!check(Tok::COLON)) {
                 h.type = parse_namedexpr();
-                if (check(Tok::KW_AS)) {
+                // PEP 758（3.14）：`except A, B:` 合法（不带 as 时可省括号）。
+                // 带 as 的 `except A, e` 仍是 Python 2 写法，但要报对错误。
+                if (check(Tok::COMMA) && !check(Tok::KW_AS)) {
+                    auto tup = node_at<TupleExpr>(ln, cl);
+                    tup->elts.push_back(std::move(h.type));
+                    while (check(Tok::COMMA)) {
+                        advance();
+                        tup->elts.push_back(parse_namedexpr());
+                    }
+                    if (check(Tok::KW_AS))
+                        throw err("'except A, B as e' is not valid Python; "
+                                  "write 'except (A, B) as e'")
+                            ;
+                    h.type = std::move(tup);
+                } else if (check(Tok::KW_AS)) {
                     advance();
                     h.name = expect(Tok::NAME, "exception name").text;
-                } else if (check(Tok::COMMA)) {
-                    // Python 2 风格，给出明确错误
-                    throw err("Python 2 style 'except X, e' is not supported, use 'as'");
                 }
             }
             expect(Tok::COLON, "':' after except");

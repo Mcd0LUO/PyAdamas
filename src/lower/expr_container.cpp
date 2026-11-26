@@ -285,6 +285,47 @@ VReg Lowerer::build_seq_vregs(std::vector<VReg> vals, std::vector<TypePtr> tys,
 }
 
 VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple) {
+    // 0.565：`[*a, x, *b]` —— 逐段扩展。元素先各自包成单元素列表（复用正常字面量路径，
+    // 元素类型转换与引用计数都不变），再 extend 到结果里；星号段直接展开。
+    if (!is_tuple) {
+        bool has_star = false;
+        for (auto& e : elts)
+            if (e->kind == ExprKind::Starred) has_star = true;
+        if (has_star) {
+            // 元素所有权类别与普通字面量同口径：0 非堆 / 1 堆 / 2 unknown（3 未定按 2）。
+            int ek = list_kind(ty);
+            if (ek == 3) ek = 2;
+            VReg acc = call_runtime(RtFn::ListNew, ty,
+                                    {const_int(static_cast<int64_t>(elts.size())),
+                                     const_int(ek)});
+            for (auto& e : elts) {
+                VReg seg;
+                if (e->kind == ExprKind::Starred) {
+                    auto& st = static_cast<Starred&>(*e);
+                    seg = expr(*st.value);
+                    TypePtr st_type = tc_.type_of(st.value.get());
+                    if (st_type && st_type->kind != TyKind::List &&
+                        st_type->kind != TyKind::Tuple && st_type->kind != TyKind::Unknown) {
+                        err(e->line, e->col,
+                            std::format("'*' unpacking expects a list, got '{}'",
+                                        type_name(st_type)));
+                        return const_none();
+                    }
+                } else {
+                    VReg v = expr(*e);
+                    TypePtr want;
+                    if (ty && !ty->sub.empty()) want = ty->sub[0];
+                    v = coerce(v, tc_.type_of(e.get()), want);
+                    // 保守：按 unknown 元素类别 append（会走 pa_unknown_is_heap 判定）
+                    retain_elem(v, ek);
+                    call_void(RtFn::ListAppend, {acc, v, const_int(ek)});
+                    continue;
+                }
+                call_void(RtFn::ListExtend, {acc, seg});
+            }
+            return acc;
+        }
+    }
     std::vector<VReg> args;
     args.reserve(elts.size());
     // 元素所有权类别：0 非堆 / 1 堆 / 2 unknown 或混合。

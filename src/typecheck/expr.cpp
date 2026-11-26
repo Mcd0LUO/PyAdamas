@@ -145,10 +145,19 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::List: {
                 auto& l = static_cast<ListExpr&>(e);
                 if (l.elts.empty()) return mk_list(fresh_hole());
-                TypePtr acc = expr(*l.elts[0]);
+                // 0.565：`[*a, x]` 里的 `*a` 贡献的是 a 的**元素类型**，不是 list 本身。
+                auto elem_of = [&](Expr* el) -> TypePtr {
+                    if (el->kind != ExprKind::Starred) return expr(*el);
+                    TypePtr it = expr(*static_cast<Starred*>(el)->value);
+                    if (it && (it->kind == TyKind::List || it->kind == TyKind::Tuple) &&
+                        !it->sub.empty())
+                        return it->sub[0];
+                    return t_unknown();
+                };
+                TypePtr acc = elem_of(l.elts[0].get());
                 bool all_same = true;
                 for (size_t i = 1; i < l.elts.size(); ++i) {
-                    auto t = expr(*l.elts[i]);
+                    auto t = elem_of(l.elts[i].get());
                     if (!type_eq(acc, t)) all_same = false;
                     acc = join(acc, t);
                 }
@@ -1106,6 +1115,9 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 // time.struct_time 的下标形态：9 个 int（旧 tuple 语义，0.518 保留）。
                 return t_int();
             default:
+                // 0.565：类名下标是泛型参数（`Box[int]`）—— 我们不做泛型，擦除即可，
+                // 让它能继续用于构造（`Box[int](3)`）。
+                if (obj->kind == TyKind::ClassObj) return obj;
                 // 类名下标是泛型参数（`MyList[int]`、`Generic[T]`），
                 // 我们不做泛型，返回 unknown 比判死有用
                 if (obj->kind == TyKind::Class) {
