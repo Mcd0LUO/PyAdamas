@@ -589,6 +589,14 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(2, 3);
                 return t_bytes();
             }
+            if (name == "isascii") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "rindex") {
+                argc(1, 3);
+                return t_int();
+            }
             if (name == "translate") {
                 argc(1, 1);
                 return t_bytes();

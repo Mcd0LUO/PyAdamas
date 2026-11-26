@@ -267,13 +267,18 @@ VReg Lowerer::lower_method_bytes(Attribute& at, Call& c, VReg recv) {
         VReg maxsplit = need_int(1, -1);
         return emit(StrOp::SplitSep, lt, sep, maxsplit, kNoReg);
     }
-    if (at.attr == "find" || at.attr == "rfind") {
+    if (at.attr == "find" || at.attr == "rfind" || at.attr == "rindex") {
         if (!arg_count(1, 3)) return const_none();
         VReg sub = need_bytes(0);
         VReg start = need_int(1, 0);
         VReg end = need_int(2, std::numeric_limits<int64_t>::max());
-        return emit(at.attr == "find" ? StrOp::Find : StrOp::RFind, t_int(),
-                    sub, start, end);
+        StrOp op = at.attr == "find" ? StrOp::Find
+                   : at.attr == "rfind" ? StrOp::RFind : StrOp::RIndex;
+        return emit(op, t_int(), sub, start, end);
+    }
+    if (at.attr == "isascii") {
+        if (!arg_count(0, 0)) return const_none();
+        return emit(StrOp::IsAscii, t_bool(), kNoReg, kNoReg, kNoReg);
     }
     if (at.attr == "count") {
         if (!arg_count(1, 1)) return const_none();
