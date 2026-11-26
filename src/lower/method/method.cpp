@@ -17,6 +17,28 @@ static int mi_block_offset(const ClassInfo* cls, const ClassInfo* target) {
     return -1;
 }
 
+// 显式直调 C.m(obj, ...) 里 self 实参的静态类型：位置实参优先，其次同名的
+// self= 关键字。*解包或没有实参时返回 nullptr（拿不到布局起点，保持旧行为）。
+// 这个类型决定 self 现在是哪一套字段布局。
+static TypePtr explicit_self_type(const Call& c, const FuncInfo& sig,
+                                  const TypeChecker& tc) {
+    if (sig.pos.empty()) return nullptr;
+    const Expr* se = nullptr;
+    if (!c.args.empty() && c.args[0] && c.args[0]->kind != ExprKind::Starred)
+        se = c.args[0].get();
+    else
+        for (auto& k : c.keywords)
+            if (!k.arg.empty() && k.arg == sig.pos[0].name && k.value) {
+                se = k.value.get();
+                break;
+            }
+    if (!se) return nullptr;
+    TypePtr t = tc.type_of(se);
+    // Optional[T] 的表示就是同一根指针，剥掉外壳再按类布局算。
+    if (t && t->kind == TyKind::Optional && !t->sub.empty()) t = t->sub[0];
+    return t;
+}
+
 VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     auto fit = fn_owner_class_.find(st_->fn);
     const ClassInfo* owner = fit == fn_owner_class_.end() ? nullptr : fit->second;
@@ -379,6 +401,33 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     return const_none();
                 }
                 std::vector<VReg> args = bind_args(c, m->sig, m->def);
+                // 多继承字段块平移（BUG-1）：显式传 self 的直调同样要挪。被调
+                // 实现按**声明类**的布局算 self.<字段> 偏移；实参的静态类若把
+                // 那个类当非主基类、把它的字段块追加到了别处
+                // （base_field_offsets），self 必须先挪到块起点。
+                // 走 thunk 时被调的位移是相对**接收者类 cls**的（thunk 装在它的
+                // vtable 里），所以起点用 cls 而不是 m->owner。
+                // 以前这条路只做 bind_args，于是
+                //   class C(A, B): __init__: A.__init__(self); B.__init__(self)
+                // 里 B 的字段写到了 A 的槽上（静默错值）。
+                {
+                    const IRFunction* callee =
+                        mod_.funcs[static_cast<size_t>(nvt[static_cast<size_t>(m->slot)])].get();
+                    const ClassInfo* want = (callee && callee->mi_thunk) ? cls : m->owner;
+                    TypePtr self_ty = explicit_self_type(c, *m->sig, tc_);
+                    if (want && !args.empty() && self_ty && self_ty->kind == TyKind::Class &&
+                        self_ty->cls && self_ty->cls != want) {
+                        int block = mi_block_offset(self_ty->cls, want);
+                        if (block > 0) {
+                            Inst ad;
+                            ad.op = IrOp::Bin;
+                            ad.bop = BinKind::Add;
+                            ad.a = args[0];
+                            ad.b = const_int(8 * block);
+                            args[0] = def(t_int(), std::move(ad));
+                        }
+                    }
+                }
                 Inst cd;
                 cd.op = IrOp::CallDirect;
                 cd.idx = Operand::func(nvt[static_cast<size_t>(m->slot)]);
