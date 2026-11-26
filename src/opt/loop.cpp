@@ -295,6 +295,11 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
                 TypePtr at = in.a < static_cast<VReg>(fn.vreg_ty.size())
                                  ? fn.vreg_ty[in.a]
                                  : nullptr;
+                // 0.676：**float → int 的转换不是纯指令**。codegen 对 cvttsd2si 的
+                // INT64_MIN 哨兵做检查，NaN / ±inf / 越界会抛 ValueError / OverflowError
+                // （backend/ops.cpp 的 convert 分支）。外提会把异常提前到循环之前、
+                // 甚至让「零次循环」也抛——实测 -O2 与 -O0 输出不同。
+                if (in.ty && in.ty->kind == TyKind::Int && at && ir_is_float(at)) return false;
                 return numeric_ty(in.ty) && numeric_ty(at) && operand_ok(in.a);
             }
             case IrOp::LoadSlot: {

@@ -6,6 +6,49 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.676] - 2026-11-27
+
+> fix(opt)：**两处 -O2 语义错误**（同一根因：`float → int` 转换被当成纯指令）。
+>
+> 来自优化遍审计（`src/opt/` 25 个 pass 的变换安全性）。
+>
+> ### #1 LICM 外提了会抛异常的 `int(x)`
+>
+> ```python
+> def f(n: int, x: float) -> int:
+>     while i < n:
+>         y = int(x)        # ← 被外提到循环之前
+>         i = i + 1
+> # loop 0 次 + x = inf：
+> #   -O0 → 15    -O2 → 99（凭空抛 OverflowError 被外层 catch）
+> ```
+>
+> `hoistable` 的 Convert 分支只要求「数值类型对得上」，但 codegen 对 `cvttsd2si` 的 `INT64_MIN`
+>哨兵做检查，NaN / ±inf / 越界会抛 ValueError / OverflowError。`fold.cpp` 的 `is_pure` 早为 DCE
+>修过这一点，**没有传播到 LICM**。修法：目标 Int 且源 Float 的 Convert 一律不外提。
+>
+> ### #2 `promote_globals_in_loops` 漏掉 Convert → 展开后读到陈旧全局值
+>
+> ```python
+> g = 0
+> def f(n: int, x: float) -> int:
+>     global g
+>     while i < n:
+>         g = g + 1
+>         y = int(x + float(i))   # ← 抛异常，展开跳过循环出口的写回
+> # -O0 → r=1 g=1     -O2 → r=1 g=0（静默错值）
+> ```
+>
+> `is_raising_op` 列了除零等，但漏了 Convert。修法：`case IrOp::Convert: return in.ty->kind == Int`
+>（保守：这里拿不到操作数类型，多拒绝几个 int→int 只是少一档优化）。
+>
+> 两条都有回归用例：`tests/run/licm_float_convert.py`、`tests/run/global_promote_convert.py`
+>（`-O0` 与 `-O2` 输出现在一致，`difftest` 从此能钉住这两个形态）。
+>
+> 审计同时**证伪**了一条怀疑（`rc_redundant_pairs` 的 1b 形态夹调用）：200 万次抛异常穿过该形态，
+>`--asan -O2` + `detect_leaks=1` **0 leak**、RSS 与 -O0 相同，说明另有帧展开清理兜住。
+>
+> 套件 **600**（新增 2 个用例）。
 ## [0.675] - 2026-11-27
 
 > docs：确认并记录一个对「怎么验证优化遍」很关键的事实——

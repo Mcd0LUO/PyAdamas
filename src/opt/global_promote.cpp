@@ -153,6 +153,13 @@ bool is_raising_op(const Inst& in) {
         case IrOp::Bin:
             return in.bop == BinKind::Div || in.bop == BinKind::Mod ||
                    in.bop == BinKind::FloorDiv;
+        case IrOp::Convert:
+            // 0.676：float → int 可能在运行期抛（NaN / ±inf / 越界，见 codegen 的
+            // cvttsd2si 哨兵检查）。漏掉这一类，异常展开会跳过循环出口的写回，
+            // 调用方 catch 后读到**陈旧**的全局值（实测 -O2 与 -O0 不同）。
+            // 保守取「目标类型是 Int」的全部转换（这里拿不到操作数类型；多拒绝几个
+            // int→int 转换只是少一档优化，不会错）。
+            return in.ty && in.ty->kind == TyKind::Int;
         default:
             return false;
     }
