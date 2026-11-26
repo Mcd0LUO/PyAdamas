@@ -469,10 +469,17 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
             for (auto& kw : c.keywords) expr(*kw.value);
             return t_unknown();
         }
+        // 0.648：跨模块的类对象 `mod.K` 不是裸 Name，`is_class_receiver` 认不出，
+        // 于是 `mod.K.cm()` / `mod.K.sm()` 全部落到「实例方法」分支报
+        // 「'type[K]' object has no method 'cm'」（审计 A8-2）。类对象类型本身就是
+        // 判据：接收者静态类型是 ClassObj 且写法是属性链，就按类接收者处理。
+        const bool cls_recv = is_class_receiver(a) ||
+                              (ot && ot->kind == TyKind::ClassObj &&
+                               a.value && a.value->kind == ExprKind::Attribute);
         // 类接收者 + 装饰方法：类属性里存的是包装函数，self 显式传。
-        if (is_class_receiver(a) && ot && ot->kind == TyKind::ClassObj && !ot->sub.empty())
+        if (cls_recv && ot && ot->kind == TyKind::ClassObj && !ot->sub.empty())
             ot = ot->sub[0];
-        if (is_class_receiver(a) && ot->kind == TyKind::Class && ot->cls) {
+        if (cls_recv && ot->kind == TyKind::Class && ot->cls) {
             const MethodInfo* m = ot->cls->method(a.attr);
             if (m && m->decorated) {
                 if (!m->decorated_ty || m->decorated_ty->kind != TyKind::Func ||
@@ -487,7 +494,7 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
             }
         }
         // 类接收者的普通方法：C.m(obj, ...) 显式传 self，按含 self 的签名检查。
-        if (is_class_receiver(a) && ot->kind == TyKind::Class && ot->cls) {
+        if (cls_recv && ot->kind == TyKind::Class && ot->cls) {
             const MethodInfo* m = ot->cls->method(a.attr);
             if (m && m->kind == MethodKind::Normal && !m->decorated && m->sig)
                 return check_args(m->sig, c);

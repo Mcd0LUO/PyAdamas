@@ -319,6 +319,14 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (cit != classes_.end() && cit->second && !cit->second->is_exception_class)
                 class_recv = cit->second.get();
         }
+    } else if (at.value && at.value->kind == ExprKind::Attribute) {
+        // 0.648：跨模块类对象 `mod.K` 不是裸 Name，静态类型就是 ClassObj[K]。
+        // 不认它的话 `mod.K.cm()` / `mod.K.sm()` 会一路掉到「方法不支持」
+        // （审计 A8-2）。类接收者的类从这里取，后面的分派逻辑完全复用。
+        TypePtr vt = strip_optional(tc_.type_of(at.value.get()));
+        if (vt && vt->kind == TyKind::ClassObj && !vt->sub.empty() && vt->sub[0] &&
+            vt->sub[0]->kind == TyKind::Class && vt->sub[0]->cls)
+            class_recv = vt->sub[0]->cls;
     }
     if (class_recv) {
         {
