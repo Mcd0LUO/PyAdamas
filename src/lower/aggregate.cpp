@@ -18,20 +18,16 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             std::format("{}() arguments must be numbers or strings", is_min ? "min" : "max"));
         return const_none();
     }
-    CmpKind cop = is_min ? CmpKind::Lt : CmpKind::Gt;
     int best = new_temp_slot(acc_ty);
     // big 之间的大小关系是运行时函数 pa_big_cmp（返回 -1/0/1），裸 Cmp 的
     // codegen 没有 big 路径，会把 big 指针当整数比。这里统一收口。
+    // 统一走 lower_cmp_single（0.633）：它按静态类型分派——big 走 pa_big_cmp、
+    // 字符串走内容比较、unknown 走 pa_any_cmp 的动态分派、float 走 SSE 比较。
+    // 原来只特判了 big，且生成器路径干脆没用它（`min(generator of big)` 段错误）。
     auto take_new = [&](VReg cand, const TypePtr& ty) -> VReg {
-        VReg cmp_val = cand;
-        if (ty && ty->kind == TyKind::Big)
-            cmp_val = call_runtime(RtFn::BigCmp, t_int(), {cand, load_slot(best, ty)});
-        Inst cmp;
-        cmp.op = IrOp::Cmp;
-        cmp.cop = cop;
-        cmp.a = cmp_val;
-        cmp.b = (ty && ty->kind == TyKind::Big) ? const_int(0) : load_slot(best, acc_ty);
-        return def(t_bool(), std::move(cmp));
+        VReg cur = load_slot(best, ty);
+        return lower_cmp_single(cand, ty, cur, ty, is_min ? CmpOp::Lt : CmpOp::Gt, c.line,
+                                c.col);
     };
 
     if (c.args.size() == 1) {
@@ -76,11 +72,30 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
 
         // 生成器：没有长度也没有下标，流式比较，空的时候同样报 ValueError。
         if (seq_ty->kind == TyKind::Generator) {
+            // 元素类型未知时无法选比较指令（big 要 pa_big_cmp、float 要 SSE、
+            // 字符串要比内容）。之前会退化成裸 Cmp/AnyCmp 的错配：实测
+            // min(generator of big) 返回较大值、混合 int/big 段错误。
+            // 明确拒绝，别静默错值。
+            TypePtr et0 = seq_ty->sub.empty() ? t_unknown() : seq_ty->sub[0];
+            // big 元素同样拒绝：生成器路径拿不到稳定的静态元素域，
+            // pa_big_cmp 的入参一旦不是 big 指针就会崩（实测段错误）。
+            if (!et0 || et0->kind == TyKind::Unknown || et0->kind == TyKind::Big) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("{}() over a generator requires a known element type",
+                                is_min ? "min" : "max"));
+                return const_none();
+            }
             VReg seq = expr(*c.args[0]);
             int seen = new_temp_slot(t_int());
             store_slot(seen, const_int(0));
             emit_gen_for_each(seq, seq_ty, [&](VReg ev, TypePtr et, int cond, int) {
-                VReg v = coerce(ev, et, acc_ty);
+                // 生成器的结果类型常常推不出（min(generator of big) → acc_ty 是
+                // unknown），此时按元素类型比较，否则 big 会退化成指针比较。
+                TypePtr cmp_ty = acc_ty;
+                if ((!cmp_ty || cmp_ty->kind == TyKind::Unknown) && et &&
+                    et->kind != TyKind::Unknown)
+                    cmp_ty = et;
+                VReg v = coerce(ev, et, cmp_ty);
                 Inst c0;
                 c0.op = IrOp::Cmp;
                 c0.cop = CmpKind::Eq;
@@ -103,12 +118,9 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
                 j0.target = cond;
                 emit(std::move(j0));
                 switch_to(cmp_b);
-                Inst cmp;
-                cmp.op = IrOp::Cmp;
-                cmp.cop = cop;
-                cmp.a = v;
-                cmp.b = load_slot(best, acc_ty);
-                VReg take = def(t_bool(), std::move(cmp));
+                // 与容器/多实参路径同口径：big 必须走 pa_big_cmp，裸 Cmp 比的是
+                // 堆指针（0.633，实测 min(generator of big) 段错误）。
+                VReg take = take_new(v, cmp_ty);
                 int choose = new_block("minmax.gchoose");
                 Inst bt;
                 bt.op = IrOp::Branch;
@@ -141,6 +153,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             call_void(raise_rt(RtFn::Raise), {const_str("ValueError"),
                                     const_str(is_min ? "min() iterable argument is empty"
                                                      : "max() iterable argument is empty")});
+            end_unreachable();  // Raise 是 noreturn
             switch_to(done_b);
             return load_slot(best, acc_ty);
         }
@@ -184,6 +197,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         call_void(raise_rt(RtFn::Raise), {const_str("ValueError"),
                                 const_str(is_min ? "min() iterable argument is empty"
                                                  : "max() iterable argument is empty")});
+        end_unreachable();  // Raise 是 noreturn
         switch_to(nonempty_b);
 
         auto elem_at = [&](VReg idx) -> VReg {
