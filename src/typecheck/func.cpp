@@ -106,11 +106,8 @@ bool TypeChecker::reserve_imported_method_slots(const ClassInfo* cls, int line, 
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (!func_owners_.count(&f)) {
             func_owners_[&f] = owner;
-            // 模块级函数与方法直接进重查表。  **嵌套函数也要进**（0.382）：它们的未标注形参同样靠调用点回填， 以前不登记，于是「函数里定义的 def 拿到实参类型」这条路径完全
-            // 不存在 —— 形参停在 unknown，降级层看到 unknown 就报 「method 'x' is not supported」。
-            //
-            // 重查时词法父作用域靠 `nested_recheck_parent_` 重新挂接（工作队列
-            // 里已经这么做了），作用域对象由 pool_ 持有，重查期间仍然有效。
+            // 嵌套函数也要进重查表（0.382）：未标注形参靠调用点回填，不登记就停在
+            // unknown；重查时词法父作用域经 nested_recheck_parent_ 重新挂接。
             if (cur_ == module_ || owner) {
                 func_defs_.push_back(&f);
             } else {
@@ -142,7 +139,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             if (f.decorators.empty()) {
                 auto t = new_ty(TyKind::Func);
                 t->fn = info;
-                declare(f.name, t, f.line, f.col, true);
+                // 0.568：def 不是标注 —— 同名重定义（两支各定义一个）合法，
+                // 按「标注」登记会被 ann_seen 判成类型冲突。
+                declare(f.name, t, f.line, f.col, false);
             } else {
                 // 装饰器的返回值未知；函数体仍然按自己的签名检查
                 declare(f.name, t_unknown(), f.line, f.col, true);

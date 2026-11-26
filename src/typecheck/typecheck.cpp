@@ -1,6 +1,7 @@
 // typecheck/typecheck.cpp —— 类型检查驱动：作用域、声明收集、函数签名、注解解析
 #include "driver/build.h"
 #include "typecheck/typecheck.h"
+#include <cstdio>
 
 #include <deque>
 
@@ -567,7 +568,7 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
     // 早于正式导入执行，注解里的模块名/导入类必须在那之前就能解析。
     // 只登记「确实可见」的模块与名字，诊断与 unsupported 记录仍由正式的
     // stmt_import 负责；cimport 有加载 .cpya 的副作用，不在这里预跑。
-    void TypeChecker::hoist_import_bindings(std::vector<StmtPtr>& body) {
+    void TypeChecker::hoist_import_bindings(std::vector<StmtPtr>& body, bool in_block) {
         if (!module_lookup_) return;
         for (auto& s : body) {
             if (auto* im = dynamic_cast<Import*>(s.get())) {
@@ -576,8 +577,19 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
                     std::string bind = al.asname.empty() ? al.name : al.asname;
                     if (auto pos = bind.find('.'); pos != std::string::npos)
                         bind = bind.substr(0, pos);
-                    if (auto info = module_lookup_(al.name))
+                    if (auto info = module_lookup_(al.name)) {
                         module_->modules[bind] = std::move(info);
+                        // 0.568：**块内**的 import 还要留一个变量占位。分支作用域还原会
+                        // 把 modules 里的别名一起抹掉（getpass.py 的 try/except/else 就是
+                        // 这样丢的 termios），名字本身仍是模块级绑定。
+                        if (in_block)
+                            module_->vars.try_emplace(bind, Symbol{t_unknown(), im->line, false, false});
+                    } else {
+                        // 0.568：C 扩展模块（termios / msvcrt / readline）查不到 .py 接口。
+                        // 名字本身仍然是模块级绑定，占位成 unknown——不然分支作用域一还原，
+                        // 后面 `termios.tcgetattr(...)` 就成了「未定义名字」（getpass.py）。
+                        module_->vars.try_emplace(bind, Symbol{t_unknown(), im->line, false, false});
+                    }
                 }
                 continue;
             }
