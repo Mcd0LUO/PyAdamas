@@ -750,6 +750,36 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 std::vector<const pyadamas::ClassInfo*> mro;
                 for (auto* k : cls->mro) mro.push_back(k);
                 if (mro.empty()) mro.push_back(cls);
+                // A8-3：类属性（类体里不带动画的赋值）。导入方要能读
+                // mod.C.X / c.X，而值真实存放在**定义模块**的隐藏全局里，
+                // 所以这里把解析好的符号名一起导出；跨模块只读（writable=0）。
+                // 同名方法优先（读路径先查方法表），不导出成类属性。
+                for (const pyadamas::ClassInfo* k : mro) {
+                    for (auto& ca : k->class_attrs) {
+                        if (flat->class_attr(ca.name)) continue;  // 最近声明者胜出
+                        bool is_method = false;
+                        for (const pyadamas::ClassInfo* mk : mro)
+                            if (mk && mk->own_method(ca.name)) { is_method = true; break; }
+                        if (is_method) continue;
+                        pyadamas::ClassAttrInfo a;
+                        a.name = ca.name;
+                        a.ty = ca.ty;
+                        a.owner = flat.get();
+                        a.writable = false;
+                        if (!ca.external_symbol.empty()) {
+                            // 二段导入（本模块把导入类的接口再导出）：符号已解析。
+                            a.external_symbol = ca.external_symbol;
+                        } else {
+                            std::string decl_mod = k->imported() ? k->origin_module : u.name;
+                            std::string decl_cls = k->imported() ? k->external_name() : k->name;
+                            a.external_symbol = pyadamas::module_global_symbol(
+                                decl_mod,
+                                std::format("__pa_cattr_{}_{}", decl_cls, ca.name));
+                        }
+                        flat->class_attrs.push_back(std::move(a));
+                    }
+                }
+
                 for (const pyadamas::ClassInfo* k : mro) {
                     if (!k) continue;
                     for (auto& m : k->methods) {

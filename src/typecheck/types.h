@@ -414,6 +414,13 @@ struct ClassAttrInfo {
     TypePtr ty;
     Expr* init = nullptr;            // 类体里的初值表达式，降级时求值一次
     const ClassInfo* owner = nullptr;  // 声明它的类
+    // A8-3：导入类的类属性。跨模块时真实存储是**定义模块**的隐藏全局
+    // （__pa_cattr_<声明类>_<属性> 经模块前缀修饰），这里带解析好的符号名；
+    // 本模块自己声明的类属性为空（降级时按 local global 分配）。
+    std::string external_symbol;
+    // 跨模块只读：类属性的写会走 COW/标志位，跨模块不支持，导入方要明确
+    // 报错而不是写进定义模块的全局（编码进接口的「是否可写」）。
+    bool writable = true;
 };
 
 // 跨模块祖先描述：导入类携带的完整 MRO 链（不含自身）。方法槽与类编号

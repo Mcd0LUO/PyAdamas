@@ -24,6 +24,18 @@ int Lowerer::class_attr_global(const ClassInfo* owner, const std::string& name, 
     return gi;
 }
 
+// A8-3：类属性「声明者那份」的存储槽。导入类的类属性真实存储在**定义模块**
+// 的隐藏全局里，接口带了解析好的符号名：声明成外部全局直接引用。以前这里
+// 无条件按本模块分配，于是导入方读到自己模块的空槽（0 / 空串）。
+int Lowerer::class_attr_decl_slot(const ClassAttrInfo* ca) {
+    if (!ca->external_symbol.empty())
+        return extern_global(ca->external_symbol,
+                             std::format("{}.{}", ca->owner ? ca->owner->name : "?",
+                                         ca->name),
+                             ca->ty);
+    return class_attr_global(ca->owner, ca->name, ca->ty);
+}
+
 // 类属性的存储位置。
 //   声明者：自己就是唯一那份，没有标志位。
 //   赋过值的子类：有自己的槽 + 「已拥有」标志；标志为 0 时读父类那份。
@@ -32,14 +44,14 @@ Lowerer::ClassAttrStorage Lowerer::class_attr_storage(const ClassInfo* recv,
                                                       const ClassAttrInfo* ca) {
     ClassAttrStorage st;
     if (!recv || recv == ca->owner) {
-        st.slot = class_attr_global(ca->owner, ca->name, ca->ty);
+        st.slot = class_attr_decl_slot(ca);
         return st;
     }
     if (recv->cowed_attrs.count(ca->name)) {
         st.slot = class_attr_global(recv, ca->name, ca->ty);
         std::string sym = std::format("__pa_cattr_own_{}_{}", recv->name, ca->name);
         st.flag = global_idx_as(sym, t_int());
-        st.parent = class_attr_storage(ca->owner, ca).slot;
+        st.parent = class_attr_decl_slot(ca);
         return st;
     }
     // 沿 base 链向上找第一个 COW 祖先（0.622）：B.x = 2 之后，C.x / a.x（a: A = C()）
