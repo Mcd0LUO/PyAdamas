@@ -104,7 +104,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 ### 1.4 字符串方法（`pa_str_method`，操作码见 `src/ir/ops.h:1044-1050`）
 
 分派入口 `runtime/rt_str.c:352-687`，`bytes` 的方法复用同一份实现
-（`src/lower/method_str.cpp:188-298`）。逐 op 标注：
+（`src/lower/method/method_str.cpp:188-298`）。逐 op 标注：
 
 | op / 行号 | 现状 | 改成码点后 |
 |---|---|---|
@@ -228,12 +228,12 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | 位置 | 现状 | 影响 |
 |---|---|---|
 | `runtime/rt_internal.h:217-221` | 一个 `PyAdamasStr` 结构体同时表示 str 和 bytes（compatibility.md:287 明说「bytes 没有独立运行期种类」） | 码点语义下两者「对外长度」不同 ⇒ 所有**共享入口**必须带静态类型参数（§2.9） |
-| `src/lower/method_str.cpp:188-298` | bytes 方法借用 `StrMethod` 同一套 op | 加 `is_bytes` 参数（§2.9） |
+| `src/lower/method/method_str.cpp:188-298` | bytes 方法借用 `StrMethod` 同一套 op | 加 `is_bytes` 参数（§2.9） |
 | `src/lower/expr_container.cpp:22-31` | str 和 bytes 切片都发 `RtFn::StrSlice` | 拆成 `StrSlice` / `BytesSlice` |
 | `src/backend/ops.cpp:252-266` | `gen_bin` 对 Str/Bytes 都发 `pa_str_concat` | 按 `in.ty` 分 `pa_str_concat` / `pa_bytes_concat` |
 | `src/lower/expr_ops.cpp:28-68` | 百分号格式化的 `is_bytes` 已传但运行时丢弃 | 运行时用起来（§1.6） |
 | `src/lower/expr_ops.cpp:19-20`、`lower/call.cpp:221`、`lower/impl_util.cpp:198` | 3 处「先当 str 常量、再 `retype` 成 bytes」 | 改成真正的 bytes 字面量（§2.6 的 intern kind） |
-| `src/lower/method_str.cpp:25-29,189-194` | `encode/decode` 只是改标类型（零成本） | 码点语义下必须真正换算公共长度（§7.2） |
+| `src/lower/method/method_str.cpp:25-29,189-194` | `encode/decode` 只是改标类型（零成本） | 码点语义下必须真正换算公共长度（§7.2） |
 | `runtime/rt_str.c:352` | `pa_str_method` 无类型参数 | 加 `is_bytes`（放在第 6 个整型实参，`RtFn` 调用支持 6 参） |
 
 ### 1.12 后端/降级里对字符串下标的特化（汇总）
@@ -554,7 +554,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
   （pub 与 len 相等，两种语义同值），非 ASCII 需要新对象：拷贝字节 + 设
   `pub=len`（O(n)）。
 - `bytes.decode([encoding])`：返回 str 对象；ASCII 零复制；非 ASCII 扫描算 pub
-  （O(n)）。编码名参数继续忽略（现状如此，`lower/method_str.cpp:25-29`）。
+  （O(n)）。编码名参数继续忽略（现状如此，`lower/method/method_str.cpp:25-29`）。
 
 ---
 
@@ -577,7 +577,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 | 项 | 内容 |
 |---|---|
-| 改哪些文件 | `runtime/rt_str.c:60-64`（char_at 码点 + `pa_cp_str`）、`runtime/rt_core.c:787-790`（`pa_char_str` 只管 ASCII）、`runtime/rt_slice.c:75-94,169-174`（str 切片 / `pa_str_to_list`）、新增 `pa_bytes_slice` / `pa_str_char_at_cursor`、`src/ir/ops.h`（BytesSlice / BytesConcat / BytesRepeat / StrCharAtCursor 等 RtFn）、`src/backend/call_rt.cpp`（新 RtFn 分派）、`src/backend/ops.cpp:252-266`（concat 分家）、`src/lower/expr_container.cpp:22-31`（切片选路）、`src/lower/stmt.cpp:1015-1026,1063-1108` 与 `:668-670,733-737` 与 `:796-798,895-910`（for/enumerate/zip 游标）、`src/lower/comp.cpp:378-384`（推导式游标）、`src/lower/expr_ops.cpp:144-165`（bytes 重复）、`src/lower/method_str.cpp:25-29,189-194`（encode/decode 真转换） |
+| 改哪些文件 | `runtime/rt_str.c:60-64`（char_at 码点 + `pa_cp_str`）、`runtime/rt_core.c:787-790`（`pa_char_str` 只管 ASCII）、`runtime/rt_slice.c:75-94,169-174`（str 切片 / `pa_str_to_list`）、新增 `pa_bytes_slice` / `pa_str_char_at_cursor`、`src/ir/ops.h`（BytesSlice / BytesConcat / BytesRepeat / StrCharAtCursor 等 RtFn）、`src/backend/call_rt.cpp`（新 RtFn 分派）、`src/backend/ops.cpp:252-266`（concat 分家）、`src/lower/expr_container.cpp:22-31`（切片选路）、`src/lower/stmt.cpp:1015-1026,1063-1108` 与 `:668-670,733-737` 与 `:796-798,895-910`（for/enumerate/zip 游标）、`src/lower/comp.cpp:378-384`（推导式游标）、`src/lower/expr_ops.cpp:144-165`（bytes 重复）、`src/lower/method/method_str.cpp:25-29,189-194`（encode/decode 真转换） |
 | 语义变化 | 索引/切片/迭代按码点；bytes 全部保持字节；encode/decode 变成真转换 |
 | 验收 | 新 `tests/run/164_codepoint_index.py`：`"中文"[0]=="中"`、`"中文"[-1]=="文"`、`"中文"[0:1]=="中"`、`"中文"[::-1]=="文中"`、`list("中文")==["中","文"]`、`for ch in "中文"` 次数、enumerate/zip 对 str、bytes 对照 `b"\xe4\xb8\xad"[0]==228` / len==3；既有 tests/run/05_strings.py,15_slice.py,17_slice_assign.py,19_comprehension.py 回归；新增迭代性能用例（§6.4）要求不出现 O(n²)（2N 斜率检查） |
 | 回归风险 | 高：迭代/切片是热路径；游标优化做错会算错值（不是慢，是错），必须靠新老用例双跑。建议 S2 拆两个 commit：S2a 语义翻转（先接受 O(n²)）、S2b 游标优化（纯性能，可回退） |
@@ -587,7 +587,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 
 | 项 | 内容 |
 |---|---|
-| 改哪些文件 | `runtime/rt_str.c` 方法全套（§1.4）、`runtime/rt_format.c`（宽度/精度/%c/is_bytes）、`src/lower/method_str.cpp`（is_bytes 传参、bytes ops）、`runtime/rt_re.c`（§1.7 三项）、`runtime/rt_file.c`（读/写/seek/tell 单位）、`runtime/rt_datetime.c:572-578`（Path.read_bytes 用 bytes 构造）、`runtime/rt_str.c:183-193`（ord/chr） |
+| 改哪些文件 | `runtime/rt_str.c` 方法全套（§1.4）、`runtime/rt_format.c`（宽度/精度/%c/is_bytes）、`src/lower/method/method_str.cpp`（is_bytes 传参、bytes ops）、`runtime/rt_re.c`（§1.7 三项）、`runtime/rt_file.c`（读/写/seek/tell 单位）、`runtime/rt_datetime.c:572-578`（Path.read_bytes 用 bytes 构造）、`runtime/rt_str.c:183-193`（ord/chr） |
 | 语义变化 | 方法/格式化/re/文件 API 的可见单位变码点；bytes 方法保持字节 |
 | 验收 | 新 `tests/run/165_codepoint_methods.py`（find/index/startswith/count/split/join/strip/replace/zfill/ljust/center/capitalize/title/is*/removeprefix、百分号宽度、f-string 宽度、repr、ord/chr、dict 中文 key）；新 `tests/run/166_codepoint_re_file.py`（`re.findall(".", "中文")==["中","文"]`、m.start()/end() 码点、sub/split、中文文件读写 read(n)/tell）；既有 56_re.py / 57_re2.py / 53_json.py / 07_fstrings.py / 79_datetime_pathlib.py 全绿 |
 | 回归风险 | 中高：re 是最大一块，点号/类/量词改错会静默改变匹配结果；文件 I/O 的 seek/tell 一致性要专门测。建议 re 单独 commit |
@@ -779,7 +779,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 
 ### 7.2 bytes 与 str 的互转（如果现在有）
 
-现状：互转就是改标类型（`lower/method_str.cpp:25-29,189-194`），运行时零成本，因为两者
+现状：互转就是改标类型（`lower/method/method_str.cpp:25-29,189-194`），运行时零成本，因为两者
 表示完全一样。码点语义下公共长度不同，必须改成：
 
 | 方向 | 实现 | 成本 | 说明 |

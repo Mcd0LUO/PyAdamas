@@ -9,7 +9,7 @@
 
 | 你想做的事 | 以前（硬编码） | 现在（声明式，模块已迁移） |
 |---|---|---|
-| 给 `time` 加一个新函数 | 改 `typecheck/builtin_sigs.cpp` + `lower/import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `def f(...) -> T: pass` |
+| 给 `time` 加一个新函数 | 改 `typecheck/builtin_sigs.cpp` + `lower/module/import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `def f(...) -> T: pass` |
 | 接通一个已有运行期入口（`pa_*`） | 还要 `ir_rtfn*` / codegen 分组 | 同上，**一行**（符号名按 `pa_<模块>_<名字>` 约定推导） |
 | 新模块 | 改 `driver/modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
 | 加一个新**运行期实现** | 必须 C（`runtime/rt_*.c`）+ RtFn 编号 + codegen 参数分组 | **仍然要**，这是运行期边界，不是签名问题（§6.4） |
@@ -25,9 +25,9 @@
 1. **签名表** `src/typecheck/builtin_sigs.cpp`：`builtin_module(name)` 返回 `ModuleInfo`，
    里面按模块名分支，把「属性名 → 类型」塞进 `globals`。类型检查（`typecheck/call_forms.cpp`）
    直接读这份表做实参检查；`from M import f` 的可调用性也靠它。
-2. **成员 → RtFn 映射** `src/lower/import.cpp` 的 `Lowerer::native_fn(module, member)`：
+2. **成员 → RtFn 映射** `src/lower/module/import.cpp` 的 `Lowerer::native_fn(module, member)`：
    把 `time.sleep` 映射到枚举 `RtFn::TimeSleep`。
-3. **降级装填** `src/lower/import_native.cpp` 的 `Lowerer::call_native`：
+3. **降级装填** `src/lower/module/import_native.cpp` 的 `Lowerer::call_native`：
    正常路径是 `bind_args(c, info, nullptr)` + `call_runtime(fn, ret, args)`（通用，
    由 `FuncInfo` 决定每个实参怎么 coerce）；只有「可选参数/可变参/返回类型随实参变」
    的函数才需要在这里写手工分支（`time.strftime`、`subprocess.run`、`re.findall` ……）。
@@ -218,7 +218,7 @@ class Random:
 在这里登记一行（下一批若做 `deque`/`Counter`/`date`/`Path` 等，建议先加一个通用的
 native-object 类型种类把这层也声明化）。
 
-**方法的降级（参数装配）仍在 C++**：与原生的模块级函数一致，`lower/method_misc.cpp`
+**方法的降级（参数装配）仍在 C++**：与原生的模块级函数一致，`lower/method/method_misc.cpp`
 的 `lower_method_random()` 按方法名装配实参并 `call_runtime`（§6.4）。本轮只把
 **签名表**（typecheck 的硬编码方法表，~58 行）与构造器签名迁进声明；方法调用
 的汇编与迁移前逐字节相同。
@@ -268,13 +268,13 @@ if (auto declared = pyadamas::nativesig::module_info(name)) {
 }
 ```
 
-**B. 成员 → RtFn（`src/lower/import.cpp` 的 `Lowerer::native_fn()` 开头）：**
+**B. 成员 → RtFn（`src/lower/module/import.cpp` 的 `Lowerer::native_fn()` 开头）：**
 
 ```c++
 if (auto f = nativesig::func_rtfn(module, member)) return *f;
 ```
 
-**C.（可选，迁移带常量的模块时用）`src/lower/import.cpp` 的 `Lowerer::builtin_value()` 开头：**
+**C.（可选，迁移带常量的模块时用）`src/lower/module/import.cpp` 的 `Lowerer::builtin_value()` 开头：**
 
 ```c++
 if (const auto* c = nativesig::find_const(module, member)) {
@@ -354,15 +354,15 @@ if (const auto* c = nativesig::find_const(module, member)) {
 以 `time` 为例（本次试点）：
 
 1. **抄签名**：从 `typecheck/builtin_sigs.cpp` 的 `name == "<模块>"` 分支抄出每个函数的形参/返回类型；
-   从 `lower/import.cpp` 的 `native_fn()` 抄出「成员 → `RtFn::X`」；
+   从 `lower/module/import.cpp` 的 `native_fn()` 抄出「成员 → `RtFn::X`」；
    `RtFn::X` 的 `pa_*` 符号从 `src/ir/rtfn_names.h` 查。
 2. **写 `stdlib/sigs/<模块>.pysig`**（§3）。
 3. **接线**（§5.2 A/B/C，若还没接）。
 4. **删硬编码（可选）**：hook 是**按名字合并**，迁移可以分步做——只声明一部分成员时，其余成员
    继续由硬编码提供（`sys` 就是半迁移状态：`maxsize/exit` 在 .pysig，
    `argv/stdout/exc_info` 等 6 个无法声明的运行期成员留在硬编码）。整个模块都能用声明
-   表达后，再删硬编码：`typecheck/builtin_sigs.cpp` 的分支整段删、`lower/import.cpp` 里该模块的
-   `if (member == ...)` 行全删（注意 `lower/import_native.cpp` 的**手工装配分支要留着**，
+   表达后，再删硬编码：`typecheck/builtin_sigs.cpp` 的分支整段删、`lower/module/import.cpp` 里该模块的
+   `if (member == ...)` 行全删（注意 `lower/module/import_native.cpp` 的**手工装配分支要留着**，
    它不是签名，是参数装配）。
 5. **重建 + 三档等价性**（§7）。
 6. 把该模块从 `kModuleTable` 的 Native 行删掉（若启用 §6.3 的自动登记）。
@@ -453,13 +453,13 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower/import_native.cpp`（签名已声明） |
+| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower/module/import_native.cpp`（签名已声明） |
 | `os.path` | ✅ 已迁移（`stdlib/sigs/os/path.pysig`，Python 语法） | 16 个函数（路径即模块名）；常量 `sep/altsep/curdir/pardir` 属于 `os` 模块，不在本文件 |
 | `math` | ✅ 已迁移（`stdlib/sigs/math.pysig`，Python 语法） | 57 个函数 + 5 个常量；`inf`/`nan` 用 `float("inf")`/`float("nan")` 调用形式声明，**不再有 C++ 特判**；asm 等价 |
 | `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `typecheck/builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
-| `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower/method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
+| `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower/method/method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
 | `re` | ✅ 已迁移 `Pattern`/`Match` 方法表（`stdlib/sigs/re.pysig`） | 2 个原生类共 15 个方法（`@native` 覆盖 `pa_re_*`）；模块级函数/flag 常量保留硬编码（`-> Regex`/`Optional[Match]` 等类型 pysig 无法表达，迁了会破坏 `re.compile` 的返回类型）；`lower_method_regex/match` 参数装配不动；asm 38/38 逐字节相同 |
 | `datetime` | ✅ 已迁移 3 个原生类（`stdlib/sigs/datetime.pysig`） | `date`/`datetime`/`timedelta` 构造器（默认值表达重载）+ 6 实例方法；模块函数 today/now 保留 C++（返回 TyKind::DateTime 无法声明）；属性读/运算符/参数装配不动；asm 38/38 逐字节相同 |
 | `collections` | ✅ 已迁移 deque 方法表（`stdlib/sigs/collections.pysig`） | 10 个实例方法声明化；构造器保留 C++（默认值 `[]` 非 pysig 字面量、`list[unknown]` 静态类型影响 asm）；pop/popleft/copy 的接收者元素类型返回保留 typecheck 口径；asm 38/38 逐字节相同 |
@@ -525,7 +525,7 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 |---|---|---|
 | `src/cimport/native_sigs.h` | **新增 670 行** | 加载器（格式/词法/语法/符号反查/缓存/失败路径），一次性成本 |
 | `src/typecheck/builtin_sigs.cpp` | +18 / −26 | 7 行 hook + include；删 `time` 段 40 行、`os.path` 段 21 行 |
-| `src/lower/import.cpp` | +25 / −22 | 2 行 hook + 常量 hook；删 `time` 段 12 行、`os.path` 段 20 行 |
+| `src/lower/module/import.cpp` | +25 / −22 | 2 行 hook + 常量 hook；删 `time` 段 12 行、`os.path` 段 20 行 |
 | `src/driver/modules.cpp` | +63 / −1 | `.pysig` 自动登记（新模块零 C++） |
 | `stdlib/sigs/time.pysig` | 33 行 | 8 func + 2 const |
 | `stdlib/sigs/os.path.pysig` | 25 行 | 16 func |

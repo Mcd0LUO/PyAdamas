@@ -534,7 +534,7 @@ bash tests/check_size.sh
 
 1. `typecheck/builtin.cpp` 的 `builtin_call()`：加签名规则
 2. `typecheck/call.cpp` 的 `is_builtin_callable()`：登记名字
-3. `lower/builtin.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
+3. `lower/builtin/builtin.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
 4. `tests/`：正例 + 反例
 
 ### 加一个运行时函数

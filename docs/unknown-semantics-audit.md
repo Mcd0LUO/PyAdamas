@@ -119,7 +119,7 @@ print(p in xs)                  # 修前 False，CPython True
 |---|---|---|---|
 | 0.433 | unknown 域实例 `==` 调用 `__eq__`（元数据 6→7 字加 eq_slot） | `src/ir/types.h`/`lower/class.cpp`/`backend/codegen.cpp`、`runtime/rt_class.c`+`rt_any.c` | 498 用例；394 ran ok；difftest 373-0；12 基准 ±0.02% |
 | 0.434 | 槽表指针 `[eq,lt,hash,-1]`、`__lt__` 打通、typed `list[P]` 的 in/index、sorted 实例按 `__lt__` | `src/backend/codegen.cpp`/`lower/class.cpp`、`runtime/rt_class.c`+`rt_any.c`+`rt_list.c` | 499 用例 + tests/modules/dunder_cross；396 ran ok；difftest 374-0；12 基准 ±0.03% |
-| 0.435 | unknown 域实例作 dict/set 键（kind=3 的 `__hash__`/`__eq__` 分派 + `hash()` 的 kind=-1 哨兵） | `runtime/rt_dict.c` +62/−9、`src/lower/builtin_reflect.cpp` +4 | 500 用例；397 ran ok；difftest 375-0；wordfreq −2.47%（布局副作用） |
+| 0.435 | unknown 域实例作 dict/set 键（kind=3 的 `__hash__`/`__eq__` 分派 + `hash()` 的 kind=-1 哨兵） | `runtime/rt_dict.c` +62/−9、`src/lower/builtin/builtin_reflect.cpp` +4 | 500 用例；397 ran ok；difftest 375-0；wordfreq −2.47%（布局副作用） |
 | 0.422 | dict `key_kind=3/9` 的 str 键按内容哈希/比较 + 保留精确堆索引 | `runtime/rt_dict.c` +70/−26、`src/ir/ir.cpp` +10 | 487 用例；383 ran ok；difftest 362-0；wordfreq +0.078% |
 | 0.424 | `list_value_eq(kind=3)` / `chain_elem_eq('x')` 的 str/big 内容比较；`pa_any_cmp(_t)` other 分支的 `any_unknown_eq`（str/big/list 递归） | `runtime/rt_list.c` +21、`runtime/rt_any.c` +30 | 489 用例；385 ran ok；difftest 364-0；12 基准 ±0.05% |
 | 0.425 | `pa_list_sort` kind=3 的元素族分类（NUM/STR/OTHER）+ `sort_uknum`（int/float/big 混比）+ 族混杂抛 TypeError | `runtime/rt_list.c` +78 | 490 用例；386 ran ok；difftest 365-0；12 基准 ±0.47%（无 >1%） |

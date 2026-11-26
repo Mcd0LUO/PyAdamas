@@ -318,7 +318,7 @@ print(list(Box()))          # error: list() cannot iterate over 'Box'（未装�
 print(sorted(Box()))        # error: sorted() cannot iterate over 'Box'
 ```
 
-根因：`lower/builtin_container.cpp` 的迭代分支只认内建容器种类（list/tuple/str/bytes/dict/set/
+根因：`lower/builtin/builtin_container.cpp` 的迭代分支只认内建容器种类（list/tuple/str/bytes/dict/set/
 file/range/generator），用户类不在其中。实测 `RtFn::AnyIterList`（动态物化入口）**只能吃内建容器**，
 喂 `__iter__` 返回的生成器会 `TypeError: object is not iterable`，所以不能简单改成
 「调 `__iter__` + AnyIterList」。正确修法：复用 `stmt_for` 的迭代器构造（`dunder_call` + 生成器循环），
