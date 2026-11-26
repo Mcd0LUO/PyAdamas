@@ -225,6 +225,25 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             jump_fail();
             return;
         }
+        // Big 字面量（0.627）：整数域的字面量落到下面的裸 Cmp 会变成指针比较，
+        // 大整数 case 恒不匹配。改走 pa_big_cmp（返回 <0/0/>0）。
+        if (lt && lt->kind == TyKind::Big) {
+            VReg lv = expr(*lit);
+            VReg bv = value;
+            if (st && st->kind == TyKind::Int) bv = convert_to(value, st, t_big());
+            else if (st && st->kind != TyKind::Big && st->kind != TyKind::Unknown) {
+                jump_fail();
+                return;
+            }
+            VReg cv = call_runtime(RtFn::BigCmp, t_int(), {bv, lv});
+            Inst zc;
+            zc.op = IrOp::Cmp;
+            zc.cop = CmpKind::Eq;
+            zc.a = cv;
+            zc.b = const_int(0);
+            test(def(t_bool(), std::move(zc)));
+            return;
+        }
         bool ln = lt && (lt->kind == TyKind::Int || lt->kind == TyKind::Bool ||
                          lt->kind == TyKind::Float);
         bool sn = st && (st->kind == TyKind::Int || st->kind == TyKind::Bool ||
@@ -433,6 +452,20 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
         }
         case PatternKind::Class: {
             if (!p.qualname.empty()) {
+                // 静态守卫（0.627）：IsNamedClass 会把 value 当对象指针读对象头，
+                // 主体若是 int 这类非堆类型直接段错误。Optional 还要先排除 None。
+                if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Class) {
+                    jump_fail();
+                    return;
+                }
+                if (optional) {
+                    Inst nn;
+                    nn.op = IrOp::Cmp;
+                    nn.cop = CmpKind::Ne;
+                    nn.a = value;
+                    nn.b = const_int(0);
+                    test(def(t_bool(), std::move(nn)));
+                }
                 test(call_runtime(RtFn::IsNamedClass, t_bool(),
                                   {value, const_str(p.qualname)}));
                 if (p.positional.empty() && p.attrs.empty()) return;
