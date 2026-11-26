@@ -42,6 +42,12 @@ Lowerer::ClassAttrStorage Lowerer::class_attr_storage(const ClassInfo* recv,
         st.parent = class_attr_storage(ca->owner, ca).slot;
         return st;
     }
+    // 沿 base 链向上找第一个 COW 祖先（0.622）：B.x = 2 之后，C.x / a.x（a: A = C()）
+    // 都必须看到 2。原来直接回退到 ca->owner，跳过了中间基类的 COW 副本。
+    for (const ClassInfo* m = recv->base; m; m = m->base) {
+        if (m == ca->owner) break;
+        if (m->cowed_attrs.count(ca->name)) return class_attr_storage(m, ca);
+    }
     return class_attr_storage(ca->owner, ca);
 }
 
@@ -107,8 +113,9 @@ VReg Lowerer::class_attr_load_dyn(VReg obj, const ClassInfo* stat, const ClassAt
         if (!derived) continue;
         const ClassAttrInfo* kca = k->class_attr(ca->name);
         if (!kca) continue;
-        // 覆盖了才算：自己声明，或者通过子类赋过值（有独立的槽）
-        if (kca->owner == ca->owner && !k->cowed_attrs.count(ca->name)) continue;
+        // 所有派生类都进链（0.622）：k 自己没覆盖时，class_attr_storage(k, ca)
+        // 会沿 base 链找到最近的 COW 祖先（B.x = 2 之后 C 也要看到 2）。
+        // 原来这里跳过「自己没覆盖」的类，运行期命中的是 C 时就会退回 A 的旧值。
         overrides.push_back({k, kca});
     }
     // classes_ 是 unordered_map：不排序的话，类属性动态派发的 if-链顺序随哈希桶变化，
