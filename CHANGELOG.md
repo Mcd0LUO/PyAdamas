@@ -6,6 +6,22 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.661] - 2026-11-27
+
+> docs：**审计 B3（5 处指向不存在的用例）**逐条核对后修正。
+>
+> | 文档 | 审计说 | 实测 | 处理 |
+> |---|---|---|---|
+> | `mi-layout.md:100` | 引用 `tests/strict/mi_non_primary_base_fields.py` | 该文件在 `268201a` 被删（提交说明：它钉的是 0.503 的拒绝行为，现在允许），且**结论也反了** | 改成 0.510 删除 + 指向 `mi_two_state_bases.py` / `mi_primary_base_fields.py` |
+> | `str-codepoints.md`（4 处） | 引用 `163–166_codepoint_*.py` | 这四个名字**从来没存在过**（`git log --all` 无记录） | 前三个 → `176_codepoint.py`（0.382 合并自这四个）；`166_codepoint_re_file.py` 无对应用例 → 删引用并注明 |
+> | `compatibility.md:727/742` | 引用 `159_exc_multi.py` / `158_isinstance_bytes.py` | 0.382 合并进 `155_exc_value.py` / `135_hetero_tuple.py`（两文件第 2 行有合并记录） | 改成「0.382 合并进 …」 |
+> | `frontend-fixes.md:145` | 引用 `tests/unsupported/…` | 实际在 `tests/strict/` | 改目录 |
+> | `testing.md:68` | 引用 `big_round.py` | 实际是 `big_round_powmod.py` | 改名 |
+>
+> 另外把「文件在、内容早已改写」单独扫了一遍：改完后 `docs/*.md`（不含 archive）里所有
+>`tests/…py` 引用，只剩 `HANDOFF.md` 的 `tests/run/NNN.py` 占位符（按 AGENTS.md §7 不动）。
+>替换目标的内容也抽验过（`155_exc_value` 有「原 159_exc_multi」段、`135_hetero_tuple` 有
+>「原 158_isinstance_bytes」段、`176` 覆盖 len/index/methods）。
 ## [0.660] - 2026-11-27
 
 > feat(tools)：**文档链接检查**进闸门——`tools/check_docs_links.py`。
