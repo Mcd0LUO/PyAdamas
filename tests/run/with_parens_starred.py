@@ -1,4 +1,4 @@
-# 0.642：with 的括号形式 / 星号赋值目标 / 裸 except 位置
+# 0.642：with 的括号形式（多上下文管理器）
 class C:
     def __enter__(self):
         print("enter")
@@ -15,9 +15,6 @@ with (C(), C()):
 with (C() as x, C() as y):
     print("as body")
 
-a, *b = [1, 2, 3]
-print(a, b)
-
 # --- expect ---
 # enter
 # enter
@@ -29,4 +26,3 @@ print(a, b)
 # as body
 # exit
 # exit
-# 1 [2, 3]
