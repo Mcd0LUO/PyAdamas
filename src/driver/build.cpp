@@ -400,7 +400,14 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         auto it = merged.find(r.name);
         if (it == merged.end()) merged[r.name] = r;
         else
-            for (auto& n : r.from_names) it->second.from_names.push_back(n);
+            // A4（0.649）：同一个子模块被写两遍（`from pkg import a` ×2，或
+            // `import pkg.a` + `from pkg import a`）时，from_names 会重复，
+            // 进而让 pkg.a 入队两次、u.deps 出现两条同名项——manifest 读回
+            // 却是 std::map（只剩一条），deps.size() 永远对不上 → 入口永久重编。
+            for (auto& n : r.from_names)
+                if (std::find(it->second.from_names.begin(), it->second.from_names.end(),
+                              n) == it->second.from_names.end())
+                    it->second.from_names.push_back(n);
     }
     std::vector<ImportReq> queue;
     for (auto& [n, r] : merged) queue.push_back(r);
@@ -512,7 +519,9 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
             p.units[req.name] = std::move(unit);
         }
         if (!visit_unit(p, *dep, stack)) return false;
-        u.deps.push_back(req.name);
+        // 同名依赖只记一条：manifest 是 map 语义，重复项会让缓存键恒不相等。
+        if (std::find(u.deps.begin(), u.deps.end(), req.name) == u.deps.end())
+            u.deps.push_back(req.name);
         // from pkg import mod：mod 可能是子模块，按完整名加载一份接口。
         for (auto& n : req.from_names) {
             std::string child = req.name + "." + n;
