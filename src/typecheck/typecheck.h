@@ -399,6 +399,11 @@ private:
     // ── 语句 ────────────────────────────────────────────────────
 
     void stmts(std::vector<StmtPtr>& body);
+    // stmts / stmts_block 的共同实现；inherit_del 决定是否继承外层 del 可见性。
+    void stmts_impl(std::vector<StmtPtr>& body, bool inherit_del);
+    // 同一函数作用域里的嵌套块体（if/while/for/try/with/match 的 body）：
+    // 与 stmts 同一条流水线，但继承外层的 del 可见性（BUG-2）。
+    void stmts_block(std::vector<StmtPtr>& body);
 
     // 这个语句块是否必然离开（return/raise/break/continue 或所有分支都离开）。
     // 用来识别「提前退出」的 None 守卫：if x is None: return → 之后 x 不是 None。
@@ -446,15 +451,34 @@ private:
         std::string akey;
         bool had_old = false;
     };
-    // 0.537：del 的可见范围 = 当前 statements 序列（保守版）。构造时保存并清空、
-    // 析构时恢复，分支/循环/with/try 里的 del 不外泄。
+    // 0.537：del 的可见范围 = 当前 statements 序列（保守版）。
+    // 两种进入方式（BUG-2 修复后）：
+    //   新的作用域（函数体）—— 保存并清空，函数里读同名全局不受外层 del 影响；
+    //   同一函数的嵌套块（if/while/for/try/with/match）—— **继承**外层的删除集合，
+    //   因为进入嵌套块时外层那句 del 一定已经执行过。出块时把「块内被重新赋值」
+    //   的名字从恢复集合里去掉（赋值可能没执行 → 保守放过，不误杀）。
     struct DelGuard {
         std::unordered_set<std::string>& cur;
         std::unordered_set<std::string> saved;
-        explicit DelGuard(std::unordered_set<std::string>& c) : cur(c), saved(std::move(c)) {
-            cur.clear();
+        bool inherit;
+        DelGuard(std::unordered_set<std::string>& c, bool inh) : cur(c), inherit(inh) {
+            if (inherit) {
+                saved = cur;  // 继承：复制一份，块内继续看得见外层的 del
+            } else {
+                saved = std::move(cur);  // 新作用域：保存后清空，出块恢复
+                cur.clear();
+            }
         }
-        ~DelGuard() { cur = std::move(saved); }
+        ~DelGuard() {
+            if (inherit) {
+                // 块内重新赋值 → 复活。先收集再删：不能在遍历 saved 时删它。
+                std::vector<std::string> revived;
+                for (auto& n : saved)
+                    if (!cur.count(n)) revived.push_back(n);
+                for (auto& n : revived) saved.erase(n);
+            }
+            cur = std::move(saved);
+        }
     };
     std::unordered_map<std::string, TypePtr> attr_refine_;
     Narrowing narrow_on(Expr& cond, bool truthy);

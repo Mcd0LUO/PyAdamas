@@ -36,8 +36,14 @@ bool TypeChecker::block_exits(const std::vector<StmtPtr>& body) {
     }
 }
 
-void TypeChecker::stmts(std::vector<StmtPtr>& body) {
-    DelGuard del_guard(deleted_names_);  // del 只在本 statements 序列内可见（0.537）
+void TypeChecker::stmts(std::vector<StmtPtr>& body) { stmts_impl(body, false); }
+
+// 同一函数作用域里的嵌套块体：继承外层的 del 可见性（BUG-2）。
+void TypeChecker::stmts_block(std::vector<StmtPtr>& body) { stmts_impl(body, true); }
+
+void TypeChecker::stmts_impl(std::vector<StmtPtr>& body, bool inherit_del) {
+    // 0.537：del 只在本 statements 序列内可见；嵌套块继承（见 DelGuard）。
+    DelGuard del_guard(deleted_names_, inherit_del);
     // 提前退出的 None 守卫：`if x is None: return` 之后 x 一定不是 None；收窄保持到块末。
     std::vector<Narrowing> active;
     for (auto& s : body) {
@@ -149,7 +155,7 @@ void TypeChecker::stmt(Stmt& s) {
                     pool_.push_back(std::move(sc));
                     match_pattern(*c.pattern, st);
                     if (c.guard) expr(*c.guard);
-                    stmts(c.body);
+                    stmts_block(c.body);
                     std::vector<std::string> names;
                     pattern_capture_names(*c.pattern, names);
                     for (auto& n : names) {
