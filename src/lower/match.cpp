@@ -340,35 +340,58 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             TypePtr elem = t_unknown();
             if (st->kind == TyKind::List) elem = st->sub.empty() ? t_unknown() : st->sub[0];
             int seen = 0;
-            for (size_t i = 0; i < p.items.size(); ++i) {
-                if (static_cast<int>(i) == p.star) {
-                    if (p.items[i]->kind == PatternKind::Capture && !p.items[i]->name.empty()) {
-                        int tail = static_cast<int>(p.items.size()) - p.star - 1;
+            const int star_at = p.star;
+            const int nitems = static_cast<int>(p.items.size());
+            const int tail_n = star_at >= 0 ? nitems - star_at - 1 : 0;
+            for (int i = 0; i < nitems; ++i) {
+                if (i == star_at) {
+                    if (p.items[static_cast<size_t>(i)]->kind == PatternKind::Capture &&
+                        !p.items[static_cast<size_t>(i)]->name.empty()) {
                         VReg stop = n;
-                        if (tail > 0) {
+                        if (tail_n > 0) {
                             Inst sub;
                             sub.op = IrOp::Bin;
                             sub.bop = BinKind::Sub;
                             sub.a = n;
-                            sub.b = const_int(tail);
+                            sub.b = const_int(tail_n);
                             stop = def(t_int(), std::move(sub));
                         }
+                        // 起始下标是星号**前面**的固定元素个数（star_at），不是 fixed
+                        // （fixed 是除星号外的总数，含尾部元素，用它会漏掉中段）。
                         VReg rest = call_runtime(RtFn::ListSlice, mk_list(elem),
-                                                 {value, const_int(fixed), stop, const_int(1)});
+                                                 {value, const_int(star_at), stop, const_int(1)});
                         push_temp(rest);
-                        bind_name(p.items[i]->name, rest, mk_list(elem));
+                        bind_name(p.items[static_cast<size_t>(i)]->name, rest, mk_list(elem));
                     }
                     continue;
                 }
+                // 星号之后的元素从**尾部**倒推下标（0.626）：原来用单调递增的 seen，
+                // case [first, *mid, last] 里 last 会取到 value[1]（实测 [10,20,30,40]
+                // 得到 last=20，应为 40）。定长元组的元素类型同理从 sub 尾部取。
+                VReg iv;
                 TypePtr et = elem;
-                if (st->kind == TyKind::Tuple && i < st->sub.size()) et = st->sub[i];
+                if (star_at >= 0 && i > star_at) {
+                    const int from_end = tail_n - (i - star_at - 1);  // 1 = 倒数第一
+                    Inst sub;
+                    sub.op = IrOp::Bin;
+                    sub.bop = BinKind::Sub;
+                    sub.a = n;
+                    sub.b = const_int(from_end);
+                    iv = def(t_int(), std::move(sub));
+                    if (st->kind == TyKind::Tuple &&
+                        st->sub.size() >= static_cast<size_t>(from_end) && from_end > 0)
+                        et = st->sub[st->sub.size() - static_cast<size_t>(from_end)];
+                } else {
+                    iv = const_int(seen++);
+                    if (st->kind == TyKind::Tuple && static_cast<size_t>(i) < st->sub.size())
+                        et = st->sub[static_cast<size_t>(i)];
+                }
                 Inst get;
                 get.op = IrOp::IndexLoad;
                 get.a = value;
-                get.b = const_int(seen);
+                get.b = iv;
                 VReg ev = def(et, std::move(get));
-                lower_pattern(*p.items[i], ev, et, fail, in_or, or_local);
-                ++seen;
+                lower_pattern(*p.items[static_cast<size_t>(i)], ev, et, fail, in_or, or_local);
             }
             return;
         }
