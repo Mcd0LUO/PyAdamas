@@ -6,6 +6,28 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.662] - 2026-11-27
+
+> docs：**审计 B2 补（同类残留）+ B4（索引可达性）**。
+>
+> B2 补（13 文件）：除了点名的 8 处，把同一类「源码搬迁后文档没跟上」的残留一次清掉
+>（`lower/method.cpp` → `lower/method/method.cpp`、`lower/builtin/*`、`backend/target_abi.h` →
+>`common/target_abi.h` 等）。
+>
+> 其中 `exc-semantics.md §4.8` 不只路径旧，**结论也早变了**——原文说「跨模块自定义异常类
+>不能出现在 except/raise 名字位置」，实测（`lib.py` 的 `LibError` 带 `self.msg`）从 `lib` 导入后
+>`raise` / `except as e` 全正常，是 0.178 修掉的。改成【已修（0.178）】，保留仍不一致的点号形态
+>（`import lib; except lib.LibError as e` 能按名匹配接住，但 `e` 只按 Exception 基类视图绑定）。
+>文档开头的「已知不一致 10 条」同步成 9 条。
+>
+> B4（`docs/index.md` +4/−2）：不照抄审计的「8 篇未收录」，而是从 index 做 BFS 实测——
+>真正不可达只有 3 篇（`refactor-plan.md`、`stdlib-batch2.md`、`stdlib-batch6.md`）。根因是
+>区间写法「stdlib-batch1 ～ stdlib-batch7」只有首尾可点，已展开成六个链接并注明「批次 5 不存在」。
+>改后 BFS **0 篇不可达**。
+>
+> 两处判定为「不修」并写明理由：`cffi-design.md` / `cpybridge-design.md` 里的
+>`typecheck/import.cpp` 是 **Codon 源码路径**不是本仓库；`simd*.cpp` 是 0.480 已删除的特化模板
+>（该文首行自带「历史存档」）。
 ## [0.661] - 2026-11-27
 
 > docs：**审计 B3（5 处指向不存在的用例）**逐条核对后修正。
