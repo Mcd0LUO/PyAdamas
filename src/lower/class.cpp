@@ -399,6 +399,16 @@ void Lowerer::lower_classdef(ClassDef& c) {
     // 多继承 adjustor thunk（0.509）：vtable 的继承槽已填好，把「带字段的非 layout
     // 基类」的方法槽换成 thunk（self 先挪到该基类的字段块）。护栏与守卫都不动。
     install_mi_thunks(ci, cid);
+    // 0.579：ctor 在类体之前编译，先把「有类体求值的字段」登记好，
+    // 让字段默认值直接读那份值，而不是在构造时重算表达式。
+    for (auto& bs : c.body) {
+        if (bs->kind != StmtKind::AnnAssign) continue;
+        auto& ba = static_cast<AnnAssign&>(*bs);
+        if (!ba.value || ba.target->kind != ExprKind::Name) continue;
+        auto& bn = static_cast<Name&>(*ba.target);
+        if (ci->class_attr(bn.id)) continue;
+        st_->class_body_globals.insert("__pyadamas$cbv$" + ci->name + "$" + bn.id);
+    }
     if ((!opts_.module_symbol.empty() && !opts_.is_entry) || need_class_obj)
         compile_ctor_wrapper(c, ci, cid);
 
@@ -494,6 +504,15 @@ void Lowerer::lower_classdef(ClassDef& c) {
                 if (const ClassAttrInfo* ca = ci->class_attr(nm.id);
                     ca && ca->owner == ci.get())
                     class_attr_store(ci.get(), ca, v, vt);
+                else {
+                    // 字段（带标注）：把类体求值结果存进隐藏全局，ctor 直接读它，
+                    // 不再重算表达式（否则 y: int = x + 1 会在构造时以 x=0 重算）。
+                    std::string gname = "__pyadamas$cbv$" + ci->name + "$" + nm.id;
+                    int gi = global_idx(gname);
+                    store_global(gi, v);
+                    st_->class_body_attrs[nm.id] = gi;
+                    st_->class_body_globals.insert(gname);
+                }
             }
             continue;
         }
@@ -695,8 +714,15 @@ int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int 
             VReg v;
             if (f.default_lit)
                 v = const_literal(*f.default_lit);
-            else if (f.default_expr)
-                v = expr(*f.default_expr);
+            else if (f.default_expr) {
+                std::string gname = "__pyadamas$cbv$" + ci->name + "$" + f.name;
+                if (st_->class_body_globals.count(gname)) {
+                    int gi = global_idx(gname);
+                    v = load_global(gi, mod_.globals[static_cast<size_t>(gi)].ty);
+                } else {
+                    v = expr(*f.default_expr);
+                }
+            }
             else {
                 err(clsdef.line, clsdef.col,
                     std::format("non-literal default of imported field '{}' is not supported yet",

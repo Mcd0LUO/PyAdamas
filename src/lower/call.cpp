@@ -403,8 +403,17 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
         VReg v;
         if (fi->default_lit)
             v = const_literal(*fi->default_lit);
-        else if (fi->default_expr)
-            v = expr(*fi->default_expr);
+        else if (fi->default_expr) {
+            // 0.579：类体已经算过的字段初值（x: int = 5 之后的 y: int = x + 1）
+            // 直接用那份值；否则会在构造时以 x=0 重算，得到错的 1。
+            std::string gname = "__pyadamas$cbv$" + cls->name + "$" + fi->name;
+            if (st_->class_body_globals.count(gname)) {
+                int gi = global_idx(gname);
+                v = load_global(gi, mod_.globals[static_cast<size_t>(gi)].ty);
+            } else {
+                v = expr(*fi->default_expr);
+            }
+        }
         else {
             err(c.line, c.col,
                 std::format("non-literal default of imported field '{}' is not supported yet",
