@@ -105,7 +105,25 @@ private:
                     "singledispatchmethod", "dataclass_transform", "deprecated",
                     "type_check_only", "sealed",      "coroutine",     "enum",
                 };
-                std::vector<ExprPtr> unknown_decs;
+                // 0.638：只有当**整栈**都是「未知简单名字装饰器」时才搬到 aliases。
+                // 混着属性/带参/已知装饰器时，留在 fd.decorators 上的那些会先执行，
+                // 而搬走的这些在 aliases 里后执行 —— 颠倒 Python 自底向上的应用顺序
+                // （实测 @m.outer + @deco 得到 11，CPython 是 20）。
+                bool all_unknown = true;
+                size_t ndec = 0;
+                for (auto& d : fd.decorators) {
+                    if (!d) continue;
+                    ++ndec;
+                    if (d->kind != ExprKind::Name) {
+                        all_unknown = false;
+                        continue;
+                    }
+                    std::string dn = static_cast<Name&>(*d).id;
+                    if (dn.empty() || known.count(dn)) all_unknown = false;
+                }
+                if (ndec == 0) all_unknown = false;
+                if (all_unknown) {
+                    std::vector<ExprPtr> unknown_decs;
                 for (auto& d : fd.decorators) {
                     // 只对**简单名字**装饰器（@deco）脱糖：带参/属性形式维持既有行为，
                     // 避免把 @functools.xxx(...) 这类表达式从装饰器位置挪走。
@@ -154,6 +172,7 @@ private:
                     as->line = fd.line;
                     as->col = fd.col;
                     aliases.push_back(std::move(as));
+                    }
                 }
             }
             if (s->kind == StmtKind::ClassDef) {
@@ -400,6 +419,22 @@ private:
     // 脱糖后是个独立函数，看不到这些槽。生成器表达式本来就被脱糖成
     // 合成函数，循环变量是它的局部变量，闭包捕获按常规路径就能工作，
     // 语义（所有 lambda 共享同一个循环变量 cell）也和 CPython 一致。
+// 推导式里是否有 async for（0.638）：有的话不能改写成 list(<genexp>)——
+// 合成出来的是异步生成器，同步构造器迭代不了。
+static bool any_async_gen(const Expr& e) {
+    const std::vector<ExprPtr>* gens = nullptr;
+    switch (e.kind) {
+        case ExprKind::ListComp: gens = &static_cast<const ListComp&>(e).generators; break;
+        case ExprKind::SetComp: gens = &static_cast<const SetComp&>(e).generators; break;
+        case ExprKind::DictComp: gens = &static_cast<const DictComp&>(e).generators; break;
+        case ExprKind::GeneratorExp: gens = &static_cast<const GeneratorExp&>(e).generators; break;
+        default: return false;
+    }
+    for (auto& g : *gens)
+        if (g && static_cast<const Comprehension&>(*g).is_async) return true;
+    return false;
+}
+
     static bool has_lambda(const Expr* e) {
         if (!e) return false;
         switch (e->kind) {
@@ -495,6 +530,9 @@ private:
             case ExprKind::YieldFrom:
                 return has_lambda(static_cast<const YieldFrom&>(*e).value.get());
             case ExprKind::GeneratorExp: {
+                // 内层生成器（0.638）：它会被脱糖成独立函数，需要捕获外层推导式的循环变量；
+                // 而推导式就地展开时循环变量在 lower 的临时槽里，独立函数看不到。
+                return true;
                 auto& g = static_cast<const GeneratorExp&>(*e);
                 if (has_lambda(g.elt.get())) return true;
                 for (auto& gen : g.generators) {
@@ -750,7 +788,7 @@ private:
             }
             case ExprKind::ListComp: {
                 auto& c = static_cast<ListComp&>(*e);
-                if (has_lambda(e.get())) {
+                if (has_lambda(e.get()) && !any_async_gen(*e)) {
                     e = as_ctor_genexp(e, "list", std::move(c.elt),
                                        std::move(c.generators));
                     desugar_expr(e, pre);
@@ -762,7 +800,7 @@ private:
             }
             case ExprKind::SetComp: {
                 auto& c = static_cast<SetComp&>(*e);
-                if (has_lambda(e.get())) {
+                if (has_lambda(e.get()) && !any_async_gen(*e)) {
                     e = as_ctor_genexp(e, "set", std::move(c.elt),
                                        std::move(c.generators));
                     desugar_expr(e, pre);
@@ -777,7 +815,7 @@ private:
                 break;
             case ExprKind::DictComp: {
                 auto& c = static_cast<DictComp&>(*e);
-                if (has_lambda(e.get())) {
+                if (has_lambda(e.get()) && !any_async_gen(*e)) {
                     auto tup = std::make_unique<TupleExpr>();
                     tup->line = c.key->line;
                     tup->col = c.key->col;
