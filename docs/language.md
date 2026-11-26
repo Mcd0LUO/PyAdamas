@@ -1734,6 +1734,29 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 数据按行主序拍平传入；维度非法或输入过短会抛 `ValueError`。
 
 
+
+### 字节数 vs 元素数：C 函数只认字节
+
+所有 C 函数的 size/length 参数都是**字节数**，PyAdamas 不会替你乘元素宽度（它也猜不出 C 侧怎么解释）：
+
+| 值 | len(x) | 传给 C 的字节数 |
+|---|---|---|
+| list[int] / list[float] | 元素个数 | len(x) * 8 |
+| bytes | 字节数 | len(x) |
+| buffer(n) | 元素个数 | len(x) * 8 |
+| buffer_i32(n) / buffer_f32(n) | 元素个数 | len(x) * 4 |
+
+```python
+cimport clib as c
+xs: list[int] = [1, 2, 3]
+c.memcmp(xs, ys, len(xs) * 8)      # 正确：24 字节
+c.memcmp(xs, ys, len(xs))          # 错：只比较了前 8 个字节（一个 int）
+```
+
+这条**不会**在编译期报错 —— len() 的结果就是个 int，编译器无从判断它该被当成元素数还是字节数。
+写 C 调用时请把 * 8 / * 4 显式写出来，或者用 buffer（它的宽度是类型的一部分：8 字节的 buffer
+可以传 ptr[float]，4 字节的只能传裸 ptr）。
+
 ### `malloc`/`free` 与裸指针：参数是字节数
 
 `cimport` 里的 `malloc_f(n)` / `malloc_i(n)` 直接对应 C 的 `malloc(size_t)`——

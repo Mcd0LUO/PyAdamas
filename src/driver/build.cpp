@@ -558,6 +558,27 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         if (is_native_module(entry)) continue;
         auto found = resolve_import(p, u.path, req.name);
         if (!found) {
+            // 0.559：`import x` 但磁盘上只有 x.cpya —— 报清楚「那是 C 声明文件，要 cimport」。
+            // 原来只说 cannot find module，用户看着旁边的 .cpya 一脸问号。
+            auto exists_cpya = [&](const std::string& dir) {
+                std::error_code ec;
+                return std::filesystem::is_regular_file(
+                    std::filesystem::path(dir) / (req.name + ".cpya"), ec);
+            };
+            bool cpya_nearby = false;
+            {
+                std::filesystem::path src(u.path);
+                if (exists_cpya(src.parent_path().string())) cpya_nearby = true;
+            }
+            for (auto& d : p.include_dirs)
+                if (!cpya_nearby && exists_cpya(d)) cpya_nearby = true;
+            if (cpya_nearby) {
+                report(u.path, u.source, req.line, req.col,
+                       std::format("'{}' is a C declaration file (.cpya): use "
+                                   "'cimport {}' instead of 'import {}'",
+                                   req.name, req.name, req.name));
+                return false;
+            }
             report(u.path, u.source, req.line, req.col,
                    std::format("cannot find module '{}'", req.name));
             return false;
