@@ -513,6 +513,43 @@ static int cmd_ir_asm(pyadamas::Program& prog, const std::string& mode) {
     return 0;
 }
 
+static int cmd_build_or_run(pyadamas::Program& prog, const std::string& mode,
+                            const std::vector<std::string>& prog_args,
+                            const std::string& output, const std::string& path) {
+        if (!prepare_program(prog, true, false)) return 1;
+
+        std::string out = output;
+        bool ephemeral = false;
+        if (out.empty()) {
+            if (mode == "run") {
+                auto tmp = make_temp("");
+                if (!tmp) {
+                    std::fprintf(stderr, "error: %s\n", tmp.error().c_str());
+                    return 1;
+                }
+                out = *tmp;
+                ::unlink(out.c_str());
+                ephemeral = true;
+            } else {
+                out = path;
+                if (out.ends_with(".py")) out.resize(out.size() - 3);
+            }
+        }
+        if (!link_program(prog, out)) return 1;
+
+        if (mode == "run") {
+            std::string run_path = out;
+            if (run_path.find('/') == std::string::npos) run_path = "./" + run_path;
+            std::string cmd = shell_quote(run_path);
+            for (auto& pa : prog_args) cmd += " " + shell_quote(pa);
+            int rc = std::system(cmd.c_str());
+            if (ephemeral) ::unlink(out.c_str());
+            if (rc < 0) return 1;
+            return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
+        }
+        return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -747,38 +784,7 @@ int main(int argc, char** argv) {
             return cmd_ir_asm(prog, mode);
 
         // build / run：模块各自汇编成 .o，再链接。
-        if (!prepare_program(prog, true, false)) return 1;
-
-        std::string out = output;
-        bool ephemeral = false;
-        if (out.empty()) {
-            if (mode == "run") {
-                auto tmp = make_temp("");
-                if (!tmp) {
-                    std::fprintf(stderr, "error: %s\n", tmp.error().c_str());
-                    return 1;
-                }
-                out = *tmp;
-                ::unlink(out.c_str());
-                ephemeral = true;
-            } else {
-                out = path;
-                if (out.ends_with(".py")) out.resize(out.size() - 3);
-            }
-        }
-        if (!link_program(prog, out)) return 1;
-
-        if (mode == "run") {
-            std::string run_path = out;
-            if (run_path.find('/') == std::string::npos) run_path = "./" + run_path;
-            std::string cmd = shell_quote(run_path);
-            for (auto& pa : prog_args) cmd += " " + shell_quote(pa);
-            int rc = std::system(cmd.c_str());
-            if (ephemeral) ::unlink(out.c_str());
-            if (rc < 0) return 1;
-            return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
-        }
-        return 0;
+        return cmd_build_or_run(prog, mode, prog_args, output, path);
     } catch (const pyadamas::LexError& e) {
         report(path, *src, e.line, e.col, e.what());
     } catch (const pyadamas::ParseError& e) {
