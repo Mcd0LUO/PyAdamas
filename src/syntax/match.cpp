@@ -18,13 +18,30 @@ static std::optional<std::string> pattern_key_id(Expr& e) {
     }
     if (base->kind != ExprKind::Constant) return std::nullopt;
     auto& c = static_cast<Constant&>(*base);
+    // 键归一化（0.645）：
+    //  - 整数必须**精确**比较：原来一律转 double，2**53 以上会误判（
+    //    {9007199254740993: a, 9007199254740992: b} 被当成重复键），
+    //  - -0.0 与 0.0 是同一个键（CPython 也报重复），
+    //  - Big 字面量也参与判重。
     auto num = [&](double v) {
-        return std::format("n:{:.17g}", neg ? -v : v);
+        double x = neg ? -v : v;
+        // 归一化必须在**取负之后**：-0.0 与 0.0 是同一个键（否则 {:.17g}
+        // 会给出 "-0" 与 "0"，判重失效）。
+        if (x == 0.0) x = 0.0;
+        return std::format("n:{:.17g}", x);
+    };
+    auto i64key = [&](int64_t v) { return std::format("n:{}", neg ? -v : v); };
+    auto bigkey = [&](const std::string& v) {
+        // 十进制串加减号；Big 与 float 的等值（1e20 vs 10**20）不判重。
+        if (neg) return v.empty() || v[0] == '-' ? std::string("n:") + v.substr(v[0] == '-')
+                                                  : std::string("n:-") + v;
+        return std::string("n:") + v;
     };
     switch (c.ck) {
         case Constant::CK::None: return neg ? std::nullopt : std::optional<std::string>("N");
         case Constant::CK::Bool: return num(c.b ? 1.0 : 0.0);
-        case Constant::CK::Int: return num(static_cast<double>(c.i));
+        case Constant::CK::Int: return i64key(c.i);
+        case Constant::CK::Big: return bigkey(c.s);
         case Constant::CK::Float: return num(c.f);
         case Constant::CK::Str: return neg ? std::nullopt : std::optional<std::string>("s:" + c.s);
         case Constant::CK::Complex:
