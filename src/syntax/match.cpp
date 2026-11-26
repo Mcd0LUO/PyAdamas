@@ -170,7 +170,10 @@ PatternPtr Parser::parse_sequence_pattern(Tok close) {
                         advance();
                     }
                 } else {
-                    star->kind = PatternKind::Wildcard;
+                    // PEP 634：star_pattern = '*' (pattern_capture_target | '_')。
+                    // 裸 `*` 非法（case [*]:），原来被静默当成 `*_`。
+                    throw err_at("expected a name or '_' after '*' in sequence pattern", sl,
+                                 sc);
                 }
                 if (node->star >= 0) throw err_at("multiple starred patterns", sl, sc);
                 node->star = static_cast<int>(node->items.size());
@@ -284,8 +287,8 @@ PatternPtr Parser::parse_closed_pattern() {
 
     bool neg = false;
     if (match(Tok::MINUS)) neg = true;
-    if (check_any({Tok::INT, Tok::FLOAT, Tok::COMPLEX, Tok::STRING, Tok::KW_TRUE,
-                   Tok::KW_FALSE, Tok::KW_NONE})) {
+    if (check_any({Tok::INT, Tok::FLOAT, Tok::COMPLEX, Tok::STRING, Tok::BYTES,
+                   Tok::KW_TRUE, Tok::KW_FALSE, Tok::KW_NONE})) {
         ExprPtr lit = parse_atom();
         if (lit->kind == ExprKind::Constant) {
             auto& c = static_cast<Constant&>(*lit);
@@ -293,10 +296,32 @@ PatternPtr Parser::parse_closed_pattern() {
                 if (c.ck == Constant::CK::Int) c.i = -c.i;
                 else if (c.ck == Constant::CK::Float) c.f = -c.f;
                 else if (c.ck == Constant::CK::Complex) c.im = -c.im;
+                else if (c.ck == Constant::CK::Big) {
+                    // 负大整数字面量（0.641）：CK::Big 的正文是十进制串，
+                    // 求负只是在串上加减号——原来落到 else 直接报错。
+                    if (!c.s.empty() && c.s[0] == '-') c.s.erase(0, 1);
+                    else c.s.insert(c.s.begin(), '-');
+                }
                 else throw err_at("invalid negative literal pattern", ln, cl);
             }
         } else {
             throw err_at("literal pattern must be a constant", ln, cl);
+        }
+        // PEP 634：signed_real_number ('+'|'-') imaginary_number（0.641）。
+        // Constant 的 Complex 只能表示纯虚数（实部固定 0），所以这里保留成
+        // BinOp 表达式，降级时按普通表达式求值即可得到 1+2j。
+        if (!neg && lit->kind == ExprKind::Constant &&
+            (check(Tok::PLUS) || check(Tok::MINUS)) && peek_tok().kind == Tok::COMPLEX) {
+            auto& c0 = static_cast<Constant&>(*lit);
+            if (c0.ck == Constant::CK::Int || c0.ck == Constant::CK::Float) {
+                Tok op = check(Tok::PLUS) ? Tok::PLUS : Tok::MINUS;
+                advance();
+                ExprPtr imag = parse_atom();
+                auto b = std::make_unique<BinOp>(op, std::move(lit), std::move(imag));
+                b->line = ln;
+                b->col = cl;
+                lit = std::move(b);
+            }
         }
         auto p = std::make_shared<Pattern>();
         p->kind = PatternKind::Literal;
