@@ -622,35 +622,7 @@ void Lowerer::lower_for_seq(For& f) {
     //
     // 元组长度不可变，不需要补丁；str/dict/set 维持原口径（dict 的
     // 「迭代中改大小」CPython 是 RuntimeError，属另一条语义，不在此列）。
-    if (seq_ty->kind == TyKind::List && side_effect_seq_ != se_before_body) {
-        auto& cinsts = st_->fn->blocks[static_cast<size_t>(cond)].insts;
-        if (cond_cmp_pos < cinsts.size() && cinsts[cond_cmp_pos].op == IrOp::Cmp) {
-            std::vector<Inst> pre;
-            VReg seq_cond = seq;
-            if (seq_slot >= 0) {
-                // 生成器：seq vreg 不跨挂起存活，从帧槽取回。
-                seq_cond = static_cast<VReg>(st_->fn->vreg_ty.size());
-                st_->fn->vreg_ty.push_back(seq_ty);
-                Inst ld;
-                ld.op = IrOp::LoadSlot;
-                ld.idx = seq_slot;
-                ld.dst = seq_cond;
-                ld.ty = seq_ty;
-                pre.push_back(std::move(ld));
-            }
-            VReg len_now = static_cast<VReg>(st_->fn->vreg_ty.size());
-            st_->fn->vreg_ty.push_back(t_int());
-            Inst ln2;
-            ln2.op = IrOp::Len;
-            ln2.a = seq_cond;
-            ln2.dst = len_now;
-            ln2.ty = t_int();
-            pre.push_back(std::move(ln2));
-            cinsts[cond_cmp_pos].b = len_now;
-            cinsts.insert(cinsts.begin() + static_cast<std::ptrdiff_t>(cond_cmp_pos),
-                          pre.begin(), pre.end());
-        }
-    }
+    patch_cond_reload_len(cond, cond_cmp_pos, seq, seq_ty, seq_slot);
     // 列表/元组按 0..len-1 遍历，元素下标的边界检查可以免掉：
     //   - 循环体无副作用：长度不会变，整个循环的守卫都成立；
     //   - 有副作用：取元素紧跟在条件分支之后，中间只有循环自己的索引槽
@@ -723,5 +695,43 @@ void Lowerer::lower_for_seq(For& f) {
 }
 
 
+
+
+// 循环体有副作用（调用 / del / 切片赋值…）时，长度可能已经变了：把 cond 块里
+// 缓存的 `i < len(seq)` 换成每轮重读 len。stmt_for 与 comp 共用。
+//
+// 只对 list 生效：tuple 长度不可变；str/dict/set 维持原口径（dict/set 的
+// 「迭代中改大小」在 CPython 是 RuntimeError，属另一条语义，由版本守卫负责）。
+bool Lowerer::patch_cond_reload_len(int cond, size_t cond_cmp_pos, VReg seq,
+                                    const TypePtr& seq_ty, int seq_slot) {
+    if (!seq_ty || seq_ty->kind != TyKind::List) return false;
+    auto& cinsts = st_->fn->blocks[static_cast<size_t>(cond)].insts;
+    if (cond_cmp_pos >= cinsts.size() || cinsts[cond_cmp_pos].op != IrOp::Cmp) return false;
+    std::vector<Inst> pre;
+    VReg seq_cond = seq;
+    if (seq_slot >= 0) {
+        // 生成器：seq vreg 不跨挂起存活，从帧槽取回。
+        seq_cond = static_cast<VReg>(st_->fn->vreg_ty.size());
+        st_->fn->vreg_ty.push_back(seq_ty);
+        Inst ld;
+        ld.op = IrOp::LoadSlot;
+        ld.idx = seq_slot;
+        ld.dst = seq_cond;
+        ld.ty = seq_ty;
+        pre.push_back(std::move(ld));
+    }
+    VReg len_now = static_cast<VReg>(st_->fn->vreg_ty.size());
+    st_->fn->vreg_ty.push_back(t_int());
+    Inst ln2;
+    ln2.op = IrOp::Len;
+    ln2.a = seq_cond;
+    ln2.dst = len_now;
+    ln2.ty = t_int();
+    pre.push_back(std::move(ln2));
+    cinsts[cond_cmp_pos].b = len_now;
+    cinsts.insert(cinsts.begin() + static_cast<std::ptrdiff_t>(cond_cmp_pos),
+                  pre.begin(), pre.end());
+    return true;
+}
 
 }  // namespace pyadamas

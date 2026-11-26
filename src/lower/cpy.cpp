@@ -21,6 +21,22 @@ bool Lowerer::cpy_desc(const TypePtr& t, std::string& out, int line, int col) {
         case TyKind::None: out = "n"; return true;
         case TyKind::Bool: out = "b"; return true;
         case TyKind::Int: out = "i"; return true;
+        // 定宽整数（0.617）：槽内统一 8 字节。有符号在槽里已符号扩展，按 i 发；
+        // U64 必须按无符号发，否则 > 2^63-1 的值到 CPython 侧会变负数。
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32: out = "i"; return true;
+        case TyKind::U64: out = "u"; return true;
+        // Optional[T]（str | None 这类）：0 发 None，非 0 按内层描述符序列化。
+        case TyKind::Optional: {
+            std::string inner = "?";
+            if (!t->sub.empty() && !cpy_desc(t->sub[0], inner, line, col)) return false;
+            out = "o" + inner;
+            return true;
+        }
         case TyKind::Float: out = "f"; return true;
         case TyKind::Str: out = "s"; return true;
         case TyKind::Bytes: out = "y"; return true;
@@ -103,7 +119,7 @@ VReg Lowerer::lower_cpy_call(const std::string& proxy_name, const std::string& a
                           {const_str(module), const_str(attr), args, const_str(descs)});
     // 结果可能是堆对象（str/list/dict/float 盒）也可能是裸标量：
     // 按注册表接管初始引用，标量空操作。
-    call_void(RtFn::RcTempUnknown, {r});
+    push_temp_unknown(r);
     return r;
 }
 

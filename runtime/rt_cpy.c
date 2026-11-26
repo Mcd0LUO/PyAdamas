@@ -119,6 +119,11 @@ static void cb_i64(CpyBuf* b, int64_t v) {
     int n = snprintf(tmp, sizeof tmp, "%lld", (long long)v);
     cb_raw(b, tmp, (size_t)n);
 }
+static void cb_u64(CpyBuf* b, uint64_t v) {
+    char tmp[24];
+    int n = snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)v);
+    cb_raw(b, tmp, (size_t)n);
+}
 static void cb_u4(CpyBuf* b, uint32_t cp) {
     char tmp[8];
     /* cp 由调用方保证 <= 0xFFFF；用返回值确认没截断（与 rt_json 同口径，
@@ -234,6 +239,7 @@ static unsigned char* b64_decode(const char* s, size_t n, size_t* out_n) {
 
 /* 自定界描述符长度（与 rt_json.c 的 desc_len 同语法）。 */
 static size_t cpy_desc_len(const char* d) {
+    if (*d == 'o') return 1 + cpy_desc_len(d + 1);  /* Optional：前缀 + 内层 */
     if (*d != '(') return 1;
     int depth = 0;
     size_t i = 0;
@@ -359,6 +365,20 @@ static void cpy_marshal(CpyBuf* b, int64_t v, const char* d, size_t n) {
             return;
         }
         pa_raise_c("ValueError", "cpybridge: bad type descriptor");
+    }
+    if (t == 'o') {
+        /* Optional[T]：0 表示 None，其余按内层描述符序列化。 */
+        if (v == 0) { cb_cstr(b, "null"); return; }
+        if (n < 2) pa_raise_c("ValueError", "cpybridge: bad optional descriptor");
+        cpy_marshal(b, v, d + 1, n - 1);
+        return;
+    }
+    if (t == 'u') {
+        /* 无符号 64 位：按 u64 打印，避免 > 2^63-1 变负数。 */
+        cb_cstr(b, "{\"i\":");
+        cb_u64(b, (uint64_t)v);
+        cb_ch(b, '}');
+        return;
     }
     if (t == 'n') { cb_cstr(b, "null"); return; }
     if (t == 'b') { cb_cstr(b, v ? "true" : "false"); return; }

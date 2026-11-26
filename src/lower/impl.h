@@ -122,7 +122,11 @@ private:
     // noreturn 调用之后把当前块收尾，避免后端把后续块当成顺序落下。
     void end_unreachable();
     // 从 (type, message) 临时槽重新抛出（RaiseOwn + store_slot_raw 清槽）。
-    void emit_rethrow_from_slots(int ts, int msgs);
+        // 循环体有副作用时，把 cond 块里缓存的 `i < len(seq)` 改成每轮重读 len。
+    // 返回是否打了补丁（stmt_for 与 comp 共用）。
+    bool patch_cond_reload_len(int cond, size_t cond_cmp_pos, VReg seq,
+                                const TypePtr& seq_ty, int seq_slot);
+void emit_rethrow_from_slots(int ts, int msgs);
 
     VReg alloc(TypePtr ty);
 

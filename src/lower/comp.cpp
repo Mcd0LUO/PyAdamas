@@ -453,6 +453,11 @@ VReg Lowerer::lower_comp(Expr& e) {
         cmp.a = iv;
         cmp.b = n_val();
         VReg cc = def(t_bool(), std::move(cmp));
+        // 缓存「i < len(seq)」这条比较的位置：循环体若有副作用，事后要把它
+        // 改成每轮重读 len（与 stmt_for.cpp 同一套补丁，共用
+        // patch_cond_reload_len）。
+        const size_t cond_cmp_pos =
+            st_->fn->blocks[static_cast<size_t>(cond)].insts.size() - 1;
         Inst br;
         br.op = IrOp::Branch;
         br.a = cc;
@@ -513,6 +518,10 @@ VReg Lowerer::lower_comp(Expr& e) {
         }
 
         gen(gi + 1);
+        // 循环体里有用户副作用（调用 / append / del…）时，长度可能在迭代期间变化：
+        // 把 cond 里缓存的 len 换成每轮重读，与 CPython 列表迭代器同口径。
+        if (side_effect_seq_ != se_gen_start)
+            patch_cond_reload_len(cond, cond_cmp_pos, seq, sty, seq_slot);
         if (opts_.opt_level >= 1 && gen_load_blk >= 0 &&
             side_effect_seq_ == se_gen_start) {
             auto& insts = st_->fn->blocks[gen_load_blk].insts;
