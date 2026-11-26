@@ -77,9 +77,14 @@ StmtPtr Parser::parse_try() {
         expect(Tok::COLON, "':' after try");
         node->body = parse_suite();
 
+        bool saw_bare = false;
         while (check(Tok::KW_EXCEPT)) {
+            int exc_ln = cur().line, exc_cl = cur().col;
             advance();
             ExceptHandler h;
+            // 裸 `except:` 必须是最后一个处理器，之后不能再有 except。
+            if (saw_bare)
+                throw err_at("'except' clause after bare 'except:'", exc_ln, exc_cl);
             if (!check(Tok::COLON)) {
                 h.type = parse_namedexpr();
                 // PEP 758（3.14）：`except A, B:` 合法（不带 as 时可省括号）。
@@ -101,6 +106,8 @@ StmtPtr Parser::parse_try() {
                     h.name = expect(Tok::NAME, "exception name").text;
                 }
             }
+            // 裸 except:（没有类型表达式）只能出现在最后一个处理器位置。
+            if (!h.type) saw_bare = true;
             expect(Tok::COLON, "':' after except");
             h.body = parse_suite();
             node->handlers.push_back(std::move(h));
@@ -152,6 +159,7 @@ StmtPtr Parser::parse_with(bool is_async) {
 bool Parser::paren_with_items() const {
         int depth = 0;
         bool has_as = false;
+        bool has_comma = false;
         for (size_t i = pos_; i < toks_.size(); ++i) {
             Tok k = toks_[i].kind;
             if (k == Tok::LPAREN || k == Tok::LBRACKET || k == Tok::LBRACE) {
@@ -159,9 +167,14 @@ bool Parser::paren_with_items() const {
             } else if (k == Tok::RPAREN || k == Tok::RBRACKET || k == Tok::RBRACE) {
                 --depth;
                 if (depth == 0) {
-                    if (!has_as) return false;
+                    // Python 3.10+：顶层出现 `as` 或逗号、且 `)` 后紧跟 `:` 时，
+                    // 括号里是 WithItem 列表。只认 `as` 会把 with (a, b): 当成
+                    // 单个元组上下文（降级时报「需要 __enter__/__exit__」）。
+                    if (!has_as && !has_comma) return false;
                     return i + 1 < toks_.size() && toks_[i + 1].kind == Tok::COLON;
                 }
+            } else if (k == Tok::COMMA && depth == 1) {
+                has_comma = true;
             } else if (k == Tok::KW_AS && depth == 1) {
                 has_as = true;
             } else if (k == Tok::NEWLINE || k == Tok::END) {
@@ -335,7 +348,7 @@ StmtPtr Parser::parse_simple_statement() {
         return n;
     }
 
-void Parser::check_assignable(const Expr& e) {
+void Parser::check_assignable(const Expr& e, bool in_unpack) {
         switch (e.kind) {
             case ExprKind::Name:
             case ExprKind::Attribute:
@@ -346,11 +359,18 @@ void Parser::check_assignable(const Expr& e) {
                 const auto& elts = (e.kind == ExprKind::Tuple)
                                        ? static_cast<const TupleExpr&>(e).elts
                                        : static_cast<const ListExpr&>(e).elts;
-                for (auto& it : elts) check_assignable(*it);
+                for (auto& it : elts) check_assignable(*it, true);
                 return;
             }
-            case ExprKind::Starred:
+            case ExprKind::Starred: {
+                // PEP 8/语法：星号目标只能出现在元组/列表解包里。
+                // `*a = [1]` / `*a += [1]` / `*a: list[int] = [1]` 都非法。
+                if (!in_unpack)
+                    throw err_at("starred assignment target must be in a list or tuple",
+                                 e.line, e.col);
+                check_assignable(*static_cast<const Starred&>(e).value, false);
                 return;
+            }
             default:
                 throw err_at("cannot assign to this expression", e.line, e.col);
         }

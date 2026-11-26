@@ -144,7 +144,7 @@ private:
         return check(Tok::NEWLINE) || check(Tok::SEMICOLON) || check(Tok::END) || check(Tok::DEDENT);
     }
 
-    void check_assignable(const Expr& e);
+    void check_assignable(const Expr& e, bool in_unpack = false);
 
     StmtPtr parse_import();
 

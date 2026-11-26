@@ -10,15 +10,15 @@
 
 | 类别 | 数量 | 条目 |
 |---|---|---|
-| 驱动层（高） | 2 | A1 A2 |
-| 驱动层（中） | 3 | A3（含 3 处不对称）/ A4 / A5 |
-| 驱动层（低） | 9 | A6 表 |
+| 驱动层（高） | 4 | A1 A2 A8-1 A8-2 |
+| 驱动层（中） | 5 | A3（含 3 处不对称）/ A4 / A5 / A8-3 / A8-4 |
+| 驱动层（低） | 10 | A6 表 + A8-5 |
 | 文档：与代码矛盾 | 7 | B1 |
 | 文档：失效的文件引用 | 8 | B2 |
 | 文档：失效的用例引用 | 5 | B3 |
 | 文档：索引/可达性 | 1 | B4 |
 
-**有可执行复现的问题 3 条**：A1、A3-1、A4；A7 是经实测的正面结论。其余为读代码 + 对表推导，证据强度逐条标注。
+**有可执行复现的问题 8 条**：A1、A3-1、A4、A8-1～A8-5。另有 1 条经实测的正面结论（A7）与 1 条经实测排除的假阳性（A8-6）。其余为读代码 + 对表推导，证据强度逐条标注。
 
 ---
 
@@ -115,6 +115,89 @@ ok: m3.py (2 statements, 1 functions, 9 expressions)
 - 锁：行式 / 排序 / 无时间戳与绝对路径 / `sha256:` + 64 位小写校验 / `..` 只在 pkg 路径放行；`--locked` 与宽松模式的分流、以及 `diff_locks` 的方向经 `src/main.cpp:213` 核对一致。
 - `src/driver/sha256.cpp` 实测正确：空串 / `abc` / 1e6 个 `a` 三条标准向量全对，7 字节分块的流式结果与非流式一致。
 
+### A8（高）跨模块「类对象」口径：一条静默错值 + 三条误报
+
+这一轮把 `build.cpp:707-824`（扁平类导出）→ `src/ir/module.cpp:782-839`（编码）→ `:897-967`（解码）→ 导入方消费，做了逐字段往返对照。结论：**类在跨模块时不是同一个东西**。
+
+#### A8-1（高，静默错值）导入类的实例字段被当成类属性读
+
+复现：
+```python
+# a2.py
+class C:
+    LIMIT: int = 42      # 带标注 = 字段（不是类属性）
+    NAME: str = "hi"
+```
+```python
+# m_attr3.py
+import a2
+print(a2.C.LIMIT)    # -> -1
+print(a2.C.NAME)     # -> 空串
+```
+本模块写同样的代码是**报错**的（`solo_attr.py`：`error: class 'C' has no attribute 'LIMIT'`）。跨模块不报错，直接读到垃圾值。
+
+链路：`src/typecheck/func.cpp:415` 的 `is_class_receiver()` 要求接收者是**裸 Name**（`a.value->kind != ExprKind::Name → false`），`a2.C` 是 Attribute，于是永远走「实例属性」分支 `src/typecheck/expr_attr.cpp:337` 的 `cls->field(a.attr)`；字段**在接口里有**（`build.cpp:728-729` 全量扁平导出），于是命中、返回 int，codegen 按实例偏移在类对象上读一个槽。
+
+性质：合法性与值的双重错——本模块拒绝的写法，跨模块静默通过并给出错误结果。按 AGENTS.md 优先级属「静默错值」，最高。
+
+#### A8-2（高，误报）跨模块 `mod.K.cm()` / `mod.K.sm()` 全部失败
+
+```
+$ pyadamas build m_cm.py     # import kcm; kcm.K.cm(); kcm.K.sm()
+m_cm.py:2:15: error: 'type[K]' object has no method 'cm'
+m_cm.py:3:15: error: 'type[K]' object has no method 'sm'
+```
+同样的代码写在单个文件里输出 `5` / `6`（`solo_cm.py`，实测通过）。
+
+链路：导入方的 `kcm.K` 是 `TyKind::ClassObj`（`type[K]`），而 `src/typecheck/call_forms.cpp:473` 的「ClassObj → Class 解包」和 `:475` / `:490` 的类接收者分支都带 `is_class_receiver(a)` 前置条件；`kcm.K` 不是裸 Name，三个分支全部跳过，落到 `method_call(ClassObj, ...)` 报「没有这个方法」。
+
+影响：任何 pya 模块对外暴露的类，其类方法/静态方法都无法从别的模块调用（构造 `mod.C()` 是可以的，实测通过）。
+
+#### A8-3（中，误报）类属性根本没有进接口
+
+```
+# kattr.py
+class C:
+    LIMIT = 42           # 不带标注 = 类属性（存模块隐藏全局）
+```
+本模块 `print(C.LIMIT)` → `42`；`import kattr; kattr.C.LIMIT` → `error: 'C' object has no attribute 'LIMIT'`，实例访问 `c.LIMIT` 同样报错。
+
+链路：扁平类只带 `fields`（`src/driver/build.cpp:728`）、不带 `class_attrs`；接口格式（`src/ir/module.cpp:782-839`）没有类属性段。即使 A8-2/A8-1 的接收者判定修好，导入方也没有可查的表。
+
+#### A8-4（中，误报）enum 成员跨模块不可见
+
+```
+$ pyadamas build m_enum.py    # import b; b.Color.RED
+error: 'Color' object has no attribute 'RED'
+```
+enum 成员在定义模块里是 `class_attrs`（`src/typecheck/enum.cpp:66`），`is_enum` / `enum_members` 也都没进接口，所以导入方既不知道这是 enum，也查不到成员。
+
+#### A8-5（低）未绑定方法值的报错口径漂移
+
+`g = C.get; g(obj)` 在本模块于 **codegen** 报 `'C.get' is an instance method; take the value on an instance`；跨模块在 **typecheck** 报 `function '<imported>' takes 0 positional arguments but 1 were given`。原因是接口只导出 `call_sig`（`src/ir/module.cpp:826`），解码时 `m.sig = m.call_sig`（`:938`），含 self 的签名丢失。两条路都拒绝，但诊断质量差一截。
+
+#### A8-6（已排除）装饰方法跨模块 —— 不是 bug
+
+`decorated_ty` 同样没进接口，但导入方有**明确诊断**：`decorated method 'val' of imported class 'K' is not available across modules; call it inside its own module or drop the decorator`（`src/typecheck/call_forms.cpp:478-487` 附近）。属有意的能力边界，不是静默错误。
+
+#### A8-7（低）两个字段是「只写不读」的死字段
+
+- `ClassInfo::is_abstract`：唯一写入点 `src/typecheck/enum.cpp:29`，全仓库没有读取点。而 `src/typecheck/types.h:389-391` 注释声称「含未实现抽象方法的类不能实例化（typecheck 在构造点报错）」——该检查不存在。
+- `ClassInfo::has_field_defaults`：写入点 `src/typecheck/classdef.cpp:165,258` 与 `src/driver/build.cpp:718`，无读取点。`build.cpp:718` 那次赋值是空转，接口不带它也无损失。
+
+#### A8 的口径汇总（接口少带了什么）
+
+| ClassInfo / MethodInfo 字段 | 进接口 | 导入方是否消费 | 后果 |
+|---|---|---|---|
+| `fields`（含字段默认字面量） | 是 | 是 | 正常（实例路径正确） |
+| `class_attrs` / `cowed_attrs` | **否** | 是 | A8-3 / A8-4 误报 |
+| `is_enum` / `enum_members` | **否** | 是 | A8-4 误报 |
+| `MethodInfo.sig`（含 self） | **否**（只带 call_sig） | 是 | A8-5 报错口径漂移 |
+| `MethodInfo.decorated_ty` | 否 | 是 | 有意拒绝（A8-6） |
+| `is_abstract` / `has_field_defaults` | 否 | **否** | 死字段（A8-7） |
+| `ext_ancestors` / `match_args` / 异常三标记 / `needs_dict` / `open` / `has_init` | 是 | 是 | 正常 |
+
+建议：① 先修 `is_class_receiver`（`src/typecheck/func.cpp:415`）让它认 `mod.C`，这一条同时解掉 A8-1（错值）与 A8-2（误报）；② 再扩接口格式带 `class_attrs` + `is_enum/enum_members`（`kModuleFormatVersion` 需要 +1，旧缓存自动失效）；③ `sig` 是否要带，等 ② 落地时一起定。
 ---
 
 ## B. 文档（非 archive 74 篇）
@@ -186,6 +269,15 @@ cd /tmp/drvprobe/dup2
 PYADAMAS_CACHE_DIR=$PWD/cache build/lead/pyadamas build -v main.py -o m
 grep -r 'dep pkg.a' cache/*/manifest      # 同一行出现两次
 PYADAMAS_CACHE_DIR=$PWD/cache build/lead/pyadamas build -v main.py -o m  # 仍 building __entry__
+
+# A8：跨模块类对象（同一目录 /tmp/drvprobe/iface）
+build/lead/pyadamas build m_attr3.py -o m_attr3 && ./m_attr3   # -1 / 空串（本模块同类代码报错）
+build/lead/pyadamas build solo_attr.py -o sa                     # error: class 'C' has no attribute
+build/lead/pyadamas build m_cm.py -o m_cm                        # 'type[K]' object has no method 'cm'
+build/lead/pyadamas build solo_cm.py -o scm && ./scm             # 5 / 6（同模块正常）
+build/lead/pyadamas build m_kattr.py -o mk                       # 'C' object has no attribute 'LIMIT'
+build/lead/pyadamas build solo_attr2.py -o sa2 && ./sa2          # 42（同模块正常）
+build/lead/pyadamas build m_enum.py -o me                        # 'Color' object has no attribute 'RED'
 
 # A7：sha256 向量 + 流式一致性
 g++ -std=c++23 -I src /tmp/drvprobe/shatest.cpp src/driver/sha256.cpp -o /tmp/shatest && /tmp/shatest
