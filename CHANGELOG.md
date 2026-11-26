@@ -6,6 +6,30 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.672] - 2026-11-27
+
+> fix(typecheck)：**`or`/`and` 的 int/float 混合结果被静态推成 float**（静默错值）。
+>
+> ```python
+> print(1 or 2.5)      # 修前：1.0    CPython：1
+> print(0 and 2.5)    # 修前：0.0    CPython：0
+> print((0.0 or 9)*2) # 修前：18.0   CPython：18
+> ```
+>
+> 数值相等但类型不同——`repr`、`print`、`isinstance(x, int)` 全都不同。
+>
+> 根因在 0.620：为修 `x = "" or 0.0` 打印成 `0`，把 join 类型为 float 的值统一 `coerce` 成 float，
+>于是「选中的操作数本来是 int」也被转成了 float。
+>
+> 修法：`TypeChecker::type_of(BoolOp)` 在**操作数混有 int 与 float** 时返回 `unknown`——
+>结果类型本来就是动态的（`1 or 2.5` 是 int、`0 or 2.5` 是 float），交给 unknown 域：
+>int 原样、float 装箱，运行期按实际值分派。纯 int / 纯 float 的 boolop 不受影响。
+>
+> 用例 `421_boolop_mixed_numeric.py` 的最后一行原本钉住的是**旧的非 CPython 行为**（`18.0`），
+>已改成 `18` 并在文件头写明：**标注为 float 的返回槽**仍按静态槽转 double（`9.0`，这是既有口径），
+>但没有标注、没有静态槽的表达式是动态类型。
+>
+> 套件 **598** 全绿；**全量 difftest 541 例 0 不一致**。
 ## [0.671] - 2026-11-27
 
 > **记录一个既有错值**（不是本轮引入）：`or` / `and` 的 int/float 混合会让结果变成 float。

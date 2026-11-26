@@ -280,6 +280,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto& b = static_cast<BoolOp&>(e);
                 TypePtr acc = nullptr;
                 bool has_big = false, has_other = false;
+                bool has_float = false, has_int = false;
                 // 短路内的窄化（0.498）：`a and a.foo()` 的右操作数只在左侧为真时
                 // 求值，所以左操作数的真值窄化要作用到后面所有元素；`or` 用假值
                 // 方向（`x is None or x.foo()`）。求值完恢复原类型。
@@ -289,6 +290,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                     auto t = expr(*v);
                     has_big |= t->kind == TyKind::Big;
                     has_other |= t->kind != TyKind::Big;
+                    has_float |= t->kind == TyKind::Float;
+                    has_int |= t->kind == TyKind::Int || t->kind == TyKind::Bool;
                     acc = acc ? join(acc, t) : t;
                     if (vi + 1 < b.values.size()) {
                         auto n = narrow_on(*v, b.op == Tok::KW_AND);
@@ -298,6 +301,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                 for (auto& n : active) restore_narrowing(n);
                 // and/or 保留被选中的值；不能把标量当成 big 指针。
                 if (has_big && has_other) return t_unknown();
+                // 0.672：int 与 float 混在一起时，结果类型是**动态**的——
+                // `1 or 2.5` 在 CPython 里返回 int 1，`0 or 2.5` 返回 float 2.5。
+                // 若把 join 后的 Float 当成静态类型，降级会把选中的 int 也 coerce 成
+                // float（实测 `print(1 or 2.5)` 打印 1.0，属静默错值）。
+                // 交给 unknown 域：int 原样、float 装箱，运行期按实际值分派。
+                if (has_float && has_int) return t_unknown();
                 return acc ? acc : t_unknown();
             }
             case ExprKind::Compare: {
