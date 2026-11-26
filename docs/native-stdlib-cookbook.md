@@ -494,7 +494,7 @@ asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element"
 **pathlib.Path**（高，3~5 天）：方法表共 ~17 个（mkdir/exists/is_file/is_dir/read_text/write_text/iterdir/glob/unlink/rmdir/touch/with_suffix/read_bytes/write_bytes/is_absolute/joinpath/relative_to/resolve/absolute），
 其中 5 个返回 `new_ty(TyKind::Path)`（iterdir/glob 返回 list[Path]、with_suffix/joinpath/relative_to/resolve/absolute 返回 Path）。
 额外难点：
-- `mkdir` 只收关键字（mode/parents/exist_ok）→ pysig 的 `def mkdir(self, *, mode: int = 0, parents: bool = False, exist_ok: bool = False)` 需验证关键字-only 形参在原生类方法上的装配（`lower/method_native.cpp:9` 的 kw_ok 白名单按方法名硬编码，不能直接改）；
+- `mkdir` 只收关键字（mode/parents/exist_ok）→ pysig 的 `def mkdir(self, *, mode: int = 0, parents: bool = False, exist_ok: bool = False)` 需验证关键字-only 形参在原生类方法上的装配（`lower/method/method_native.cpp:9` 的 kw_ok 白名单按方法名硬编码，不能直接改）；
 - `Path` 的 `/` 运算符（`p / "sub"`）在 typecheck/expr.cpp 里特判，不属方法表，保留 C++；
 - `declared_class_type` 加一行（pathlib.Path → TyKind::Path），并在 module_info 里把 Path 构造器注册（当前 `func("Path", {t_str()}, p)` 在 typecheck/builtin_sigs.cpp）。
 **改哪层**：与 deque 相同，外加运算符与 kw_ok 白名单保持 C++ 不动。

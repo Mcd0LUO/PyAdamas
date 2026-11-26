@@ -49,9 +49,9 @@ urllib / urllib.error / urllib.request。
 | 编号 | 改动 | 位置 | 回归 |
 |---|---|---|---|
 | E1 | open() fopen 失败按 errno 映射 FileNotFoundError/FileExistsError/PermissionError/NotADirectoryError/IsADirectoryError（此前一律 OSError "cannot open file"）；消息 "[Errno N] strerror: 'path'" | runtime/rt_file.c | 275 |
-| E2 | os.close(fd) + os.unlink 别名（mkstemp 裸 fd 关闭/脚本自然写法） | rt_os.c、rt_internal.h、ir/ops.h（**OsClose 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/import.cpp、backend/call_rt.cpp | 274/275 |
-| E3 | os.makedirs 的 exist_ok **关键字**此前被降级静默丢弃（签名声明了但只装位置参）→ copytree(dirs_exist_ok=True) 恒 FileExistsError | src/lower/import_native.cpp | 273/275 |
-| E4 | os.path.islink（lstat S_ISLNK；symlink 脚本刚需） | rt_os.c、ir/ops.h（**OsPathIslink 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/import.cpp、backend/call_rt.cpp | 273/275 |
+| E2 | os.close(fd) + os.unlink 别名（mkstemp 裸 fd 关闭/脚本自然写法） | rt_os.c、rt_internal.h、ir/ops.h（**OsClose 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/module/import.cpp、backend/call_rt.cpp | 274/275 |
+| E3 | os.makedirs 的 exist_ok **关键字**此前被降级静默丢弃（签名声明了但只装位置参）→ copytree(dirs_exist_ok=True) 恒 FileExistsError | src/lower/module/import_native.cpp | 273/275 |
+| E4 | os.path.islink（lstat S_ISLNK；symlink 脚本刚需） | rt_os.c、ir/ops.h（**OsPathIslink 枚举尾部**）、typecheck/builtin_sigs.cpp、lower/module/import.cpp、backend/call_rt.cpp | 273/275 |
 | F1 | **cmp+branch 融合排除 Bytes**（同 Str 既有排除）：bytes 切片 eq/ne 在循环条件位置被融合成指针 cmpq，内容相等的新切片 vs 字面量恒判不等。基线 0.327 已存在（主树 release 二进制复现），zipfile 循环 magic 校验抓出；顶层"碰巧对"是常量折叠把两侧折成同一驻留字面量 | src/backend/block.cpp can_fuse_branch（一行） | 275 |
 
 RtFn 新增（OsClose/OsPathIslink）全部追加枚举末尾，不改既有编号（一批约定）；

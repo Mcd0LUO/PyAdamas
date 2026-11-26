@@ -237,9 +237,9 @@ cj_parse 先把整帧解析成纯 malloc 的 JSON DOM，再解码成 pyadamas �
 
 降级：
 - src/lower/lower.cpp：scan_globals 对 from python import 不占全局槽。
-- src/lower/import.cpp：lower_import_from 代理别名登记（不发
+- src/lower/module/import.cpp：lower_import_from 代理别名登记（不发
   ImportModule）；lower_import 拒绝 import python。
-- src/lower/method.cpp：代理调用 → lower_cpy_call；点链拼模块名。
+- src/lower/method/method.cpp：代理调用 → lower_cpy_call；点链拼模块名。
 - src/lower/cpy.cpp（新）：cpy_desc + lower_cpy_call（kind 0 实参打包
   + 描述符拼接 + CallRt CpyCall + RcTempUnknown）。
 - src/ir/ops.h：RtFn::CpyCall + rt_name → pa_cpy_call。

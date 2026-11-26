@@ -79,7 +79,7 @@
 | 0.149 | 分代循环收集：minor 用 trial-deletion、major 用标记-清扫；修复 RC 索引墓碑哨兵误命中 |
 | 0.150 | GC 保守根收窄：帧记录扩展成影子根表，不再扫描整段真实栈 |
 | 0.151 | 修复 `str(unknown)` 的运行期分派（堆字符串不再被格式化成地址数字） |
-| 0.152 | 工程治理：拆分 `lower/method.cpp`（2131 行上帝函数 → 15 个按接收者类型划分的成员函数） |
+| 0.152 | 工程治理：拆分 `lower/method/method.cpp`（2131 行上帝函数 → 15 个按接收者类型划分的成员函数） |
 | 0.153 | 工程治理：拆完 `gen_call_rt` / `builtin_module` / `lower_builtin_call` / `call` / `stmt`，拆分 `ir/ir.h`、`typecheck/typecheck.h`、`lower/impl.h`，新增 `tests/check_size.sh` |
 | 0.154 | 工程治理：拆完剩余 7 个大文件（`typecheck_call` / `lower_expr` / `lower_import` / `lower_stmt` / `lower_gen` / `lower` / `cdecl`），全部源文件 ≤1200 行 |
 | 0.155 | 浮点数值循环优化：块内 xmm 临时寄存器、浮点比较分支融合、短路布尔槽转发；mandelbrot 同机 1.87× |

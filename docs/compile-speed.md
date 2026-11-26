@@ -63,10 +63,10 @@ docs/development.md 标称 idle 机器 dev 全量 ~4.7s；本测量窗口机器�
 | lower/lower.cpp | 43.7 | typecheck/builtin_sigs.cpp | 30.8 |
 | typecheck/typecheck.cpp | 39.5 | typecheck/typecheck.cpp | 27.0 |
 | typecheck/func.cpp | 39.3 | typecheck/func.cpp | 27.0 |
-| lower/import_native.cpp | 38.8 | lower/call.cpp | 26.9 |
+| lower/module/import_native.cpp | 38.8 | lower/call.cpp | 26.9 |
 | lower/exc.cpp | 37.4 | typecheck/stmt.cpp | 26.8 |
 | main.cpp | 37.2 | lower/exc.cpp | 26.6 |
-| lower/import_stdlib.cpp | 35.9 | typecheck/stmt_forms.cpp | 26.3 |
+| lower/module/import_stdlib.cpp | 35.9 | typecheck/stmt_forms.cpp | 26.3 |
 | typecheck/expr.cpp | 35.8 | main.cpp | 25.5 |
 
 - 链接：dev 2.95s（-g 调试信息），release 0.29s；rt.o/rt_asan.o 合并 <0.1s。

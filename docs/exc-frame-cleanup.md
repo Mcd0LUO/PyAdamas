@@ -350,7 +350,7 @@ GC 是「RC 为主 + 循环收集器为辅」（`docs/runtime.md:770-805`），�
    （`src/backend/codegen.cpp:243-353、403-425、427-465`）不在 `pa_frame_top` 链上，也不需要释放；
    给它们加 personality 会破坏尾跳/跳板 CFI 约定（`docs/exc-semantics.md:359-360`）。
 8. **门禁**：`zero_cost_exc && !is_generator && target_abi().gnu_cfi`；可挂起函数继续旧路径
-   （`docs/exc-semantics.md` §5.2）。Win64 不发（`src/backend/target_abi.h:57-58`）。
+   （`docs/exc-semantics.md` §5.2）。Win64 不发（`src/common/target_abi.h:57-58`）。
 9. **优化遍**：新标签/LP 不能跨块搬运、不能被 DCE 删（对齐 `docs/exc-semantics.md` §6.5）。
 
 ## 8. 对 personality 的改动清单

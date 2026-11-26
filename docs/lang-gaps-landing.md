@@ -379,7 +379,7 @@
   （[]/{}/set()）、非字面量默认、默认参序违规、未解析/不支持标注、
   字段名撞合成局部（self/other/__pa_dc_o）。
 - **unhashable**：合成 __eq__ 无 __hash__ → 既有规则
-  （lower/builtin_reflect.cpp hash()）编译期报 unhashable（CPython 是
+  （lower/builtin/builtin_reflect.cpp hash()）编译期报 unhashable（CPython 是
   运行期 TypeError，口径合理不逐字）。
 - **静态容器/bytes repr**（门控开）：repr(list/dict) 走 ReprAny 探针；
   set 专用 pa_repr_set（运行期表示是 dict 值恒 0，探针分不出 set 与

@@ -67,7 +67,7 @@
 |---|---|---|
 | `src/backend/ops.cpp:82-86` | `IrOp::Len` 无条件发 `movq (%rax), %rax`（读偏移 0）；list/tuple/dict/set/str/bytes 都靠它 | **布局按 §2.2 后一行不用改**：偏移 0 对 str 是码点数、对 bytes 仍是字节数 |
 | `src/backend/ops.cpp:513-520` | `if s:` 也是读偏移 0 判非零 | 不变（空 ⇔ pub==0，与字节数是否为零等价） |
-| `src/lower/builtin_seq.cpp:6-33` | `len()`：`IrOp::Len`；range/deque 走运行时；类走 `__len__` | 语义直接变成码点数，**大量迭代/`range(len(s))` 代码自动跟着变**；`len(unknown)` 也自动正确（§2.2 的收益） |
+| `src/lower/builtin/builtin_seq.cpp:6-33` | `len()`：`IrOp::Len`；range/deque 走运行时；类走 `__len__` | 语义直接变成码点数，**大量迭代/`range(len(s))` 代码自动跟着变**；`len(unknown)` 也自动正确（§2.2 的收益） |
 | `runtime/rt_str.c:245-249`（现 `:393-403`） | `pa_str_eq`：先比指针（`a == b`）、再比字节长度，`len == 1` 时直接比一个字节，其余走 `sm_bytes_eq`（n ≤ 8 内联定长循环，n > 8 回落 `memcmp`） | 不变（字节相等 ⇔ 码点相等） |
 | `runtime/rt_str.c:251-259`（现 `:405-413`） | `pa_str_cmp`：`sm_bytes_cmp` 三路比较（n ≤ 8 内联，n > 8 回落 `memcmp`）；注释已指出 UTF-8 字节序与码点序一致 | 不变（可继续用，是少有的「不用改」点） |
 | `runtime/rt_dict.c:22-48` | 字典字符串 key 哈希 = 字节 FNV-1a + mix64；`s->len > 7` 时把哈希缓存进 `hash` | 不变（`len` 仍是字节数，阈值条件不用改）；hash 值与 CPython 本来就不同（compatibility.md） |
@@ -97,7 +97,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
 | `src/lower/stmt.cpp:796-798,895-910` | `for a, b in zip(s, t)`：双计数 + `IndexLoad` | 同上（zip 每个序列一个游标） |
 | `src/lower/comp.cpp:288-299,378-384,412-421` | 推导式把 str 当索引序列；`IndexLoadUnchecked` 只对 list/tuple 打补丁 | 同上；补丁逻辑不要用到 str 上（str 没有免检查路径，见 `:412-421` 的条件） |
 | `src/lower/aggregate.cpp:169-182,404-433,561-580` | `min/max/sum/any/all` 单实参时按 `Len` + `IndexLoad` 消费 str | 语义跟着变；性能同上，且这些内置在长串上会 O(n²)，S2/S3 用游标或 `pa_str_to_list` 一次物化 |
-| `src/lower/call.cpp:93-102,637-650`、`lower/import_native.cpp:112-115,293-297`、`lower/import_stdlib.cpp:410-416`、`lower/method_misc.cpp:60-66`、`lower/expr_assign.cpp:120-126` | 6 处把 str `StrToList` 后按 list 消费（`*args` 展开、`list/tuple/sorted/reversed/enumerate/zip`、`deque(str)`、`random.choice(str)`、切片赋值的字符串右值） | 这 6 处**自动正确**（`pa_str_to_list` 改码点后即可）；前提是 `pa_str_to_list` 内部 O(n) |
+| `src/lower/call.cpp:93-102,637-650`、`lower/module/import_native.cpp:112-115,293-297`、`lower/module/import_stdlib.cpp:410-416`、`lower/method/method_misc.cpp:60-66`、`lower/expr_assign.cpp:120-126` | 6 处把 str `StrToList` 后按 list 消费（`*args` 展开、`list/tuple/sorted/reversed/enumerate/zip`、`deque(str)`、`random.choice(str)`、切片赋值的字符串右值） | 这 6 处**自动正确**（`pa_str_to_list` 改码点后即可）；前提是 `pa_str_to_list` 内部 O(n) |
 | `runtime/rt_slice.c:204-209` | `pa_str_wrap_list`（textwrap 单元素列表） | 不变 |
 | `src/typecheck/stmt.cpp:355-417` | str 的下标/切片赋值在类型检查期直接拒绝（`:370-374,412-415`） | 不变（str 不可变，不需要写路径的码点换算） |
 
@@ -421,7 +421,7 @@ libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字
   `lower/call.cpp:215-223` 的默认值、`lower/impl_util.cpp:190-200`。
 - **收益**：字面量的 `len` / 下标基址全部零运行时成本；而且这是唯一可行的字面量
   方案（RELRO 只读）。可选附加优化：在降级期把 `len("字面量")` 折叠成常量
-  （`src/lower/builtin_seq.cpp:7-33`，目前 `opt/fold.cpp` 没有这类折叠）——
+  （`src/lower/builtin/builtin_seq.cpp:7-33`，目前 `opt/fold.cpp` 没有这类折叠）——
   纯收益，可放 S1 末尾。
 
 ### 2.7 与 RC 头 / GC / freelist / SSO 的共处
@@ -501,7 +501,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 - 返回**码点数**，对齐 CPython；O(1)（读偏移 0）。`len(b"中文") == 6` 不变（bytes 的
   偏移 0 是字节数）。
 - `len()` 的类型检查（`src/typecheck/builtin.cpp:66-78`）只接受单参；保持单参。
-- `len(range)`、`len(deque)`、类 `__len__` 都不受影响（`lower/builtin_seq.cpp:14-28`）。
+- `len(range)`、`len(deque)`、类 `__len__` 都不受影响（`lower/builtin/builtin_seq.cpp:14-28`）。
 
 ### 3.2 字节长度怎么取：三个候选
 
@@ -809,7 +809,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 本设计把「str 是合法 UTF-8」作为不变量，但现状有两个口子会在 str 里塞任意字节：
 
 1. **二进制模式文件读**：`open(path, 'rb').read()` 静态类型是 str
-   （`lower/method_misc.cpp:282` 固定 t_str()），运行时 `rt_file.c:382-407` 直接把
+   （`lower/method/method_misc.cpp:282` 固定 t_str()），运行时 `rt_file.c:382-407` 直接把
    原始字节 str_new。
 2. **str 字面量的 \xNN 转义**（现状）：`"\xff"` 是单字节 0xFF。
 
