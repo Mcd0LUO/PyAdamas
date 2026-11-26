@@ -326,6 +326,17 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                         for (auto& kw : c.keywords) expr(*kw.value);
                         return mk_class(cls.get());
                     }
+                    // A8-4：导入的 enum 类按值反查成员（kenum.Color(1)），
+                    // 不能走「没有 __init__ 就不收实参」的判断。
+                    if (cls->is_enum) {
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        if (c.args.size() != 1 || !c.keywords.empty())
+                            err(c.line, c.col,
+                                std::format("enum '{}' takes exactly one value argument",
+                                            cls->name));
+                        return mk_class(cls.get());
+                    }
                     if (cls->has_init && ci->second.ctor_sig) {
                         check_args(ci->second.ctor_sig, c);
                     } else if (!c.args.empty() || !c.keywords.empty()) {

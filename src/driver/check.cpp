@@ -73,6 +73,9 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
             flat->is_exception_class = cls->is_exception_class;
             flat->is_rich_exception = cls->is_rich_exception;
             flat->exc_parent = cls->exc_parent;
+            // A8-4：enum 标记与成员表（与 build.cpp 的扁平导出口径一致）。
+            flat->is_enum = cls->is_enum;
+            flat->enum_members = cls->enum_members;
             // 动态属性槽（setattr/vars 开出来的运行期 dict）：接口必须一起带过去，
             // 否则 check 会比 build 更严 —— argparse.Namespace 这类「成员在运行期
             // 才存在」的类会误报 "'Namespace' object has no attribute 'input'"

@@ -10,6 +10,12 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             return const_int(0);
         }
         TypePtr t = tc_.type_of(c.args[0].get());
+        // A8-4：enum 类对象 len(Color) = 成员个数。类名/类对象属性没有副作用，
+        // 不必求值（也不引入一次类对象单例的引用）。
+        if (t && t->kind == TyKind::ClassObj && !t->sub.empty() && t->sub[0] &&
+            t->sub[0]->kind == TyKind::Class && t->sub[0]->cls &&
+            t->sub[0]->cls->is_enum)
+            return const_int(static_cast<int64_t>(t->sub[0]->cls->enum_members.size()));
         VReg v = expr(*c.args[0]);
         VReg ln = dunder_len(v, t);
         if (ln != kNoReg) return ln;

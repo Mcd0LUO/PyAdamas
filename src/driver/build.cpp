@@ -734,6 +734,10 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->is_exception_class = cls->is_exception_class;
                 flat->is_rich_exception = cls->is_rich_exception;
                 flat->exc_parent = cls->exc_parent;
+                // A8-4：enum 标记与成员表要跟接口走，导入方才能做
+                // mod.Color(1) 按值反查 / for m in mod.Color / list / len。
+                flat->is_enum = cls->is_enum;
+                flat->enum_members = cls->enum_members;
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) flat->fields.push_back(f);
                 // __match_args__ 决定位置类模式的字段顺序，要跟着接口走。

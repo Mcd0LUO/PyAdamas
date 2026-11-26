@@ -821,6 +821,16 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
                 e.u8(ca.writable ? 1 : 0);
                 e.str(ca.external_symbol);
             }
+            // A8-4：enum 标记 + 成员表（名 → 字面量值）。导入方据此支持
+            // mod.Color(1) 按值反查、for m in mod.Color、list(mod.Color)、len()。
+            // 成员对象本身仍是定义模块的类属性（A8-3 已带符号），这里只需要
+            // 「有哪些成员、值是多少」这份编译期表。
+            e.u8(c.is_enum ? 1 : 0);
+            e.u32(static_cast<uint32_t>(c.enum_members.size()));
+            for (auto& em : c.enum_members) {
+                e.str(em.name);
+                enc_default_value(e, true, std::optional<LiteralValue>(em.val));
+            }
             e.u32(static_cast<uint32_t>(c.methods.size()));
             for (auto& m : c.methods) {
                 e.str(m.name);
@@ -944,6 +954,17 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
                 ca.external_symbol = d.str();
                 ca.owner = cls.get();
                 cls->class_attrs.push_back(std::move(ca));
+            }
+            // A8-4：enum 标记 + 成员表。成员对象的存储仍在定义模块（类属性
+            // 走 A8-3 的外部符号），这里只恢复编译期可见的成员名/值。
+            cls->is_enum = d.u8() != 0;
+            uint32_t nen = d.u32();
+            for (uint32_t j = 0; j < nen; ++j) {
+                EnumMember em;
+                em.name = d.str();
+                auto dv = dec_default_value(d);
+                if (dv.lit) em.val = *dv.lit;
+                cls->enum_members.push_back(std::move(em));
             }
             uint32_t nm = d.u32();
             for (uint32_t j = 0; j < nm; ++j) {

@@ -156,7 +156,14 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "len") {
             if (a.size() != 1) return t_int();
-            if (!is_unknown(a[0]) && a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&
+            // A8-4：enum 类对象 len(Color) = 成员个数（CPython 口径）。
+            // 本模块与导入类同一条判断（导入类的 is_enum 走接口解码）。
+            const bool enum_cls_obj =
+                a[0] && a[0]->kind == TyKind::ClassObj && !a[0]->sub.empty() &&
+                a[0]->sub[0] && a[0]->sub[0]->kind == TyKind::Class &&
+                a[0]->sub[0]->cls && a[0]->sub[0]->cls->is_enum;
+            if (!is_unknown(a[0]) && !enum_cls_obj &&
+                a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&
                 a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Dict && a[0]->kind != TyKind::Tuple &&
                 a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Range &&
                 a[0]->kind != TyKind::Class && a[0]->kind != TyKind::Deque &&

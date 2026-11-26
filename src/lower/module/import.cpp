@@ -96,6 +96,9 @@ std::optional<int> Lowerer::module_member(Attribute& at, ModuleInfoPtr* owner) {
 }
 
 VReg Lowerer::construct_imported(const ImportedClass& ic, Call& c, TypePtr cls_ty) {
+    // A8-4：导入的 enum 类按值反查成员，不能走 ctor wrapper（那会新建实例，
+    // Color(1) 的语义是「返回已存在的那个成员」）。
+    if (ic.cls && ic.cls->is_enum) return lower_enum_by_value(c, ic.cls.get());
     TypePtr fty = new_ty(TyKind::Func);
     fty->fn = ic.ctor_sig;
     int gi = extern_global(ic.ctor_symbol, ic.ctor_symbol, fty);

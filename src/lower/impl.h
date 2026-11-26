@@ -402,6 +402,8 @@ void emit_rethrow_from_slots(int ts, int msgs);
     VReg lower_cpy_call(const std::string& proxy_name, const std::string& attr, Call& c);
 
     VReg lower_construct(Call& c, const ClassInfoPtr& cls);
+    // A8-4：enum 按值反查成员（本模块 + 导入类共用）。
+    VReg lower_enum_by_value(Call& c, const ClassInfo* cls);
 
     // 按签名重排实参：位置、关键字、默认值、数值转换。
     std::vector<VReg> bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* defn);
