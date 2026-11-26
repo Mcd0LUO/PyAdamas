@@ -569,7 +569,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 |---|---|
 | 改哪些文件 | `runtime/rt_internal.h`（结构体 + 声明）、`runtime/rt_core.c`（`str_alloc/str_new/str_new_ascii/str_new_bytes/str_seal`、静态串、池）、`runtime/rt_str.c:52-58`（拼接 pub）、`runtime/rt_stdlib.c:198-207`（重复 pub）、`src/ir/types.h`（intern kind + bytes 字量表）、`src/lower/impl.h`（`const_bytes_literal`）、`src/backend/codegen.cpp:60-87`（字面量发射）、`src/lower/expr_ops.cpp:19-20`、`src/lower/call.cpp:215-223`、`src/lower/impl_util.cpp:190-200`、`src/backend/call.cpp:600-617,771-783,824-833`（cimport 偏移 16→24 + from_cstr 扫 pub）、`src/syntax/lexer.h`（str/bytes 的 `\x` 及 bytes 八进制转义区分，见 §7.4）、`src/typecheck/builtin_sigs.cpp`（如加 len_bytes） |
 | 语义变化 | `len(str)` 对非 ASCII 变成码点数；`len(bytes)` 不变；字面量 pub 编译期；str 字面量 `\x80`–`\xff` 变成对应 Unicode 码点（原来是裸字节） |
-| 验收 | `./build/dev/pyadamas run tests/run/05_strings.py`（既有）；新 `tests/run/163_codepoint_len.py`：`len("中文")==2`、`len("abc")==3`、`len(b"\xe4\xb8\xad")==3`、`len_bytes("中文")==6`、空串/长串字面量；`bash tests/run_tests.sh build/dev build/dev/pyadamas` 全绿；`python3 tests/diff/run_diff.py --seeds 3` 零差异 |
+| 验收 | `./build/dev/pyadamas run tests/run/05_strings.py`（既有）；新 `tests/run/176_codepoint.py`（0.382 由 176–179 合并，含 len 段）：`len("中文")==2`、`len("abc")==3`、`len(b"\xe4\xb8\xad")==3`、`len_bytes("中文")==6`、空串/长串字面量；`bash tests/run_tests.sh build/dev build/dev/pyadamas` 全绿；`python3 tests/diff/run_diff.py --seeds 3` 零差异 |
 | 回归风险 | 中：改结构体布局 + 所有构造点，任何漏写 pub 都会静默「长度为 0」。靠 `str_new` 默认扫描 + seal 协议 + 全量 run 用例兜住；`PYADAMAS_STR_DEBUG` 校验建议本阶段就加 |
 | 能否独立提交 | **能编译、不能发布**（见 §4.5）。建议 S1+S2 一起合入，中间只作为开发分支 commit |
 
@@ -579,7 +579,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 |---|---|
 | 改哪些文件 | `runtime/rt_str.c:60-64`（char_at 码点 + `pa_cp_str`）、`runtime/rt_core.c:787-790`（`pa_char_str` 只管 ASCII）、`runtime/rt_slice.c:75-94,169-174`（str 切片 / `pa_str_to_list`）、新增 `pa_bytes_slice` / `pa_str_char_at_cursor`、`src/ir/ops.h`（BytesSlice / BytesConcat / BytesRepeat / StrCharAtCursor 等 RtFn）、`src/backend/call_rt.cpp`（新 RtFn 分派）、`src/backend/ops.cpp:252-266`（concat 分家）、`src/lower/expr_container.cpp:22-31`（切片选路）、`src/lower/stmt.cpp:1015-1026,1063-1108` 与 `:668-670,733-737` 与 `:796-798,895-910`（for/enumerate/zip 游标）、`src/lower/comp.cpp:378-384`（推导式游标）、`src/lower/expr_ops.cpp:144-165`（bytes 重复）、`src/lower/method/method_str.cpp:25-29,189-194`（encode/decode 真转换） |
 | 语义变化 | 索引/切片/迭代按码点；bytes 全部保持字节；encode/decode 变成真转换 |
-| 验收 | 新 `tests/run/164_codepoint_index.py`：`"中文"[0]=="中"`、`"中文"[-1]=="文"`、`"中文"[0:1]=="中"`、`"中文"[::-1]=="文中"`、`list("中文")==["中","文"]`、`for ch in "中文"` 次数、enumerate/zip 对 str、bytes 对照 `b"\xe4\xb8\xad"[0]==228` / len==3；既有 tests/run/05_strings.py,15_slice.py,17_slice_assign.py,19_comprehension.py 回归；新增迭代性能用例（§6.4）要求不出现 O(n²)（2N 斜率检查） |
+| 验收 | 新 `tests/run/176_codepoint.py`（0.382 合并后的索引/切片段）：`"中文"[0]=="中"`、`"中文"[-1]=="文"`、`"中文"[0:1]=="中"`、`"中文"[::-1]=="文中"`、`list("中文")==["中","文"]`、`for ch in "中文"` 次数、enumerate/zip 对 str、bytes 对照 `b"\xe4\xb8\xad"[0]==228` / len==3；既有 tests/run/05_strings.py,15_slice.py,17_slice_assign.py,19_comprehension.py 回归；新增迭代性能用例（§6.4）要求不出现 O(n²)（2N 斜率检查） |
 | 回归风险 | 高：迭代/切片是热路径；游标优化做错会算错值（不是慢，是错），必须靠新老用例双跑。建议 S2 拆两个 commit：S2a 语义翻转（先接受 O(n²)）、S2b 游标优化（纯性能，可回退） |
 | 能否独立提交 | 与 S1 同批发布（S1+S2 是一次完整语义翻转）；S2a/S2b 可以分开提交 |
 
@@ -589,7 +589,7 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 |---|---|
 | 改哪些文件 | `runtime/rt_str.c` 方法全套（§1.4）、`runtime/rt_format.c`（宽度/精度/%c/is_bytes）、`src/lower/method/method_str.cpp`（is_bytes 传参、bytes ops）、`runtime/rt_re.c`（§1.7 三项）、`runtime/rt_file.c`（读/写/seek/tell 单位）、`runtime/rt_datetime.c:572-578`（Path.read_bytes 用 bytes 构造）、`runtime/rt_str.c:183-193`（ord/chr） |
 | 语义变化 | 方法/格式化/re/文件 API 的可见单位变码点；bytes 方法保持字节 |
-| 验收 | 新 `tests/run/165_codepoint_methods.py`（find/index/startswith/count/split/join/strip/replace/zfill/ljust/center/capitalize/title/is*/removeprefix、百分号宽度、f-string 宽度、repr、ord/chr、dict 中文 key）；新 `tests/run/166_codepoint_re_file.py`（`re.findall(".", "中文")==["中","文"]`、m.start()/end() 码点、sub/split、中文文件读写 read(n)/tell）；既有 56_re.py / 57_re2.py / 53_json.py / 07_fstrings.py / 79_datetime_pathlib.py 全绿 |
+| 验收 | 新 `tests/run/176_codepoint.py`（0.382 合并后的方法段：find/index/startswith/count/split/join/strip/replace/zfill/ljust/center/capitalize/title/is*/removeprefix、百分号宽度、f-string 宽度、repr、ord/chr、dict 中文 key）；re/文件 I/O 那组验收（原拟名 `166_codepoint_re_file.py`：`re.findall(".", "中文")==["中","文"]`、m.start()/end() 码点、sub/split、中文文件读写 read(n)/tell）**至今没有对应用例**，原引用已删；既有 56_re.py / 57_re2.py / 53_json.py / 07_fstrings.py / 79_datetime_pathlib.py 全绿 |
 | 回归风险 | 中高：re 是最大一块，点号/类/量词改错会静默改变匹配结果；文件 I/O 的 seek/tell 一致性要专门测。建议 re 单独 commit |
 | 能否独立提交 | 能（S1+S2 之后，S3 内部可按「方法 → 格式化 → re → 文件」拆 commit） |
 
@@ -654,14 +654,13 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 
 **需要新增的用例**（建议命名，接在 162_pep479.py 之后）：
 
-1. `tests/run/163_codepoint_len.py`：len / len_bytes / 字面量 / encode 长度。
-2. `tests/run/164_codepoint_index.py`：下标/负下标/切片/正负步长/迭代/enumerate/zip/
-   推导式/list()/sorted/reversed 的码点行为 + bytes 对照。
-3. `tests/run/165_codepoint_methods.py`：方法、百分号与 f-string 宽度、repr、ord/chr、
-   dict 中文 key。
-4. `tests/run/166_codepoint_re_file.py`：re 的点号/字符类/match 下标/sub/split +
-   中文文件读写与 read(n)/tell/seek。
-5. `bench/builtins/51_len_cjk.py`、`52_index_cjk.py`、`53_iter_cjk.py`
+1. `tests/run/176_codepoint.py`：0.382 已把原计划的 176_codepoint_len / 177_codepoint_index /
+   178_codepoint_intern / 179_codepoint_methods 四段合并成这一个用例，覆盖 len / len_bytes /
+   字面量 / 下标 / 负下标 / 切片 / 正负步长 / 迭代 / enumerate / zip / 推导式 / list() /
+   sorted / reversed / 方法 / 宽度 / repr / ord / chr / dict 中文 key + bytes 对照。
+2. re 的点号/字符类/match 下标/sub/split 与中文文件读写（原拟名 `166_codepoint_re_file.py`）：
+   至今**没有**对应用例，原引用已删。
+3. `bench/builtins/51_len_cjk.py`、`52_index_cjk.py`、`53_iter_cjk.py`
    （按 `bench/README.md` 的规则：参数随循环变化、结果打印、N 由驱动校准）。
 
 ### 5.3 文档必改点（本设计只写本文件，实施时同步改）

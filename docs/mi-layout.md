@@ -97,8 +97,9 @@ error: base 'A' of 'C' is not the primary base and its methods access instance f
 | `urllib/request.py:1199` | `HTTPDigestAuthHandler(BaseHandler, AbstractDigestAuthHandler)` | 摘要处理器方法读 `self.passwd` / `self.add_password_file` 状态 |
 | `xml/dom/expatbuilder.py:803` | `ExpatBuilderNS(ExpatBuilder)` 多基类组合 | 基类方法读 `self._parser` 等 |
 
-本仓库 898 个 `.py`：**0 新拒绝**（除本任务新增的 `tests/strict/mi_non_primary_base_fields.py`，
-它本来就该被拒）。
+本仓库 898 个 `.py`：**0 新拒绝**（本任务当时新增的 strict 用例
+`mi_non_primary_base_fields.py` 已在 0.510 删除 —— 见 commit 268201a「默认放行两个状态基类」，该形态现在是**允许**的，由
+`tests/run/mi_two_state_bases.py` 与 `tests/run/mi_primary_base_fields.py` 钉住）。
 
 **下一步（修法 B 的更省事版本）**：主基类没有字段时，让「第一个带字段的基类」提供布局
 前缀 —— 这样 `ThreadingUDPServer(ThreadingMixIn, UDPServer)` 这类「mixin 在前、状态在后」

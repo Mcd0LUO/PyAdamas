@@ -65,7 +65,7 @@ difftest 是提速主力（172s → 19s，9 倍）；套件只有 1.4 倍（单�
 ## 用例命名：不再分配序号（2026-11-25 起）
 
 `tests/run/` 与 `tests/fail/` 里**已有**的编号保留不动，**新增用例不再编号**，直接用描述性名字，
-例如 `re_anchors.py`、`fnmatch_anchor.py`、`big_round.py`。
+例如 `re_anchors.py`、`fnmatch_anchor.py`、`big_round_powmod.py`。
 
 理由：编号是并行开发时的协调负担——两个代理会话里撞过两次（标准库第二轮占了 570–574，而主线已有
 570/571；re 锚点修复又占了 573），每次都要重命名并改文档引用，收益为零。
