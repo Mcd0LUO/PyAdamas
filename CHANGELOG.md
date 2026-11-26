@@ -6,6 +6,43 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.678] - 2026-11-27
+
+> fix(typecheck)：**联合接收者的方法调用只在「其余成员都是 None」时才按命中者查**。
+>
+> ```python
+> class C:
+>     def m(self) -> int: return 7
+> class D: pass
+> def f(x: C | D) -> int: return x.m()
+> f(D())   # 修前：打印 7（按 C 发码，无 tag 守卫）
+>          # CPython：AttributeError: 'D' object has no attribute 'm'
+> ```
+>
+> 原判据 `hits >= 1`——只要**有一个**成员有该方法就选它。对 `Optional[C]` 是对的
+>（成员是 `[C, None]`，运行期有 `guard_not_none` 兜底），但真·多类联合 `C | D` 里 D 没有该方法时
+>也会被选成 C，降级层直接发 `call C.m(x)`（无运行期 tag 检查）→ D 的实例按 C 的布局读字段，
+>**越界读/静默错值**。
+>
+> 修法：统计「非 None 成员数」，要求 `hits == classes` 才选；否则走 unknown，
+>codegen 明确报「不支持」而不是静默错值。
+>
+> 效果（`/tmp/tcaudit/` 的三个探针）：
+>
+> | 探针 | 修前 | 修后 |
+> |---|---|---|
+> | `r10_union_attr` | 静默错值 | **显式 codegen 错误** |
+> | `r11_union_method_mixed` | 静默错值 | **显式 codegen 错误** |
+> | `r12_union_layout` | 静默错值 | **显式 codegen 错误** |
+>
+> 闸门：套件 **600**、difftest **543-0**、check_size。
+>
+> **未修（已记录）**：
+> 1. `r13_union_missing` / `r15_union_oob` 仍走错路径（这两条的方法解析在别的分支）；
+> 2. **`assert` 窄化不是块作用域**——循环体/`try` 体里的 `assert x is not None` 在块未执行时
+>    仍把窄化泄漏到块之后，可导致段错误或静默错值（探针 `p2`/`p8`/`r16`）。这是更严重的一条，
+>    修它要改窄化的恢复点登记机制（`stmt_forms.cpp` 的 assert + 各块体的 `stmts_impl`），
+>    不在本轮的上下文余量内。
 ## [0.677] - 2026-11-27
 
 > refactor(opt)：**把「哪条指令可能抛异常」收敛成一个共享谓词** —— `opt_may_raise()`。

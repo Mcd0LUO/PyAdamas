@@ -151,11 +151,19 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
         if (recv && recv->kind == TyKind::Unknown && !recv->sub.empty()) {
             TypePtr pick;
             int hits = 0;
+            int classes = 0;   // 非 None 的成员数
             for (auto& m : recv->sub) {
                 if (!m) continue;
+                if (m->kind == TyKind::None) continue;
+                ++classes;
                 if (has_method(m, name)) { pick = m; ++hits; }
             }
-            if (hits >= 1) recv = pick;
+            // 0.678：**只有「其余成员是 None」的 Optional 形态**才能按命中者查——
+            // 那里运行期有 guard_not_none 兜底。真·多类联合（`C | D`）里若 D 没有该方法，
+            // 选 C 会让降级层直接发 `call C.m(x)`（无 tag 守卫），D 的实例会读错字段甚至越界。
+            // 所以要求**所有非 None 成员都有**才选；否则不选（下面按 unknown 处理，
+            // codegen 会明确报「不支持」而不是静默错值）。
+            if (hits >= 1 && hits == classes) recv = pick;
         }
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));
