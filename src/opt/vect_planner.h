@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -224,7 +225,7 @@ public:
         std::vector<VRole> role;                       // 体块指令角色
         std::vector<VAccStore> acc_stores;             // 重复地址原地累加写
         std::unordered_map<int, int> acc_store_at;     // store 位置 → acc_stores 下标
-        std::unordered_map<std::string, std::vector<int>> by_list;  // 数组键 → 访问下标
+        std::map<std::string, std::vector<int>> by_list;  // 数组键 → 访问下标（有序：迭代顺序决定后续处理顺序）
         std::unordered_map<std::string, VReg> list_rep;             // 数组键 → 代表 vreg
         std::vector<std::string> lists;                // 数组键（确定性顺序）
         std::vector<AffEq> inv_eq;                     // 入口 inv 判等守卫

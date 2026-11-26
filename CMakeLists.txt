@@ -156,6 +156,7 @@ src/opt/intloop.cpp
   src/backend/vect_jvec.cpp
   src/opt/vect_planner.cpp
   src/opt/vect_planner_loop.cpp
+  src/opt/vect_planner_alias.cpp
   src/backend/masked.cpp
   src/opt/vect_planner_stride.cpp
   src/opt/vect_planner_intfast.cpp
