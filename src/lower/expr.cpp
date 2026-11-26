@@ -75,9 +75,49 @@ VReg Lowerer::imported_class_object(const ImportedClass& ic) {
         ga.idx = Operand::global(gi);
         vtable = def(t_int(), std::move(ga));
     }
+    // 类对象必须**单例**（0.630）：每次求值都 ClassNew 会让 `mod.Cls is mod.Cls` 为 False，
+    // 循环里引用导入类还会每轮分配。按构造符号做模块级懒初始化缓存。
+    int cache = global_idx_as("__pyadamas$implcls$" + ic.ctor_symbol, obj_ty);
+    VReg cached = load_global(cache, obj_ty);
+    int have = new_block("implcls.have");
+    int make = new_block("implcls.make");
+    int done = new_block("implcls.end");
+    int out = new_temp_slot(obj_ty);
+    {
+        Inst ne;
+        ne.op = IrOp::Cmp;
+        ne.cop = CmpKind::Ne;
+        ne.a = cached;
+        ne.b = const_int(0);
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = def(t_bool(), std::move(ne));
+        br.target = have;
+        br.target2 = make;
+        emit(std::move(br));
+    }
+    switch_to(have);
+    store_slot(out, load_global(cache, obj_ty));
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = done;
+        emit(std::move(j));
+    }
+    switch_to(make);
     VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
                             {const_int(-1), ctor, vtable, const_str(qual)});
     push_temp(obj);
+    store_global(cache, obj);
+    store_slot(out, load_global(cache, obj_ty));
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = done;
+        emit(std::move(j));
+    }
+    switch_to(done);
+    return load_slot(out, obj_ty);
     return obj;
 }
 
