@@ -22,7 +22,15 @@ bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
     if (from->kind == TyKind::Tuple && !to->variadic) return false;
     if (from->kind == TyKind::List || from->kind == TyKind::Tuple) {
         if (from->sub.empty() || to->sub.empty()) return false;
-        return diff(from->sub[0], to->sub[0]);
+        // 递归（0.629）：list[list[int]] → list[list[float]] 只比最外层会放行，
+        // 内层整数位模式被当成浮点读（实测 f([[[1, 2]]]) 打印 5e-324）。
+        if (diff(from->sub[0], to->sub[0])) return true;
+        const TypePtr& fa = from->sub[0];
+        const TypePtr& ta = to->sub[0];
+        if (fa && ta && (fa->kind == TyKind::List || fa->kind == TyKind::Tuple) &&
+            fa->kind == ta->kind)
+            return bad_elem(fa, ta);
+        return false;
     }
     if (from->kind == TyKind::Dict) {
         if (from->sub.size() < 2 || to->sub.size() < 2) return false;
