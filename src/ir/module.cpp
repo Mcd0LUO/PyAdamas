@@ -369,17 +369,20 @@ void enc_type(Enc& e, const TypePtr& t) {
             e.u8(16);
             enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
             break;
-        case TyKind::Task:
-        case TyKind::Future:
-        case TyKind::AsyncEvent:
-        case TyKind::AsyncLock:
-        case TyKind::AsyncQueue:
         // 类对象（构造器）跨模块保留：tag 26 + 内部 Class 引用（tag 13）。
         // 导入方解码后拿到 ClassObj，才能正确区分「类」与「实例」。
         case TyKind::ClassObj:
             e.u8(26);
             enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
             break;
+        // 0.634：Task/Future/AsyncEvent/AsyncLock/AsyncQueue 跨模块按 unknown 走
+        // （它们原来没有 break，直接穿透进下面的 ClassObj 写成 tag 26，导入方
+        // 会把 asyncio.Lock 当成构造器）。
+        case TyKind::Task:
+        case TyKind::Future:
+        case TyKind::AsyncEvent:
+        case TyKind::AsyncLock:
+        case TyKind::AsyncQueue:
         case TyKind::TypeObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
