@@ -6,6 +6,35 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.654] - 2026-11-27
+
+> fix(iface)+feat：**跨模块 enum 可按值构造、可迭代、可 `len`**（审计 A8-4）。
+>
+> ```python
+> import kenum
+> print(kenum.Color(1))        # 修前：error: 'Color' takes no arguments → 修后：RED
+> print(len(kenum.Color))      # 修前：object of type 'type[Color]' has no len() → 3
+> for m in kenum.Color: ...    # 修前：'type[Color]' object is not iterable
+> ```
+>
+> 改动：
+> - 类记录里加 `is_enum` + `enum_members`（名 → 字面量值，复用 `enc/dec_default_value`），
+>   `kModuleFormatVersion 19 → 20`；`build.cpp` / `check.cpp` 两份扁平导出同步；
+> - `lower_construct` 里的 enum 反查抽成 `lower_enum_by_value`（本模块/导入类通用），
+>   `construct_imported` 开头认 `is_enum` 直接走它（不能走 ctor wrapper——那会新建实例，
+>   而 `Color(1)` 必须返回已存在的成员）；
+> - `len()` 对 enum **类对象**返回成员数（本模块与导入类同一判断）。
+>
+> 口径说明：`len(Color)` 在单文件里原本也不支持（对 CPython 是缺口），这次一并补上，
+>保持单文件与跨模块一致；非 enum 类对象仍按原样报错。
+>
+> `isinstance(mod.Color.RED, mod.Color)` 本来就对（靠导入类的 qualname 元数据），本次没为它加代码。
+>
+> 新夹具 `tests/modules/enum_xmod` + `tests/run/enum_len_iter.py`。套件 **598**。
+>
+> 顺带记录的既有口子（**不是本次引入**，单文件同样复现）：
+> - 类对象上的未知 dunder（`mod.Color.__members__`）在读侧静默给 `0`，而单文件是编译期报错；
+> - `Color('RED')`（给 int 值枚举传 str）能编过，运行时段错误——待修。
 ## [0.653] - 2026-11-27
 
 > fix(iface)：**类属性进接口**，跨模块 `mod.C.X` / 实例 `c.X` 可读（审计 A8-3）。
