@@ -21,32 +21,22 @@ VReg Lowerer::lower_go(Expr& e) {
         err(e.line, e.col, "go expects a user-defined function with a known signature");
         return const_none();
     }
-    // 防御：类型检查已经拦过一遍，这里再挡一次——下面按下标取 fn->kwonly
-    // 的元素，一旦实参个数和形参对不上就会越界。
-    if (fn->varargs || fn->kwargs) {
-        err(e.line, e.col, "go does not support functions with *args/**kwargs yet");
-        return const_none();
-    }
-    if (!call->keywords.empty()) {
-        err(e.line, e.col, "go does not support keyword arguments yet");
-        return const_none();
-    }
-    if (call->args.size() != fn->pos.size() + fn->kwonly.size()) {
-        err(e.line, e.col,
-            std::format("go requires all {} arguments explicitly",
-                        fn->pos.size() + fn->kwonly.size()));
-        return const_none();
-    }
     // 求值顺序与普通调用一致：先 f，再从左到右实参。
     VReg fnv = expr(*call->func);
-    std::vector<VReg> vals;
+    // 复用 bind_args（0.613）：默认参数、关键字参数、*args 打包、星号解包、
+    // 数值提升、结构体按值拷贝都在里面，和普通 Call 走同一条绑定逻辑。
+    // 手写循环曾在「实参个数与形参对不上」时越界读 fn->kwonly。
+    std::vector<VReg> vals = bind_args(*call, fn, nullptr);
     std::vector<TypePtr> tys;
+    tys.reserve(vals.size());
     size_t npos = fn->pos.size();
-    for (size_t i = 0; i < call->args.size(); ++i) {
-        TypePtr want = i < npos ? fn->pos[i].ty : fn->kwonly[i - npos].ty;
-        VReg v = expr(*call->args[i]);
-        v = coerce(v, tc_.type_of(call->args[i].get()), want);
-        vals.push_back(v);
+    size_t nkw = fn->kwonly.size();
+    for (size_t i = 0; i < vals.size(); ++i) {
+        TypePtr want;
+        if (i < npos) want = fn->pos[i].ty;
+        else if (i < npos + nkw) want = fn->kwonly[i - npos].ty;
+        else want = vreg_ty(vals[i]);  // *args 打包的 list / **kwargs 的 dict
+        if (!want || want->kind == TyKind::Unknown) want = vreg_ty(vals[i]);
         tys.push_back(want ? want : t_unknown());
     }
 

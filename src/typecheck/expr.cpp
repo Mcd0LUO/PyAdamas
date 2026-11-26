@@ -554,22 +554,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                 if (fn->is_generator || fn->is_async || fn->is_async_generator)
                     err(e.line, e.col,
                         "go cannot spawn a generator or coroutine (use plain functions)");
-                // 报一条就返回：否则形参个数校验会紧接着再报一条，用户看到的是
-                // 「不支持 *args」+「要求 N 个实参」两条互相矛盾的错误。
-                if (fn->varargs || fn->kwargs) {
-                    err(e.line, e.col,
-                        "go does not support functions with *args/**kwargs yet");
-                    return mk_vthread();
-                }
-                if (!call->keywords.empty()) {
-                    err(e.line, e.col, "go does not support keyword arguments yet");
-                    return mk_vthread();
-                }
-                size_t nparams = fn->pos.size() + fn->kwonly.size();
-                if (call->args.size() != nparams)
-                    err(e.line, e.col,
-                        std::format("go requires all {} arguments explicitly (defaults not supported yet)",
-                                    nparams));
+                // 实参绑定与普通调用一致（lower_go 走 bind_args）：默认参数、关键字参数、
+                // *args/**kwargs 都支持，这里不再单独设限。
                 return mk_vthread();
             }
             case ExprKind::Yield: {
