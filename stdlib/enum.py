@@ -49,3 +49,26 @@ def unique(cls):
 def verify(cls):
     """构造后校验占位：直接返回类。"""
     return cls
+
+
+# ---- 0.570：CPython 3.11+ 的 global_* 装饰器（子集） ----
+# 成员提升到模块作用域由**编译器**完成（enum 成员的名称集合是编译期已知的），
+# 这里只需要让装饰器可解析、返回原类。
+def global_enum(cls):
+    return cls
+
+
+def global_enum_repr(cls):
+    return cls
+
+
+def global_str(cls):
+    return cls
+
+
+def global_flag_repr(cls):
+    return cls
+
+
+def global_flag_str(cls):
+    return cls
