@@ -529,12 +529,23 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     // 一条跳转都不发射，当前块会悬空落进下一块（351 实测空列表 eq 恒 False）。
     if (b.values.size() == 1) return expr(*b.values[0]);
     TypePtr ty = tc_.type_of(&b);
+    // 0.669：**只有可能落到 float / 动态域时才需要第二个槽**。
+    //
+    // 0.620 为了修 `x = "" or 0.0` 读回来是 0，给每个操作数都写两次（判真槽 +
+    // 动态域槽），命中 float 还要装箱。可 join 类型是 int/bool 时（nqueens 的
+    // `if not board[i] and ...` 这种），两个槽存的是同一个值，纯多一次 store。
+    // 二分定位：nqueens 的指令数从 298.7M 涨到 448.1M（+50%）就是这一步带来的。
+    const bool need_two_slots = !(ty && (ty->kind == TyKind::Int || ty->kind == TyKind::Bool));
     int tmp = new_borrow_slot(ty);
     // 0.620：第二个槽专存「动态域表示」。CPython 里 float 是对象，unknown 槽只装
     // 指针/整数；原实现把 double 的位模式直接存进 join 槽（常常是 unknown），
     // `x = "" or 0.0` 读回来当整数 → 打印 0。float 落 tmp_out 前先装箱。
-    int tmp_out = new_borrow_slot(ty);
+    int tmp_out = need_two_slots ? new_borrow_slot(ty) : tmp;
     auto boolop_store = [&](VReg v, TypePtr vt) {
+        if (!need_two_slots) {
+            store_borrow_slot(tmp_out, v);  // 一个槽同时当判真值与结果
+            return;
+        }
         store_borrow_slot(tmp, v);  // 判真用：原样，按操作数自己的类型读回
         if (ty && ty->kind == TyKind::Float) {
             store_borrow_slot(tmp_out, coerce(v, vt, ty));
