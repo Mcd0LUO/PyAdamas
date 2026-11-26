@@ -48,6 +48,8 @@ set(PYADAMAS_SOURCES
   src/typecheck/typecheck.cpp
   src/typecheck/annotation.cpp
   src/typecheck/stmt.cpp
+  src/typecheck/cstruct.cpp
+  src/typecheck/narrow.cpp
   src/typecheck/stmt_forms.cpp
   src/typecheck/expr.cpp
   src/typecheck/expr_attr.cpp
@@ -71,6 +73,7 @@ set(PYADAMAS_SOURCES
   src/lower/borrow.cpp
   src/lower/stmt.cpp
   src/lower/stmt_for.cpp
+  src/lower/for_pairs.cpp
   src/lower/idiom.cpp
   src/lower/stmt_with.cpp
   src/lower/stmt_async.cpp
