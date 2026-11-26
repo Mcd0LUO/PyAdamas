@@ -83,12 +83,11 @@ static bool idx_kind_ok(IrOp op, Operand::Kind k) {
             return k == Operand::Str;
         case IrOp::ConstBig:
             return k == Operand::Big;
-        case IrOp::FuncAddr:
-        case IrOp::FuncCode:
+        // FuncAddr / FuncCode / ClassAddr 把目标下标放在 **imm** 里（idx 保持 -1），
+        // 不该参与 idx.kind 校验（0.635）：原来要求 Operand::Func/Class，只因迁移期
+        // 「None 一律放行」才没误报。CallDirect 同样走 imm。
         case IrOp::CallDirect:
             return k == Operand::Func;
-        case IrOp::ClassAddr:
-            return k == Operand::Class;
         case IrOp::CallExtern:
         case IrOp::LoadExtern:
         case IrOp::StoreExtern:
@@ -486,6 +485,12 @@ bool ir_module_can_skip_index_maint(const IRModule& m) {
         if (!g.ty) continue;
         switch (g.ty->kind) {
             case TyKind::Unknown:
+                // 与 needs_unknown_index 同一口径（0.635）：裸 unknown 全局的值
+                // 可能是整数也可能是堆指针，exact-RC 的回退探测要查索引；
+                // 关掉索引后 release_globals 会读已释放对象的头部（UAF）。
+                // 只有「unknown 仅出现在容器元素位置」才安全。
+                if (!unknown_only_in_containers(g.ty, 0)) return false;
+                break;
             case TyKind::None:
             case TyKind::Bool:
             case TyKind::Int:
@@ -698,8 +703,22 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
                                     fn == RtFn::ListCopyRange ||
                                     fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown;
                 if (!container_use) continue;
-                for (const auto& a : in.args)
+                // 只有**接收容器**那几个实参才算「当容器指针用」（0.635）。
+                // ListAppend(list, elem, heap) 的 elem 是被追加的值：容器是
+                // list[unknown] 时 heap=2，运行时要查索引判断 elem 是不是堆指针，
+                // 把 elem 也标成 container_use 会掩盖这个依赖。
+                size_t arg_limit = in.args.size();
+                switch (fn) {
+                    case RtFn::ListAppend:
+                    case RtFn::ListSetLen: arg_limit = 1; break;
+                    case RtFn::ListCopyRange:
+                    case RtFn::ListExtend: arg_limit = 2; break;
+                    default: break;
+                }
+                for (size_t ai = 0; ai < arg_limit && ai < in.args.size(); ++ai) {
+                    VReg a = in.args[ai];
                     if (a < unknown_only_for_rc.size()) unknown_only_for_rc[a] = 1;
+                }
             }
         for (size_t vi = 0; vi < f.vreg_ty.size(); ++vi)
             if (!unknown_only_in_containers(f.vreg_ty[vi], 0) && !unknown_only_for_rc[vi]) return true;
