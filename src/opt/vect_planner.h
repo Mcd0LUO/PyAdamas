@@ -317,6 +317,7 @@ public:
     // 识别可数 for + 逐元素 map/reduction，匹配成功发「守卫 + SSE2 向量循环 +
     // jmp cond」，返回 true；不匹配返回 false，一个字节不发。实现见
     // opt/vect_planner_loop.cpp（AsmGen::try_vect_loop 留一行转发）。
+    bool plan_aliases(Loop& L);  // 0.587：别名/依赖规划
     bool try_loop(const Block& b);
     // 不变量步长（q += p）的形状校验 / 入口守卫与推进量发射，见
     // opt/vect_planner_stride.cpp。
