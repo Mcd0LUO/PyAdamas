@@ -354,6 +354,143 @@ static int cmd_cdecl(const std::string& path, const std::string& output,
         return 0;
 }
 
+static bool setup_program(Program& prog, const std::string& path,
+                           const std::vector<std::string>& include_dirs,
+                           const std::string& sanitize, bool rebuild,
+                           const std::string& module_map_path,
+                           const std::string& manifest_flag, bool locked,
+                           bool verbose, int opt_level, bool fast_math,
+                           bool zero_cost_exc) {
+        // 把 sanitizer 折成 cc 的编译/链接选项，通过 PYADAMAS_CC_FLAGS 传给
+        // driver_build（那里编译和链接共用同一套 flag）。
+        if (!sanitize.empty()) {
+            std::string flags = "-fsanitize=" + sanitize + " -g -fno-omit-frame-pointer";
+            if (sanitize == "address")
+                // 默认关掉 leak 检测：GC/RC 程序里「故意留到进程退出」的对象
+                // 很多，leak 报告会淹没真正的 use-after-free。要看泄漏时用
+                // ASAN_OPTIONS=detect_leaks=1 显式打开。
+                flags += " -fsanitize-address-use-after-scope";
+            setenv("PYADAMAS_CC_FLAGS", flags.c_str(), 1);
+            // 链接插桩版运行时（见 driver_build 的 set_asan_runtime）。
+            pyadamas::set_asan_runtime(sanitize == "address");
+        }
+        prog.rebuild = rebuild;
+        // live range splitting（PYADAMAS_RA_SPLIT）的代码**已整段删除**：
+        // 分配器在 -O0 下会让循环计数错乱（死循环）、-O2 下算错值（冒泡排序
+        // 输出未排序），三轮实现均 +27~28%，docs/regalloc.md §已否决的方案
+        // 已判「不要重试」。删掉的是 assign_slot_regs_split、slot_loc_ 系列
+        // 按块位置表、spill_placement.{cpp,h} 与 manifest 的 rcsplit 行。
+        //
+        // 保留显式报错（rc=2）而不是静默忽略：A/B 脚本设了这个变量就以为
+        // 自己在跑另一条分配路径，静默跑默认路径会拿到假数据。
+        if (const char* sp = std::getenv("PYADAMAS_RA_SPLIT");
+            sp != nullptr && std::string_view(sp) != "0" && sp[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_RA_SPLIT 已删除（split 分配器会死循环/"
+                         "算错值），见 docs/regalloc.md\n");
+            return 2;
+        }
+        if (const char* sc = std::getenv("PYADAMAS_SPLIT_MAXREG");
+            sc != nullptr && sc[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_SPLIT_MAXREG 已删除（只对已删除的 split "
+                         "分配器有效），见 docs/regalloc.md\n");
+            return 2;
+        }
+        // 图着色分配器（PYADAMAS_RA_GRAPH）已整段删除：它在 -O2 下会把
+        // 浮点累加器跨调用的活跃性算错（0.314 修过的 N19a 形态），静默算
+        // 错值；而它本来就是默认关的实验路径（docs/regalloc.md 已判放弃）。
+        // 留一个显式报错而不是静默忽略，免得 A/B 脚本以为自己在跑另一条
+        // 分配路径拿到假数据。
+        if (const char* rg = std::getenv("PYADAMAS_RA_GRAPH");
+            rg != nullptr && std::string_view(rg) != "0" && rg[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_RA_GRAPH 已移除（图着色分配器会在 -O2 下"
+                         "生成错误代码，见 docs/regalloc.md）\n");
+            return 2;
+        }
+        // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
+        prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
+                      std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
+        // 特化 SIMD 模板（backend/simd*.cpp，PYADAMAS_SIMD）**0.480 已整段删除**：
+        // 它们是照着 bench/compare 里几个程序的循环体写死的 IR 形状模板，默认关；
+        // 通用向量化（0.384）落地后它们一次都没再匹配上（12 基准 asm 零标记、
+        // 指令数与「关掉向量化」逐位相同）。留显式报错而不是静默忽略，免得
+        // A/B 脚本以为自己在跑特化路径却拿到同一份产物。
+        if (const char* se = std::getenv("PYADAMAS_SIMD");
+            se != nullptr && std::string_view(se) != "0" && se[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_SIMD 已删除（特化 SIMD 模板对当前 IR 全部"
+                         "失配，见 docs/simd-vectorization-design.md 与 CHANGELOG "
+                         "0.480）\n");
+            return 2;
+        }
+        // 通用循环自动向量化（**默认开**，0.384）：认任意可数循环的
+        // map/reduction（backend/vect.cpp），不依赖具体程序的形状。
+        // PYADAMAS_VECT=0 显式关。参与缓存失效。
+        const char* vect_env = std::getenv("PYADAMAS_VECT");
+        prog.vect = !vect_env || std::string_view(vect_env) != "0";
+        // 浮点归约 packed 累加（默认关）：快但不保序，与标量逐位结果可能不同。
+        const char* ff_env = std::getenv("PYADAMAS_VECT_FASTFLOAT");
+        prog.vect_fastfloat = ff_env && std::string_view(ff_env) != "0";
+        // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
+        // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
+        // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
+        // 仅显式掩码（4/5/6/7）开发期 A/B 用。参与缓存失效。
+        // 默认开 bit0（跳转线程化）：纯 CFG 等价变换，实测 nqueens -2.9%、
+        // 其它标量基准中性；含「单块直线循环体」的函数由 pass 内部跳过，
+        // 避免破坏通用向量化（matmul 会从 10.1M 劣化到 54.8M）。
+        prog.loop_opt = 3;
+        if (const char* lo = std::getenv("PYADAMAS_LOOP_OPT")) {
+            std::string_view sv(lo);
+            if (sv == "1") prog.loop_opt = 3;
+            else if (sv != "0" && !sv.empty()) {
+                int v = 0;
+                bool ok = true;
+                for (char ch : sv) {
+                    if (ch < '0' || ch > '9') { ok = false; break; }
+                    v = v * 10 + (ch - '0');
+                    if (v > 7) { ok = false; break; }
+                }
+                prog.loop_opt = ok ? v : 0;
+            }
+        }
+        // 内联/devirt 深化（默认关）：PYADAMAS_INLINE_OPT=1 开启，参与缓存失效。
+        prog.inline_opt = std::getenv("PYADAMAS_INLINE_OPT") != nullptr &&
+                          std::string_view(std::getenv("PYADAMAS_INLINE_OPT")) != "0";
+        // 只读借用槽细化（默认关）：PYADAMAS_BORROW_OPT=1 开启，参与缓存失效。
+        prog.borrow_opt = std::getenv("PYADAMAS_BORROW_OPT") != nullptr &&
+                          std::string_view(std::getenv("PYADAMAS_BORROW_OPT")) != "0";
+        // 运行期类型标签（0.528 起**默认开**）：PYADAMAS_TYPE_TAGS=0 可关。
+        // 开启后 unknown 值的 tag 追加 NONE/BOOL/精确堆子类，解锁
+        // isinstance/repr/pprint（docs/numeric-types-design.md §2）。
+        //
+        // 为什么改成默认开：关着时 isinstance(x, int) 对动态值是**静默错值**——
+        // 只有 str/list/dict/float 有探针，int/bool/bytes 一律返回 False
+        // （实测 h(1) -> 0、[1,"a",2.0,3] 计数 -> 0）。这比多一个字 tag 的代价
+        // 严重得多。参与缓存失效，旧 modcache 自动失效。
+        // 三态：=1 强制开（调试用）、=0 强制关（逃生口）、未设=按需自动开
+        //（prepare_program 里扫到 isinstance(..., 内置类型) 才开，见 0.528）。
+        const char* tags_env = std::getenv("PYADAMAS_TYPE_TAGS");
+        prog.type_tags = tags_env && std::string_view(tags_env) == "1";
+        prog.type_tags_off = tags_env && std::string_view(tags_env) == "0";
+        // P4 语言缺口（默认关）：PYADAMAS_LANG_GAPS=1 开启，参与缓存失效。
+        // 异常类当值 / file 协议 / traceback / dataclass（设计 §3/§4）。
+        // CLASS tag=11 等精确标签是 P4 的表示基础，所以强制带上 type_tags。
+        // 三态：=1 强制开、=0 强制关、未设=按需自动开（prepare_program 扫到 dataclass 才开）。
+        const char* lg_env = std::getenv("PYADAMAS_LANG_GAPS");
+        prog.lang_gaps = lg_env && std::string_view(lg_env) != "0";
+        prog.lang_gaps_off = lg_env && std::string_view(lg_env) == "0";
+        if (prog.lang_gaps) prog.type_tags = true;
+        prog.verbose = verbose;
+        prog.opt = opt_level;
+        prog.fast_math = fast_math;
+        prog.zero_cost_exc = zero_cost_exc;
+        if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked)) return false;
+        if (!load_program(path, include_dirs, prog)) return false;
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -579,133 +716,10 @@ int main(int argc, char** argv) {
         }
 
         Program prog;
-        // 把 sanitizer 折成 cc 的编译/链接选项，通过 PYADAMAS_CC_FLAGS 传给
-        // driver_build（那里编译和链接共用同一套 flag）。
-        if (!sanitize.empty()) {
-            std::string flags = "-fsanitize=" + sanitize + " -g -fno-omit-frame-pointer";
-            if (sanitize == "address")
-                // 默认关掉 leak 检测：GC/RC 程序里「故意留到进程退出」的对象
-                // 很多，leak 报告会淹没真正的 use-after-free。要看泄漏时用
-                // ASAN_OPTIONS=detect_leaks=1 显式打开。
-                flags += " -fsanitize-address-use-after-scope";
-            setenv("PYADAMAS_CC_FLAGS", flags.c_str(), 1);
-            // 链接插桩版运行时（见 driver_build 的 set_asan_runtime）。
-            pyadamas::set_asan_runtime(sanitize == "address");
-        }
-        prog.rebuild = rebuild;
-        // live range splitting（PYADAMAS_RA_SPLIT）的代码**已整段删除**：
-        // 分配器在 -O0 下会让循环计数错乱（死循环）、-O2 下算错值（冒泡排序
-        // 输出未排序），三轮实现均 +27~28%，docs/regalloc.md §已否决的方案
-        // 已判「不要重试」。删掉的是 assign_slot_regs_split、slot_loc_ 系列
-        // 按块位置表、spill_placement.{cpp,h} 与 manifest 的 rcsplit 行。
-        //
-        // 保留显式报错（rc=2）而不是静默忽略：A/B 脚本设了这个变量就以为
-        // 自己在跑另一条分配路径，静默跑默认路径会拿到假数据。
-        if (const char* sp = std::getenv("PYADAMAS_RA_SPLIT");
-            sp != nullptr && std::string_view(sp) != "0" && sp[0] != '\0') {
-            std::fprintf(stderr,
-                         "error: PYADAMAS_RA_SPLIT 已删除（split 分配器会死循环/"
-                         "算错值），见 docs/regalloc.md\n");
-            return 2;
-        }
-        if (const char* sc = std::getenv("PYADAMAS_SPLIT_MAXREG");
-            sc != nullptr && sc[0] != '\0') {
-            std::fprintf(stderr,
-                         "error: PYADAMAS_SPLIT_MAXREG 已删除（只对已删除的 split "
-                         "分配器有效），见 docs/regalloc.md\n");
-            return 2;
-        }
-        // 图着色分配器（PYADAMAS_RA_GRAPH）已整段删除：它在 -O2 下会把
-        // 浮点累加器跨调用的活跃性算错（0.314 修过的 N19a 形态），静默算
-        // 错值；而它本来就是默认关的实验路径（docs/regalloc.md 已判放弃）。
-        // 留一个显式报错而不是静默忽略，免得 A/B 脚本以为自己在跑另一条
-        // 分配路径拿到假数据。
-        if (const char* rg = std::getenv("PYADAMAS_RA_GRAPH");
-            rg != nullptr && std::string_view(rg) != "0" && rg[0] != '\0') {
-            std::fprintf(stderr,
-                         "error: PYADAMAS_RA_GRAPH 已移除（图着色分配器会在 -O2 下"
-                         "生成错误代码，见 docs/regalloc.md）\n");
-            return 2;
-        }
-        // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
-        prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
-                      std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
-        // 特化 SIMD 模板（backend/simd*.cpp，PYADAMAS_SIMD）**0.480 已整段删除**：
-        // 它们是照着 bench/compare 里几个程序的循环体写死的 IR 形状模板，默认关；
-        // 通用向量化（0.384）落地后它们一次都没再匹配上（12 基准 asm 零标记、
-        // 指令数与「关掉向量化」逐位相同）。留显式报错而不是静默忽略，免得
-        // A/B 脚本以为自己在跑特化路径却拿到同一份产物。
-        if (const char* se = std::getenv("PYADAMAS_SIMD");
-            se != nullptr && std::string_view(se) != "0" && se[0] != '\0') {
-            std::fprintf(stderr,
-                         "error: PYADAMAS_SIMD 已删除（特化 SIMD 模板对当前 IR 全部"
-                         "失配，见 docs/simd-vectorization-design.md 与 CHANGELOG "
-                         "0.480）\n");
-            return 2;
-        }
-        // 通用循环自动向量化（**默认开**，0.384）：认任意可数循环的
-        // map/reduction（backend/vect.cpp），不依赖具体程序的形状。
-        // PYADAMAS_VECT=0 显式关。参与缓存失效。
-        const char* vect_env = std::getenv("PYADAMAS_VECT");
-        prog.vect = !vect_env || std::string_view(vect_env) != "0";
-        // 浮点归约 packed 累加（默认关）：快但不保序，与标量逐位结果可能不同。
-        const char* ff_env = std::getenv("PYADAMAS_VECT_FASTFLOAT");
-        prog.vect_fastfloat = ff_env && std::string_view(ff_env) != "0";
-        // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
-        // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
-        // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
-        // 仅显式掩码（4/5/6/7）开发期 A/B 用。参与缓存失效。
-        // 默认开 bit0（跳转线程化）：纯 CFG 等价变换，实测 nqueens -2.9%、
-        // 其它标量基准中性；含「单块直线循环体」的函数由 pass 内部跳过，
-        // 避免破坏通用向量化（matmul 会从 10.1M 劣化到 54.8M）。
-        prog.loop_opt = 3;
-        if (const char* lo = std::getenv("PYADAMAS_LOOP_OPT")) {
-            std::string_view sv(lo);
-            if (sv == "1") prog.loop_opt = 3;
-            else if (sv != "0" && !sv.empty()) {
-                int v = 0;
-                bool ok = true;
-                for (char ch : sv) {
-                    if (ch < '0' || ch > '9') { ok = false; break; }
-                    v = v * 10 + (ch - '0');
-                    if (v > 7) { ok = false; break; }
-                }
-                prog.loop_opt = ok ? v : 0;
-            }
-        }
-        // 内联/devirt 深化（默认关）：PYADAMAS_INLINE_OPT=1 开启，参与缓存失效。
-        prog.inline_opt = std::getenv("PYADAMAS_INLINE_OPT") != nullptr &&
-                          std::string_view(std::getenv("PYADAMAS_INLINE_OPT")) != "0";
-        // 只读借用槽细化（默认关）：PYADAMAS_BORROW_OPT=1 开启，参与缓存失效。
-        prog.borrow_opt = std::getenv("PYADAMAS_BORROW_OPT") != nullptr &&
-                          std::string_view(std::getenv("PYADAMAS_BORROW_OPT")) != "0";
-        // 运行期类型标签（0.528 起**默认开**）：PYADAMAS_TYPE_TAGS=0 可关。
-        // 开启后 unknown 值的 tag 追加 NONE/BOOL/精确堆子类，解锁
-        // isinstance/repr/pprint（docs/numeric-types-design.md §2）。
-        //
-        // 为什么改成默认开：关着时 isinstance(x, int) 对动态值是**静默错值**——
-        // 只有 str/list/dict/float 有探针，int/bool/bytes 一律返回 False
-        // （实测 h(1) -> 0、[1,"a",2.0,3] 计数 -> 0）。这比多一个字 tag 的代价
-        // 严重得多。参与缓存失效，旧 modcache 自动失效。
-        // 三态：=1 强制开（调试用）、=0 强制关（逃生口）、未设=按需自动开
-        //（prepare_program 里扫到 isinstance(..., 内置类型) 才开，见 0.528）。
-        const char* tags_env = std::getenv("PYADAMAS_TYPE_TAGS");
-        prog.type_tags = tags_env && std::string_view(tags_env) == "1";
-        prog.type_tags_off = tags_env && std::string_view(tags_env) == "0";
-        // P4 语言缺口（默认关）：PYADAMAS_LANG_GAPS=1 开启，参与缓存失效。
-        // 异常类当值 / file 协议 / traceback / dataclass（设计 §3/§4）。
-        // CLASS tag=11 等精确标签是 P4 的表示基础，所以强制带上 type_tags。
-        // 三态：=1 强制开、=0 强制关、未设=按需自动开（prepare_program 扫到 dataclass 才开）。
-        const char* lg_env = std::getenv("PYADAMAS_LANG_GAPS");
-        prog.lang_gaps = lg_env && std::string_view(lg_env) != "0";
-        prog.lang_gaps_off = lg_env && std::string_view(lg_env) == "0";
-        if (prog.lang_gaps) prog.type_tags = true;
-        prog.verbose = verbose;
-        prog.opt = opt_level;
-        prog.fast_math = fast_math;
-        prog.zero_cost_exc = zero_cost_exc;
-        if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked)) return 1;
-        if (!load_program(path, include_dirs, prog)) return 1;
+        if (!setup_program(prog, path, include_dirs, sanitize, rebuild, module_map_path,
+                           manifest_flag, locked, verbose, opt_level, fast_math,
+                           zero_cost_exc))
+            return 1;
 
         if (mode == "ir" || mode == "asm") {
             if (!prepare_program(prog, false, true)) return 1;
