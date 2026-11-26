@@ -6,6 +6,55 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.657] - 2026-11-27
+
+> fix(driver+typecheck)：**check 与 build 的口径收敛**（审计 A3 三处 + A8-5）。
+>
+> ### A3-1 依赖语法错误被 check 吞掉
+>
+> ```
+> 修前 check: ok: usesbad.py (2 statements, ...)   exit=0   ← 依赖 badep.py 第 1 行语法错
+> 修前 build: badep.py:1:7: error: expected parameter name, found ':'
+> 修后 check: badep.py:1:7: error: expected parameter name, found ':'   exit=1
+> ```
+>
+> `check_load_file` 把 `LexError`/`ParseError` 一起吞成了「缺失模块」；现在单独 catch、
+>报到原文件原位置，并计入 `errors`。
+>
+> ### A3-2 同名不同文件
+>
+> 同一个模块名解析到两个不同文件时，build 拒绝而 check 放行。现在 check 在
+>「解析出路径」与「缓存命中」两处比对模块名 → 规范路径（缓存命中只在 importer 变化时重解析）。
+>
+> ### A3-3 槽冲突检测只在 build
+>
+> 按结构对齐把同一份 `add_slot` 检测补进 `check.cpp`。**这一条没有活例**：槽号是进程内按方法名
+>intern 的，同名不同槽只能来自「接口来自另一个进程的缓存」，而 `reserve_imported_method_slots`
+>在方法 intern 之前就会先报冲突——`add_slot` 够不到。补它是为了**防止两份平行实现继续漂移**；
+>真要根治得把两份扁平导出合并（审计 A6）。
+>
+> ### A8-5 同一件事三种文案 → 一条
+>
+> | 形态 | 修前 | 修后 |
+> |---|---|---|
+> | `g = C.get` | codegen 层报错，check 放行 | `'C.get' is an instance method; take the value on an instance` |
+> | `C2 = C; g = C2.get` | 另一条文案 | 同上（一字不差） |
+> | `g = kk.K.get`（跨模块） | 报在**调用点**：`takes 0 positional arguments but 1 were given` | 同上 |
+>
+> 修法：`typecheck/expr_attr.cpp` 的类接收者分支取到 Normal 且非装饰的实例方法时直接给诊断，
+>不再 `mk_method_value` 后各走各的。静态/类方法/装饰方法不受影响（类属性先命中），
+>`obj.m` 的绑定方法值也不受影响。
+>
+> ### 影响面与验证
+>
+> - `load_check_lookup` 加 `errors` 出参（driver 内部 API，唯一调用点 main）；未动 `Program` 结构、
+>   未动缓存键；
+> - `tests/check_imports.sh` 4 项 → **6 项**（新增两条负例），6/6 通过；
+> - 套件 **598**；未跑 `frontend_baseline` 四口径——check 现在会在上述两类拒绝，数字可能变化，
+>   下次跑基线时需留意。
+>
+> 未做（需扩功能）：跨模块**直接未绑定调用** `mod.K.get(obj)` 仍报「takes 0 positional arguments」，
+>根因是接口只导出 `call_sig`（不含 self）。
 ## [0.656] - 2026-11-27
 
 > fix(lower)：**类对象上解析不到的属性从「静默给 0」改成编译期报错**（审计 A8-5 同类）。
