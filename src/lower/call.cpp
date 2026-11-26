@@ -161,6 +161,23 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
                 err(k.value->line, k.value->col, "'**kwargs' keys must be strings");
                 continue;
             }
+            // 值类型跨数值域时逐键转换（0.631）：DictUpdate 是内存拷贝，
+            // `def g(**kw: float)` + `d = {"a": 1}` 会把整数位模式当 double
+            // （实测打印 a 5e-324）。dict[str,T] 的元素级转换 promote_container 支持。
+            if (kwty && mt && mt->kind == TyKind::Dict && mt->sub.size() >= 2 &&
+                mt->sub[1] && mt->sub[1]->kind != TyKind::Unknown &&
+                mt->sub[1]->kind != kwty->kind) {
+                TypePtr want_dict = mk_dict(t_str(), kwty);
+                VReg conv = promote_container(m, mt, want_dict);
+                if (conv == kNoReg) {
+                    err(k.value->line, k.value->col,
+                        std::format("'**kwargs' element type '{}' does not match '{}' "
+                                    "(element conversion is not supported here)",
+                                    type_name(mt->sub[1]), type_name(kwty)));
+                    continue;
+                }
+                m = conv;
+            }
             call_void(RtFn::DictUpdate, {kwarg_dict(), m});
             continue;
         }
