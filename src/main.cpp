@@ -550,6 +550,86 @@ static int cmd_build_or_run(pyadamas::Program& prog, const std::string& mode,
         return 0;
 }
 
+static int cmd_frontend(const std::string& path, const std::string& src,
+                        const std::vector<std::string>& include_dirs,
+                        const std::string& mode, bool syntax_only, bool lenient_names,
+                        bool no_imports, bool resolve_imports, bool no_unsupported_note) {
+        if (mode == "tokens") {
+            pyadamas::Lexer lexer(src);
+            dump_tokens(lexer.run());
+            return 0;
+        }
+
+        if (mode == "ast" || (mode == "check" && syntax_only)) {
+            auto fe = run_frontend(path, src, mode == "check");
+            if (!fe) return 1;
+            if (mode == "ast") {
+                fe->mod->dump(std::cout);
+                return 0;
+            }
+            std::printf("ok: %s (%zu statements)\n", path.c_str(), fe->mod->body.size());
+            return 0;
+        }
+
+        if (mode == "check" || mode == "types") {
+            // check/types 默认**不**加载 import 图（0.486 回退：0.484 曾默认加载，
+            // 在真实代码上把通过率打到 5/20 —— 我们的 stdlib 签名表不全，
+            // subprocess.check_output / sys.version_info 这类未建模成员会被误杀，
+            // 违背「前端宽、后端严」）。--imports 显式开启模块属性检查。
+            // 模块级未定义名字默认就报（真正的拼写错误，误报面小；--lenient-names 逃生口）。
+            // 默认加载 import 图，但**只解析本项目的模块**：原生/标准库模块在
+            // 非 --imports 时返回 nullptr（按 unknown 处理），避免 0.486 的误杀；
+            // 本地模块接口完整，跨模块调用不再退化成 unknown。--no-imports 关整张图。
+            pyadamas::ModuleLookup lookup = nullptr;
+            if (!no_imports) {
+                std::vector<std::string> missing;
+                lookup = pyadamas::load_check_lookup(path, include_dirs, missing, resolve_imports);
+            }
+            auto fe = run_frontend(path, src, false, lookup, !lenient_names);
+            if (!fe) return 1;
+            if (mode == "types") {
+                for (auto& [name, ty] : fe->tc.top_symbols())
+                    std::printf("%-24s %s\n", name.c_str(), ty.c_str());
+                return 0;
+            }
+            // 0.571：未建模构造默认**可见**。以前只在 -v 时打印，等于默认静默放过；
+            // 「不支持就是不支持」的前提是用户看得见。--no-unsupported-note 可关。
+            if (!fe->tc.unsupported.empty() && !no_unsupported_note) {
+                auto& uns = fe->tc.unsupported;
+                std::ranges::sort(uns);
+                auto uniq = std::ranges::unique(uns);
+                uns.erase(uniq.begin(), uniq.end());
+                // 按类别（冒号/引号前的前缀）汇总，最多列 6 类，避免刷屏。
+                std::map<std::string, size_t> by_kind;
+                for (auto& u : uns) {
+                    auto pos = u.find_first_of("'\"");
+                    by_kind[u.substr(0, pos == std::string::npos ? u.size() : pos)]++;
+                }
+                if (uns.size() <= 4) {
+                    // 少量时逐条列出（测试与用户都更需要具体名字）
+                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled:",
+                                 uns.size());
+                    for (auto& u : uns) std::fprintf(stderr, " %s", u.c_str());
+                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
+                } else {
+                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled",
+                                 uns.size());
+                    size_t shown = 0;
+                    for (auto& [k, n] : by_kind) {
+                        if (shown++ == 6) { std::fprintf(stderr, ", ..."); break; }
+                        std::fprintf(stderr, "%s%s(%zu)", shown == 1 ? ": " : ", ", k.c_str(),
+                                     n);
+                    }
+                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
+                }
+            }
+            std::printf("ok: %s (%zu statements, %zu functions, %zu expressions)\n", path.c_str(),
+                        fe->mod->body.size(), fe->tc.n_func, fe->tc.n_expr);
+            return 0;
+        }
+    return 1;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -693,78 +773,9 @@ int main(int argc, char** argv) {
     }
 
     try {
-        if (mode == "tokens") {
-            pyadamas::Lexer lexer(*src);
-            dump_tokens(lexer.run());
-            return 0;
-        }
-
-        if (mode == "ast" || (mode == "check" && syntax_only)) {
-            auto fe = run_frontend(path, *src, mode == "check");
-            if (!fe) return 1;
-            if (mode == "ast") {
-                fe->mod->dump(std::cout);
-                return 0;
-            }
-            std::printf("ok: %s (%zu statements)\n", path.c_str(), fe->mod->body.size());
-            return 0;
-        }
-
-        if (mode == "check" || mode == "types") {
-            // check/types 默认**不**加载 import 图（0.486 回退：0.484 曾默认加载，
-            // 在真实代码上把通过率打到 5/20 —— 我们的 stdlib 签名表不全，
-            // subprocess.check_output / sys.version_info 这类未建模成员会被误杀，
-            // 违背「前端宽、后端严」）。--imports 显式开启模块属性检查。
-            // 模块级未定义名字默认就报（真正的拼写错误，误报面小；--lenient-names 逃生口）。
-            // 默认加载 import 图，但**只解析本项目的模块**：原生/标准库模块在
-            // 非 --imports 时返回 nullptr（按 unknown 处理），避免 0.486 的误杀；
-            // 本地模块接口完整，跨模块调用不再退化成 unknown。--no-imports 关整张图。
-            pyadamas::ModuleLookup lookup = nullptr;
-            if (!no_imports) {
-                std::vector<std::string> missing;
-                lookup = pyadamas::load_check_lookup(path, include_dirs, missing, resolve_imports);
-            }
-            auto fe = run_frontend(path, *src, false, lookup, !lenient_names);
-            if (!fe) return 1;
-            if (mode == "types") {
-                for (auto& [name, ty] : fe->tc.top_symbols())
-                    std::printf("%-24s %s\n", name.c_str(), ty.c_str());
-                return 0;
-            }
-            // 0.571：未建模构造默认**可见**。以前只在 -v 时打印，等于默认静默放过；
-            // 「不支持就是不支持」的前提是用户看得见。--no-unsupported-note 可关。
-            if (!fe->tc.unsupported.empty() && !no_unsupported_note) {
-                auto& uns = fe->tc.unsupported;
-                std::ranges::sort(uns);
-                auto uniq = std::ranges::unique(uns);
-                uns.erase(uniq.begin(), uniq.end());
-                // 按类别（冒号/引号前的前缀）汇总，最多列 6 类，避免刷屏。
-                std::map<std::string, size_t> by_kind;
-                for (auto& u : uns) {
-                    auto pos = u.find_first_of("'\"");
-                    by_kind[u.substr(0, pos == std::string::npos ? u.size() : pos)]++;
-                }
-                if (uns.size() <= 4) {
-                    // 少量时逐条列出（测试与用户都更需要具体名字）
-                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled:",
-                                 uns.size());
-                    for (auto& u : uns) std::fprintf(stderr, " %s", u.c_str());
-                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
-                } else {
-                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled",
-                                 uns.size());
-                    size_t shown = 0;
-                    for (auto& [k, n] : by_kind) {
-                        if (shown++ == 6) { std::fprintf(stderr, ", ..."); break; }
-                        std::fprintf(stderr, "%s%s(%zu)", shown == 1 ? ": " : ", ", k.c_str(),
-                                     n);
-                    }
-                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
-                }
-            }
-            std::printf("ok: %s (%zu statements, %zu functions, %zu expressions)\n", path.c_str(),
-                        fe->mod->body.size(), fe->tc.n_func, fe->tc.n_expr);
-            return 0;
+        if (!package_mode) {
+            return cmd_frontend(path, *src, include_dirs, mode, syntax_only, lenient_names,
+                                no_imports, resolve_imports, no_unsupported_note);
         }
 
         // deps：只建模块图与接口（不降级、不汇编），输出确定性 JSON。
