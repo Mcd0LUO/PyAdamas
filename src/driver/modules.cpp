@@ -444,6 +444,15 @@ void scan_imports_stmt(pyadamas::Stmt& s, std::vector<ImportReq>& reqs,
             scan_imports_body(c.body, reqs, issues, pkg);
             break;
         }
+        case StmtKind::Match: {
+            // A1（0.646）：case 分支体里的 import 也是模块级依赖。
+            // 原来漏了这一个分支：helper 不进 Program::units，build 拖到
+            // codegen 才炸（还附带一条误导性的「方法不支持」），check 却因为
+            // 走惰性 lookup 报 ok。
+            auto& m = static_cast<Match&>(s);
+            for (auto& c : m.cases) scan_imports_body(c.body, reqs, issues, pkg);
+            break;
+        }
         default: break;
     }
 }
