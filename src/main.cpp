@@ -331,6 +331,29 @@ static int cmd_resolve(const std::string& path, const std::string& manifest_flag
         return 0;
 }
 
+static int cmd_cdecl(const std::string& path, const std::string& output,
+                       const std::vector<std::string>& cdecl_links,
+                       const std::vector<std::string>& include_dirs) {
+        if (output.empty()) {
+            std::fprintf(stderr, "error: cdecl needs '-o <out.cpya>'\n");
+            return 2;
+        }
+        std::string module = std::filesystem::path(output).stem().string();
+        std::string err;
+        std::string text = pyadamas::cdecl_generate(path, module, cdecl_links, include_dirs, err);
+        if (text.empty()) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::ofstream out(output, std::ios::binary);
+        if (!out) {
+            std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+            return 1;
+        }
+        out << text;
+        return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -460,26 +483,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (mode == "cdecl") {
-        if (output.empty()) {
-            std::fprintf(stderr, "error: cdecl needs '-o <out.cpya>'\n");
-            return 2;
-        }
-        std::string module = std::filesystem::path(output).stem().string();
-        std::string err;
-        std::string text = pyadamas::cdecl_generate(path, module, cdecl_links, include_dirs, err);
-        if (text.empty()) {
-            std::fprintf(stderr, "error: %s\n", err.c_str());
-            return 1;
-        }
-        std::ofstream out(output, std::ios::binary);
-        if (!out) {
-            std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
-            return 1;
-        }
-        out << text;
-        return 0;
-    }
+    if (mode == "cdecl")
+        return cmd_cdecl(path, output, cdecl_links, include_dirs);
 
     // resolve：清单 → path 依赖闭包 → 写锁。不读入口文件（可以只给项目目录）。
     if (mode == "resolve")
