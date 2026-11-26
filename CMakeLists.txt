@@ -52,6 +52,7 @@ set(PYADAMAS_SOURCES
   src/typecheck/narrow.cpp
   src/typecheck/stmt_forms.cpp
   src/typecheck/expr.cpp
+  src/typecheck/operators.cpp
   src/typecheck/expr_attr.cpp
   src/typecheck/call.cpp
   src/typecheck/mi_guard.cpp
@@ -93,6 +94,7 @@ set(PYADAMAS_SOURCES
   src/lower/expr_dunder.cpp
   src/lower/comp.cpp
   src/lower/call.cpp
+  src/lower/call_asyncio.cpp
   src/lower/c_lazy.cpp
   src/lower/builtin.cpp
   src/lower/builtin_reflect.cpp
@@ -158,6 +160,7 @@ src/opt/intloop.cpp
   src/opt/vect_planner_intfast.cpp
   src/opt/vect_rules_test.cpp
   src/backend/call_rt.cpp
+  src/backend/call_rc.cpp
   src/backend/inline_containers.cpp
   src/backend/mach_emit.cpp
   src/ir/ir.cpp
