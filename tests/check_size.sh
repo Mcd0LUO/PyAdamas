@@ -114,4 +114,11 @@ if ! bash "$(dirname "$0")/../tools/check_layers.sh" >/dev/null 2>&1; then
     exit 1
 fi
 
+# 文档相对链接：docs/ 下的 [x](path) 必须指向真实文件（archive 归档除外）。
+# 这一项防的是「源码搬迁后文档没跟上」——审计 B2 就是这么来的 8 处坏引用。
+if ! python3 "$(dirname "$0")/../tools/check_docs_links.py" >/tmp/pya_docs_links.log 2>&1; then
+    echo "结果：文档链接检查失败（详见 /tmp/pya_docs_links.log）"
+    exit 1
+fi
+
 echo "结果：文件规模检查通过。"
