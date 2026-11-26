@@ -103,66 +103,8 @@ else
     fail=1
 fi
 
-# 5) A3-1：依赖的语法错误不能被吞。以前 catch(...) 把 LexError/ParseError 和
-#    bad_alloc 一视同仁 → 记 missing 按 unknown 继续，check 返回 ok（还给误导的
-#    「parsed but not yet compiled」提示）；build 端是直接拒绝的。
-mkdir -p "$work/badep"
-cat > "$work/badep/badep.py" <<'PYEOF'
-def f(:
-    pass
-PYEOF
-cat > "$work/badep/usesbad.py" <<'PYEOF'
-import badep
-
-print(badep.x)
-PYEOF
-"$PA" check -I "$work/badep" "$work/badep/usesbad.py" >"$work/badep.log" 2>&1
-if [ $? -eq 0 ]; then
-    echo "  check dependency syntax error: PASSED (should fail, A3-1)"
-    sed -n '1,6p' "$work/badep.log"
-    fail=1
-elif grep -qF "expected parameter name" "$work/badep.log"; then
-    echo "  check dependency syntax error: rejected (expected parameter name ...)"
-else
-    echo "  check dependency syntax error: WRONG diagnostic (A3-1)"
-    sed -n '1,6p' "$work/badep.log"
-    fail=1
-fi
-
-# 6) A3-2：同一个模块名解析到两个不同文件。check 以前按 name 记忆化，会把
-#    第二个文件当成第一个模块的接口（实测 check ok / build 报错）。
-mkdir -p "$work/two/pkg"
-cat > "$work/two/helper.py" <<'PYEOF'
-X = 1
-PYEOF
-cat > "$work/two/pkg/helper.py" <<'PYEOF'
-X = 2
-PYEOF
-cat > "$work/two/pkg/__init__.py" <<'PYEOF'
-import helper
-Y = helper.X
-PYEOF
-cat > "$work/two/main.py" <<'PYEOF'
-import pkg
-import helper
-
-print(helper.X, pkg.Y)
-PYEOF
-"$PA" check -I "$work/two" "$work/two/main.py" >"$work/two.log" 2>&1
-if [ $? -eq 0 ]; then
-    echo "  check same name two files: PASSED (should fail, A3-2)"
-    sed -n '1,6p' "$work/two.log"
-    fail=1
-elif grep -qF "resolves to two different files" "$work/two.log"; then
-    echo "  check same name two files: rejected (resolves to two different files)"
-else
-    echo "  check same name two files: WRONG diagnostic (A3-2)"
-    sed -n '1,6p' "$work/two.log"
-    fail=1
-fi
-
 if [ $fail -ne 0 ]; then
     echo "check --imports 口径回归失败"
     exit 1
 fi
-echo "check --imports 口径 6/6 通过"
+echo "check --imports 口径 4/4 通过"

@@ -6,6 +6,39 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.663] - 2026-11-27
+
+> **revert**：撤掉 A3 在 `check.cpp` 的三处改动——它在 stdlib 上制造了大规模误报。
+>
+> 起因：合并 A3 后我跑了 `tools/frontend_baseline.sh`（四口径），`imports` 从 **174/626**
+>掉到 **117/626**。逐文件诊断后确认是两个新检测的误报：
+>
+> | 误报 | 数量 | 根因 |
+> |---|---|---|
+> | `module 'io'/'enum'/'stat'/'codecs' resolves to two different files` | 83 | 内建模块首次加载走 `builtin_module`，记下的 path 是空的；第二次解析到 `.py` 就必然「不同」 |
+> | `method slot N of '_PdbClient' is used by both '__init__' and 'cmdloop'` | 45 | 槽号是**每次编译自己的 intern 表**编号，跨来源不可比；`_PdbClient.__init__` 与继承来的 `Cmd.cmdloop` 都可能是 slot 1 |
+>
+> 第二个尤其值得记：`pdb.py` 用 `build` 编译是**通的**，只有 `check` 报冲突——说明不是真冲突，
+>是 check 侧把「本模块编译的类 / 导入接口的类 / 继承来的方法」混在一张槽表里比较。
+>
+> 处理：`src/driver/check.cpp`、`src/driver/build.h`、`src/main.cpp`、`tests/check_imports.sh`
+>整体退回 `654b9e5`（A3 之前）。A3-1（依赖语法错误传播）本身是对的，但它和另两处在同一批文件里，
+>等重新实现时会连它一起回来。
+>
+> 复测（`tools/frontend_baseline.sh`）：
+>
+> | 口径 | A3 后 | 回退后 | 基线 |
+> |---|---|---|---|
+> | syntax | 626/626 | 626/626 | 626 |
+> | default | 507 | 507 | 516 |
+> | old | 509 | 509 | 518 |
+> | **imports** | **117** | **173** | 174 |
+>
+> `default`/`old` 仍各差 9 个，**尚未定位**——需要拿 0.646 的二进制对同一批文件做逐文件 diff。
+>已记为待办，不在本轮猜测。
+>
+> 教训：这批改动只跑了过滤子集（子代理不能跑全量），**四口径基线才是唯一能兜住这种全局误报的尺子**。
+>今后任何动 `check` 侧的改动都必须附一次 `frontend_baseline.sh` 的前后对比。
 ## [0.662] - 2026-11-27
 
 > docs：**审计 B2 补（同类残留）+ B4（索引可达性）**。
