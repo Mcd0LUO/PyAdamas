@@ -107,44 +107,22 @@ private:
 
     // ── 错误 ────────────────────────────────────────────────────
 
-    void err(int line, int col, std::string msg) {
-        errors_.push_back({line, col, std::move(msg)});
-    }
+    void err(int line, int col, std::string msg);
 
-    void unsupported(const Stmt& s, const char* what) {
-        err(s.line, s.col, std::format("{} is not supported by the code generator yet", what));
-    }
+    void unsupported(const Stmt& s, const char* what);
 
     // ── 块与值 ──────────────────────────────────────────────────
 
     Block& cur() { return st_->fn->blocks[st_->blk]; }
 
-    int new_block(std::string name) {
-        // 别用聚合初始化：Block 加了 id 字段后会错位（-Werror 会抓，
-        // 但更稳妥的是显式赋值）。
-        Block nb;
-        nb.name = std::move(name);
-        st_->fn->blocks.push_back(std::move(nb));
-        return static_cast<int>(st_->fn->blocks.size()) - 1;
-    }
+    int new_block(std::string name);
 
     void switch_to(int b) { st_->blk = b; }
 
     // noreturn 调用之后把当前块收尾，避免后端把后续块当成顺序落下。
-    void end_unreachable() {
-        int dead = new_block("unreachable");
-        Inst j;
-        j.op = IrOp::Jump;
-        j.target = dead;
-        emit(std::move(j));
-    }
+    void end_unreachable();
 
-    VReg alloc(TypePtr ty) {
-        VReg r = static_cast<VReg>(st_->fn->vreg_ty.size());
-        st_->fn->vreg_ty.push_back(ty ? std::move(ty) : t_unknown());
-        st_->fn->vreg_nonneg.push_back(0);
-        return r;
-    }
+    VReg alloc(TypePtr ty);
 
     // 非负性判定与值来源规则（定义在 lower/idiom.cpp）。
     bool nn(VReg v) const;
@@ -155,111 +133,42 @@ private:
                              int& target_slot);
     void exit_nonneg_window(bool nn_hint, int ctr, int target_slot);
 
-    VReg def(TypePtr ty, Inst in) {
-        VReg r = alloc(ty);
-        // 先算右值再取左值引用：nonneg_of 虽当前只读，但把 RHS 独立成临时量
-        // 杜绝「LHS vector 引用先于 RHS 求值、RHS 若 realloc 则悬空」的求值顺序 UB
-        // （ASan 编译器构建 118_suspend_expr 暴露）；并显式守 size 防越界。
-        const uint8_t nn = nonneg_of(in);
-        auto& vn = st_->fn->vreg_nonneg;
-        if (static_cast<size_t>(r) >= vn.size()) vn.resize(static_cast<size_t>(r) + 1, 0);
-        vn[static_cast<size_t>(r)] = nn;
-        in.dst = r;
-        in.ty = ty;
-        if (in.line == 0) in.line = cur_line_;
-        st_->fn->ensure_inst_id(in);
-        if (!cur().terminated()) cur().insts.push_back(std::move(in));
-        return r;
-    }
+    VReg def(TypePtr ty, Inst in);
 
-    void emit(Inst in) {
-        in.dst = kNoReg;
-        if (in.line == 0) in.line = cur_line_;
-        st_->fn->ensure_inst_id(in);
-        if (!cur().terminated()) cur().insts.push_back(std::move(in));
-    }
+    void emit(Inst in);
 
     bool terminated() const { return st_->fn->blocks[st_->blk].terminated(); }
 
     /* 按静态类型算 ListAppend 的 heap 参数：0 非堆 / 1 堆 / 2 unknown。 */
-    VReg heap_arg(TypePtr t) {
-        if (!t) return const_int(2);
-        if (t->kind == TyKind::Unknown) return const_int(2);
-        return const_int(ir_is_heap(t) ? 1 : 0);
-    }
+    VReg heap_arg(TypePtr t);
 
-    VReg const_int(int64_t v) {
-        Inst in;
-        in.op = IrOp::ConstInt;
-        in.imm = v;
-        return def(t_int(), std::move(in));
-    }
+    VReg const_int(int64_t v);
 
     // 带静态类型的整数常量：定宽标注的字面量（类型检查已验值域）与
     // 无符号 64 位常量必须带自己的类型，否则 codegen 按 int 生成、
     // 后续正常化/无符号判定都会看不见目标宽度。
-    VReg const_int_ty(int64_t v, TypePtr ty) {
-        Inst in;
-        in.op = IrOp::ConstInt;
-        in.imm = v;
-        return def(ty ? std::move(ty) : t_int(), std::move(in));
-    }
+    VReg const_int_ty(int64_t v, TypePtr ty);
 
-    VReg const_bool(bool v) {
-        Inst in;
-        in.op = IrOp::ConstInt;
-        in.imm = v ? 1 : 0;
-        return def(t_bool(), std::move(in));
-    }
+    VReg const_bool(bool v);
 
-    VReg const_float(double v) {
-        Inst in;
-        in.op = IrOp::ConstFloat;
-        in.fimm = v;
-        return def(t_float(), std::move(in));
-    }
+    VReg const_float(double v);
 
-    VReg const_none() {
-        Inst in;
-        in.op = IrOp::ConstNone;
-        return def(t_none(), std::move(in));
-    }
+    VReg const_none();
 
-    VReg const_str(const std::string& s) {
-        Inst in;
-        in.op = IrOp::ConstStr;
-        in.idx = mod_.intern_string(s);
-        return def(t_str(), std::move(in));
-    }
+    VReg const_str(const std::string& s);
 
     // bytes 字面量：与同内容的 str 字面量共用字节但 pub 不同，必须单独 intern。
-    VReg const_bytes(const std::string& s) {
-        Inst in;
-        in.op = IrOp::ConstStr;
-        in.idx = mod_.intern_bytes(s);
-        return def(t_bytes(), std::move(in));
-    }
+    VReg const_bytes(const std::string& s);
 
     // P3：big 字面量 → 永生静态 BigInt 对象（与 str 字面量同口径：
     // 借用、不入临时栈；存储时 rc_inc 对永生哨兵是空操作）。
-    VReg const_big(const std::string& s) {
-        Inst in;
-        in.op = IrOp::ConstBig;
-        in.idx = Operand::big(mod_.intern_big(s));
-        return def(t_big(), std::move(in));
-    }
+    VReg const_big(const std::string& s);
 
     VReg const_literal(const LiteralValue& v);
 
     int new_temp_slot(TypePtr ty) { return st_->fn->new_slot(std::move(ty)); }
 
-    int new_borrow_slot(TypePtr ty) {
-        int s = new_temp_slot(std::move(ty));
-        st_->borrow_slots.insert(s);
-        st_->fn->slot_owned[static_cast<size_t>(s)] = false;
-        st_->fn->slot_unknown[static_cast<size_t>(s)] = false;
-        return s;
-    }
+    int new_borrow_slot(TypePtr ty);
 
     void store_borrow_slot(int slot, VReg v) { store_slot_raw(slot, v); }
 
@@ -267,25 +176,9 @@ private:
 
     VReg load_global(int gi, TypePtr ty);
 
-    void store_slot_raw(int slot, VReg v) {
-        for (auto* h : st_->bounds_hints)
-            if (h->seq_slot == slot || h->idx_slot == slot) h->valid = false;
-        // 写入不可证非负的值 → 作废该槽的非负提示（后续 load 不再打标）。
-        if (st_->nonneg_slots.count(slot) && !nn(v)) st_->nonneg_slots.erase(slot);
-        Inst in;
-        in.op = IrOp::StoreSlot;
-        in.idx = slot;
-        in.a = v;
-        emit(std::move(in));
-    }
+    void store_slot_raw(int slot, VReg v);
 
-    void store_global_raw(int gi, VReg v) {
-        Inst in;
-        in.op = IrOp::StoreGlobal;
-        in.idx = gi;
-        in.a = v;
-        emit(std::move(in));
-    }
+    void store_global_raw(int gi, VReg v);
 
     // 引用计数成员声明移到 lower/impl_rc.h（纯移动，原位展开）。
     #include "lower/impl_rc.h"
@@ -301,49 +194,18 @@ private:
 
     const ClosureMeta* closure() const { return st_ ? st_->closure : nullptr; }
 
-    bool is_cell(const std::string& name) const {
-        return st_ && st_->cell_slots.count(name) > 0;
-    }
+    bool is_cell(const std::string& name) const;
 
-    int comp_slot(const std::string& name) const {
-        for (auto it = comp_slots_.rbegin(); it != comp_slots_.rend(); ++it) {
-            auto f = it->find(name);
-            if (f != it->end()) return f->second;
-        }
-        return -1;
-    }
+    int comp_slot(const std::string& name) const;
 
-    bool is_env(const std::string& name) const {
-        auto* m = closure();
-        return m && st_->env_slot >= 0 && m->env_index.count(name) > 0;
-    }
+    bool is_env(const std::string& name) const;
 
-    TypePtr captured_ty(const std::string& name) const {
-        auto* m = closure();
-        if (!m) return nullptr;
-        if (auto it = m->cell_index.find(name); it != m->cell_index.end())
-            return m->cells[static_cast<size_t>(it->second)].ty;
-        if (auto it = m->env_index.find(name); it != m->env_index.end())
-            return m->env[static_cast<size_t>(it->second)].ty;
-        return nullptr;
-    }
+    TypePtr captured_ty(const std::string& name) const;
 
-    VReg load_cell(const std::string& name) {
-        TypePtr T = captured_ty(name);
-        int slot = st_->cell_slots.at(name);
-        return load_slot(slot, mk_list(T ? T : t_unknown()));
-    }
+    VReg load_cell(const std::string& name);
 
     // cell 是单元素 list[T]；读出来是借用引用，写进去由 list_set 管旧值。
-    VReg read_cell(const std::string& name) {
-        VReg c = load_cell(name);
-        TypePtr T = captured_ty(name);
-        Inst in;
-        in.op = IrOp::IndexLoad;
-        in.a = c;
-        in.b = const_int(0);
-        return def(T ? T : t_unknown(), std::move(in));
-    }
+    VReg read_cell(const std::string& name);
 
     VReg read_env(const std::string& name);
 
@@ -359,45 +221,20 @@ private:
     // 形参先用原始槽接实参，再把值 retain 进 cell。
     void create_cells();
 
-    void bind_name_value(const std::string& name, VReg v, TypePtr vty) {
-        if (is_cell(name)) {
-            write_cell(name, v, vty);
-        } else if (is_local(name)) {
-            store_slot(st_->slots[name], v);
-        } else {
-            store_global(global_idx(name), v);
-        }
-    }
+    void bind_name_value(const std::string& name, VReg v, TypePtr vty);
 
     TypePtr name_ty(const std::string& name);
 
-    bool is_local(const std::string& name) const {
-        if (!st_) return false;
-        if (comp_slot(name) >= 0) return true;
-        return st_->slots.count(name) > 0 || is_env(name);
-    }
+    bool is_local(const std::string& name) const;
 
     // 一个名字的存储类型：cell/env 看捕获类型，局部看槽，模块级看全局表。
-    TypePtr storage_ty(const std::string& name) {
-        if (auto t = captured_ty(name)) return t;
-        if (st_->globals_decl.count(name) || !is_local(name)) return mod_.globals[global_idx(name)].ty;
-        return st_->fn->slot_ty[st_->slots[name]];
-    }
+    TypePtr storage_ty(const std::string& name);
 
     // 当前作用域里有没有这个名字（局部槽、捕获变量或 global 声明）。
-    bool is_bound_here(const std::string& name) const {
-        if (!st_) return false;
-        if (st_->globals_decl.count(name)) return true;
-        return is_local(name);
-    }
+    bool is_bound_here(const std::string& name) const;
 
     // 内置名可以被用户遮蔽：模块里定义了 print，它就不再是内置。
-    bool is_builtin(const std::string& name) const {
-        if (is_bound_here(name)) return false;
-        if (auto* ms = tc_.module_scope())
-            if (ms->vars.count(name)) return false;
-        return true;
-    }
+    bool is_builtin(const std::string& name) const;
 
     // ── 语句 ────────────────────────────────────────────────────
 
@@ -447,15 +284,7 @@ private:
     void lower_try_zero_cost(Try& t);
     // 零开销 try 体里的 raise：把老 RtFn 映射到 _Unwind 版本；其余地方原样
     // 返回（老路径一个字都不变）。
-    RtFn raise_rt(RtFn f) const {
-        if (!st_ || st_->zc_raise_depth <= 0) return f;
-        switch (f) {
-            case RtFn::Raise: return RtFn::EhRaise;
-            case RtFn::RaiseValueFrom: return RtFn::EhRaiseValueFrom;
-            case RtFn::Reraise: return RtFn::EhReraise;
-            default: return f;
-        }
-    }
+    RtFn raise_rt(RtFn f) const;
     void lower_funcdef(FunctionDef& f);
     // @functools.wraps(...)：没有运行期语义，装饰器链里整层跳过。
     bool is_wraps_decorator(const Expr* e) const;
@@ -532,39 +361,11 @@ private:
     // str 顺序迭代游标：分配一对相邻的 int64 槽（cp / off），两个槽都取过
     // 地址（保证不被寄存器提升，运行时直接按 PyAdamasStrCursor* 读写），
     // 初始化为「无缓存」(-1, 0)。返回 cp 槽号；off 槽号是 cp+1。
-    int new_str_cursor() {
-        int cp = new_temp_slot(t_int());
-        int off = new_temp_slot(t_int());
-        VReg a1 = slot_addr_of(cp);
-        VReg a2 = slot_addr_of(off);
-        (void)a1;
-        (void)a2;
-        store_slot(cp, const_int(-1));
-        store_slot(off, const_int(0));
-        return cp;
-    }
+    int new_str_cursor();
 
     // 取 str 的第 idx 个码点（1 码点串）。带游标时顺序访问是 O(1)；
     // 非顺序访问回退到从头扫，与 pa_str_char_at 一致。
-    VReg str_char_at(VReg seq, VReg idx, int cur_slot) {
-        if (cur_slot < 0) {
-            Inst in;
-            in.op = IrOp::CallRt;
-            in.imm = static_cast<int64_t>(RtFn::StrCharAt);
-            in.args = {seq, idx};
-            VReg v = def(t_str(), std::move(in));
-            push_temp(v);
-            return v;
-        }
-        VReg curp = slot_addr_of(cur_slot);
-        Inst in;
-        in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(RtFn::StrCharAtCursor);
-        in.args = {seq, idx, curp};
-        VReg v = def(t_str(), std::move(in));
-        push_temp(v);
-        return v;
-    }
+    VReg str_char_at(VReg seq, VReg idx, int cur_slot);
     // 生成器 resume 重进时 C 栈帧是新的：把跨挂起仍然活跃的 vreg
     // 在挂起前溢写到堆帧槽，恢复后再装回来（见 lower/gen.cpp）。
     void spill_across_suspends();
@@ -604,79 +405,23 @@ private:
     bool bad_elem(const TypePtr& from, const TypePtr& to);
 
     // extern 变量：登记到模块表并返回下标。同一个 C 符号只登记一次。
-    int extern_var_idx(const CVar& v) {
-        for (size_t i = 0; i < mod_.extern_vars.size(); ++i)
-            if (mod_.extern_vars[i].symbol == v.symbol) return static_cast<int>(i);
-        IRExternVar ev;
-        ev.symbol = v.symbol;
-        ev.kind = v.kind;
-        mod_.extern_vars.push_back(std::move(ev));
-        return static_cast<int>(mod_.extern_vars.size()) - 1;
-    }
+    int extern_var_idx(const CVar& v);
 
     // extern 变量在 PyAdamas 侧的类型；ptr[Struct] 保留结构体指针身份。
-    TypePtr cvar_type(const CVar& v) {
-        TypePtr t = ckind_type(v.kind);
-        if (v.kind == CKind::Ptr && !v.struct_name.empty()) {
-            if (StructInfo* st = tc_.struct_info(v.struct_name))
-                t = mk_optional(mk_struct_ptr(st));
-        } else if (v.kind == CKind::Ptr && v.elem != CKind::None && t) {
-            // 0.564：数组变量的符号地址是编译期常量，不可能是 None —— 给非空 ptr[T]，
-            // 省掉无意义的 `if p is not None:` 仪式。
-            if (v.addr_of) t = t_int();
-            t->celem = v.elem;
-        }
-        return t;
-    }
+    TypePtr cvar_type(const CVar& v);
 
     // C 结构体字段的地址（数组字段、取元素地址时用）：obj + off 的整数地址。
-    VReg field_addr(VReg obj, int64_t off) {
-        Inst in;
-        in.op = IrOp::Bin;
-        in.bop = BinKind::Add;
-        in.a = obj;
-        in.b = const_int(off);
-        return def(t_int(), std::move(in));
-    }
+    VReg field_addr(VReg obj, int64_t off);
 
-    void field_store(VReg obj, int off, VReg v, uint8_t width = 8, bool unsig = false) {
-        Inst in;
-        in.op = IrOp::FieldStore;
-        in.a = obj;
-        in.imm = off;
-        in.b = v;
-        in.ty = vreg_ty(v);  // 宽度 4 的 float32 字段要靠值类型决定 cvtsd2ss
-        in.fwidth = width;
-        in.funsigned = unsig;
-        emit(std::move(in));
-    }
+    void field_store(VReg obj, int off, VReg v, uint8_t width = 8, bool unsig = false);
 
-    VReg field_load(VReg obj, int off, TypePtr ty, uint8_t width = 8, bool unsig = false) {
-        Inst in;
-        in.op = IrOp::FieldLoad;
-        in.a = obj;
-        in.imm = off;
-        in.fwidth = width;
-        in.funsigned = unsig;
-        return def(ty, std::move(in));
-    }
+    VReg field_load(VReg obj, int off, TypePtr ty, uint8_t width = 8, bool unsig = false);
 
     // 值类型 struct：分配一块 payload（带 RC 头，但头在 payload 之前，
     // 交给 C 的地址就是 payload 地址），以及按值复制一份。
-    VReg struct_new(StructInfo* s) {
-        Inst in;
-        in.op = IrOp::StructNew;
-        in.imm = s->size;
-        return def_heap(mk_struct(s), std::move(in));
-    }
+    VReg struct_new(StructInfo* s);
 
-    VReg struct_copy(VReg v, StructInfo* s) {
-        Inst in;
-        in.op = IrOp::StructCopy;
-        in.a = v;
-        in.imm = s->size;
-        return def_heap(mk_struct(s), std::move(in));
-    }
+    VReg struct_copy(VReg v, StructInfo* s);
 
     // struct 的特殊形式与构造。
     VReg lower_struct_builtin(const std::string& name, Call& c);
@@ -688,10 +433,7 @@ private:
     VReg guard_not_none(VReg v, const std::string& what);
 
     // 剥掉 Optional 外壳，返回内层类型；不是 Optional 就原样返回。
-    static TypePtr strip_optional(const TypePtr& t) {
-        if (t && t->kind == TyKind::Optional && !t->sub.empty()) return t->sub[0];
-        return t;
-    }
+    static TypePtr strip_optional(const TypePtr& t);
 
     // type(x) 用的 Python 侧类型名。
     static std::string py_type_name(const TypePtr& t);
@@ -826,26 +568,12 @@ private:
     VReg lower_joined(JoinedStr& j);
     VReg convert_to(VReg v, TypePtr from, TypePtr to);
     VReg coerce(VReg v, TypePtr from, TypePtr to);
-    TypePtr vreg_ty(VReg v) const {
-        return v < st_->fn->vreg_ty.size() ? st_->fn->vreg_ty[v] : t_unknown();
-    }
+    TypePtr vreg_ty(VReg v) const;
 
-    VReg call_runtime(RtFn f, TypePtr ret, std::vector<VReg> args) {
-        Inst in;
-        in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(f);
-        in.args = std::move(args);
-        return def(std::move(ret), std::move(in));
-    }
+    VReg call_runtime(RtFn f, TypePtr ret, std::vector<VReg> args);
 
     // 返回 void 的运行时函数不分配结果寄存器，省掉一条无用的 movq
-    void call_void(RtFn f, std::vector<VReg> args) {
-        Inst in;
-        in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(f);
-        in.args = std::move(args);
-        emit(std::move(in));
-    }
+    void call_void(RtFn f, std::vector<VReg> args);
 
     void print_value(VReg v, TypePtr ty, int line, int col);
     // print(..., file=f)：值先转成字符串再 FileWrite；print_file_slot_ >= 0
@@ -877,18 +605,9 @@ private:
     void bind_name(Expr& target);
     void scan_globals(Stmt& s, bool enter_functions = false);
 
-    void push_frame(IRFunction* fn, const Scope* scope) {
-        auto ctx = std::make_unique<FuncCtx>();
-        ctx->fn = fn;
-        ctx->scope = scope;
-        frames_.push_back(std::move(ctx));
-        st_ = frames_.back().get();
-    }
+    void push_frame(IRFunction* fn, const Scope* scope);
 
-    void pop_frame() {
-        frames_.pop_back();
-        st_ = frames_.empty() ? nullptr : frames_.back().get();
-    }
+    void pop_frame();
 };
 
 

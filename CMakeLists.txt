@@ -67,6 +67,7 @@ set(PYADAMAS_SOURCES
   src/typecheck/class_alias.cpp
   src/typecheck/dataclass.cpp
   src/typecheck/enum.cpp
+  src/lower/impl_inline.cpp
   src/lower/lower.cpp
   src/lower/class.cpp
   src/lower/mi_thunk.cpp
