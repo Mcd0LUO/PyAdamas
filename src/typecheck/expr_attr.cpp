@@ -367,6 +367,12 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
         if (is_self_attr(a)) return t_unknown();
         // 有外部基类时成员表本来就不全，查不到不等于不存在
         if (ot->cls->is_open()) return t_unknown();
+        // 0.664：类定义了 __getattr__ / __getattribute__ → 任意属性名都可能有值。
+        // CPython 的代理类大量用这个（`xmlrpc.client.ServerProxy.currentTime`、
+        // `pyexpat._ClosedParser.ErrorColumnNumber`），静态表里当然没有，
+        // 但报错就是误报。语义上这类读取只能给 unknown。
+        if (ot->cls->method("__getattr__") || ot->cls->method("__getattribute__"))
+            return t_unknown();
         // 类已因 setattr/hasattr/getattr 或非字面量名字开启了动态属性：
         // 读取落到运行期 dict。注意不能因为一次普通读取就 self-mark，
         // 否则拼错的字段名会被当成动态属性静默放过。

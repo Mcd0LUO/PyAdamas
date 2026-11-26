@@ -6,6 +6,35 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.664] - 2026-11-27
+
+> fix(typecheck)：**定义了 `__getattr__` 的类，未知属性不再误报**。
+>
+> `xmlrpc.client.ServerProxy.currentTime`、`pyexpat._ClosedParser.ErrorColumnNumber` 这类读取，
+>静态成员表里当然没有——它们由 `__getattr__` 在运行期合成。原来直接报
+>`'ServerProxy' object has no attribute 'currentTime'`，是误报。
+>
+> 修法：实例属性解析在报错前检查类和基类是否定义了 `__getattr__` / `__getattribute__`
+>（`ot->cls->method()` 会沿基类链查），命中就返回 `unknown`。
+>
+> 顺带把四口径基线的 delta 定位清楚了（用 0.646 的二进制对同一批 626 个文件逐文件 diff）：
+>
+> ```
+> old(0.646): 512 OK / 114 FAIL
+> new(0.664): 507 OK / 119 FAIL
+> 由 OK 变 FAIL: 5 个文件，全部是同一条新诊断
+>   'X.y' is an instance method; take the value on an instance   ← A8-5（0.657）
+> 由 FAIL 变 OK: 0 个
+> ```
+>
+> 这 5 个（`importlib/abc.py`、`multiprocessing/queues.py`、`multiprocessing/resource_sharer.py`、
+>`test/typinganndata/ann_module695.py`、`urllib/request.py`）**不是 bug**：它们在 CPython 里合法
+>（`SomeClass.method` 返回普通函数），但 pya 的降级层本来就不支持「把实例方法当值取出来」，
+>以前只是 `check` 没发现、`build` 才报。A8-5 把这个不一致收掉了，于是
+>**`default` / `old` 两个口径下降是「检查更诚实」，不是能力退化**。
+>
+> 遗留：`_ClosedParser.ErrorColumnNumber` 仍报错（该类的 `__getattr__` 可能来自 C 扩展，
+>静态查不到），属同一族但未修。
 ## [0.663] - 2026-11-27
 
 > **revert**：撤掉 A3 在 `check.cpp` 的三处改动——它在 stdlib 上制造了大规模误报。
