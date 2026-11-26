@@ -32,6 +32,7 @@ set(PYADAMAS_SOURCES
   src/driver/util.cpp
   src/driver/link.cpp
   src/driver/build.cpp
+  src/driver/build_cache.cpp
   src/driver/program_opts.cpp
   src/driver/progcache.cpp
   src/driver/modules.cpp
