@@ -502,6 +502,162 @@ struct BorrowPass {
                is_zero(trace(ins[j].a));
     }
 
+    // ── 惰性索引（0.614）─────────────────────────────────────────────
+    //
+    // 这个 pass 是纯分析：fn 在 build() 期间不被修改，所以指令指针稳定。
+    // 之前 walk_uses 每弹出一个 vreg 就重扫全函数 → 候选多的大函数上退化成
+    // O(候选 × 消费 × 指令)。这里一次性建 VReg → 消费指令表，之后是查表。
+    mutable std::unordered_map<VReg, std::vector<const Inst*>> uses_index_;
+    mutable bool uses_index_ready_ = false;
+
+    void build_uses_index() const {
+        uses_index_ready_ = true;
+        for (auto& bb : fn.blocks) {
+            for (auto& in : bb.insts) {
+                auto add = [&](VReg v) {
+                    if (v == kNoReg) return;
+                    auto& vec = uses_index_[v];
+                    // 同一条指令里同一个 vreg 出现多次只记一次（与原扫描口径一致）
+                    if (!vec.empty() && vec.back() == &in) return;
+                    vec.push_back(&in);
+                };
+                add(in.a);
+                add(in.b);
+                add(in.c);
+                for (VReg r : in.args) add(r);
+            }
+        }
+    }
+
+    const std::vector<const Inst*>* uses_of(VReg v) const {
+        if (!uses_index_ready_) build_uses_index();
+        auto it = uses_index_.find(v);
+        return it == uses_index_.end() ? nullptr : &it->second;
+    }
+
+    // ── 控制流分析（0.614）───────────────────────────────────────────
+    //
+    // FreshLocal / PrivateGlobal 的存活论证依赖「那条唯一的写只执行一次，且
+    // 支配所有读点」。原来只数了静态条数：写在循环体里的话，每轮都会重新
+    // 分配并把旧容器 rc_dec 掉，而借用槽不持引用 → 悬垂指针。
+    mutable std::vector<std::vector<int>> succs_;
+    mutable std::vector<char> in_cycle_;
+    mutable std::vector<std::vector<uint64_t>> dom_;  // dom_[b] 的位 d 表示 d 支配 b
+    mutable bool graph_ready_ = false;
+
+    void build_graph() const {
+        graph_ready_ = true;
+        size_t nb = fn.blocks.size();
+        succs_.assign(nb, {});
+        for (size_t b = 0; b < nb; ++b) {
+            auto& ins = fn.blocks[b].insts;
+            for (auto& in : ins) {
+                if (in.op == IrOp::Jump && in.target >= 0)
+                    succs_[b].push_back(in.target);
+                else if (in.op == IrOp::Branch) {
+                    if (in.target >= 0) succs_[b].push_back(in.target);
+                    if (in.target2 >= 0) succs_[b].push_back(in.target2);
+                }
+            }
+        }
+        // SCC（迭代 Tarjan）：只关心「块是否在环里」。
+        in_cycle_.assign(nb, 0);
+        std::vector<int> index(nb, -1), low(nb, 0), stk;
+        std::vector<char> onstk(nb, 0);
+        int counter = 0;
+        struct Frame { int v; size_t ei; };
+        std::vector<Frame> stack;
+        for (size_t s0 = 0; s0 < nb; ++s0) {
+            if (index[s0] != -1) continue;
+            stack.push_back({static_cast<int>(s0), 0});
+            index[s0] = low[s0] = counter++;
+            stk.push_back(static_cast<int>(s0));
+            onstk[s0] = 1;
+            while (!stack.empty()) {
+                Frame& f = stack.back();
+                auto& ss = succs_[static_cast<size_t>(f.v)];
+                if (f.ei < ss.size()) {
+                    int w = ss[f.ei++];
+                    if (w < 0 || static_cast<size_t>(w) >= nb) continue;
+                    if (index[w] == -1) {
+                        index[w] = low[w] = counter++;
+                        stk.push_back(w);
+                        onstk[w] = 1;
+                        stack.push_back({w, 0});
+                    } else if (onstk[w]) {
+                        low[f.v] = std::min(low[f.v], index[w]);
+                    }
+                } else {
+                    int v = f.v;
+                    stack.pop_back();
+                    if (!stack.empty())
+                        low[stack.back().v] = std::min(low[stack.back().v], low[v]);
+                    if (low[v] == index[v]) {
+                        std::vector<int> comp;
+                        int w;
+                        do {
+                            w = stk.back();
+                            stk.pop_back();
+                            onstk[w] = 0;
+                            comp.push_back(w);
+                        } while (w != v);
+                        bool self_loop = false;
+                        for (int u : succs_[static_cast<size_t>(v)])
+                            if (u == v) self_loop = true;
+                        if (comp.size() > 1 || self_loop)
+                            for (int u : comp) in_cycle_[static_cast<size_t>(u)] = 1;
+                    }
+                }
+            }
+        }
+        // 支配集（迭代到位）：dom[0] = {0}，其余先全 1 再求交。
+        size_t words = (nb + 63) / 64;
+        dom_.assign(nb, std::vector<uint64_t>(words, ~0ull));
+        if (nb) dom_[0].assign(words, 0), dom_[0][0] = 1ull;
+        auto bit = [](size_t b) { return std::make_pair(b / 64, 1ull << (b % 64)); };
+        std::vector<std::vector<int>> preds(nb);
+        for (size_t b = 0; b < nb; ++b)
+            for (int t : succs_[b])
+                if (t >= 0 && static_cast<size_t>(t) < nb) preds[static_cast<size_t>(t)].push_back(static_cast<int>(b));
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t b = 1; b < nb; ++b) {
+                std::vector<uint64_t> acc(words, ~0ull);
+                bool any = false;
+                for (int p : preds[b]) {
+                    any = true;
+                    for (size_t w = 0; w < words; ++w) acc[w] &= dom_[static_cast<size_t>(p)][w];
+                }
+                if (!any) acc.assign(words, 0);
+                auto [wi, mask] = bit(b);
+                acc[wi] |= mask;
+                if (acc != dom_[b]) { dom_[b] = std::move(acc); changed = true; }
+            }
+        }
+    }
+
+    bool block_in_cycle(int b) const {
+        if (!graph_ready_) build_graph();
+        return b >= 0 && static_cast<size_t>(b) < in_cycle_.size() && in_cycle_[static_cast<size_t>(b)];
+    }
+
+    // d 是否支配 b
+    bool dominates(int d, int b) const {
+        if (!graph_ready_) build_graph();
+        if (d < 0 || b < 0) return false;
+        if (static_cast<size_t>(d) >= dom_.size() || static_cast<size_t>(b) >= dom_.size()) return false;
+        return (dom_[static_cast<size_t>(b)][static_cast<size_t>(d) / 64] >> (d % 64)) & 1ull;
+    }
+
+    // 唯一实写是否可以安全地被当作「全函数唯一、只执行一次」的初始化：
+    // 不在环里 + 支配每一个读点（同块时要求读点在写之后）。
+    bool single_store_reaches(int sb, size_t si, int lb, size_t li) const {
+        if (block_in_cycle(sb)) return false;
+        if (sb == lb) return li > si;
+        return dominates(sb, lb);
+    }
+
     // 访问 v 的全部消费点（Mov 传播）。visit 返回 false 即失败。
     bool walk_uses(VReg v, const std::function<bool(const Inst&, VReg)>& visit) const {
         std::vector<VReg> work{v};
@@ -509,15 +665,12 @@ struct BorrowPass {
         while (!work.empty()) {
             VReg x = work.back(); work.pop_back();
             if (!seen.insert(x).second) continue;
-            for (auto& bb : fn.blocks) {
-                for (auto& in : bb.insts) {
-                    bool used = in.a == x || in.b == x || in.c == x;
-                    if (!used)
-                        for (VReg r : in.args) if (r == x) { used = true; break; }
-                    if (!used) continue;
-                    if (in.op == IrOp::Mov && in.dst != kNoReg) { work.push_back(in.dst); continue; }
-                    if (!visit(in, x)) return false;
-                }
+            const std::vector<const Inst*>* list = uses_of(x);
+            if (!list) continue;
+            for (const Inst* ip : *list) {
+                const Inst& in = *ip;
+                if (in.op == IrOp::Mov && in.dst != kNoReg) { work.push_back(in.dst); continue; }
+                if (!visit(in, x)) return false;
             }
         }
         return true;
@@ -577,6 +730,8 @@ struct BorrowPass {
                     ins[i + 2].args.size() == 1 && ins[i + 2].args[0] == ins[i].dst)
                     continue;  // store 旧值装载
                 if (is_exit_load(ins, i, p)) continue;
+                // 与 PrivateGlobal 同一条件：唯一写要「至多执行一次」且支配读点。
+                if (!single_store_reaches(b0, i0, static_cast<int>(b), i)) return r;
                 if (!walk_uses(ins[i].dst, [&](const Inst& in, VReg x) {
                         if (in.op == IrOp::Len && in.a == x) return true;
                         return (in.op == IrOp::IndexLoad || in.op == IrOp::IndexLoadUnchecked) &&
@@ -647,9 +802,18 @@ struct BorrowPass {
             return r;
         if (nstores != 1) return r;
         const Inst* alloc = nullptr;
-        for (auto& bb : fn.blocks)
-            for (auto& in : bb.insts)
-                if (in.op == IrOp::StoreGlobal && in.idx == g) alloc = trace(in.a);
+        int store_b = -1;
+        size_t store_i = 0;
+        for (size_t b = 0; b < fn.blocks.size(); ++b) {
+            auto& ins = fn.blocks[b].insts;
+            for (size_t i = 0; i < ins.size(); ++i) {
+                if (ins[i].op == IrOp::StoreGlobal && ins[i].idx == g) {
+                    alloc = trace(ins[i].a);
+                    store_b = static_cast<int>(b);
+                    store_i = i;
+                }
+            }
+        }
         if (!alloc || !is_fresh_alloc(alloc)) return r;
         // 新分配值不逃逸：只允许 RC 临时栈记账 / 存回该全局。
         if (!walk_uses(alloc->dst, [&](const Inst& in, VReg x) {
@@ -675,6 +839,9 @@ struct BorrowPass {
                     ins[i + 1].idx == g)
                     continue;  // store 旧值装载
                 if (is_global_exit_load(ins, i, g, static_cast<int>(b))) continue;
+                // 唯一的写必须支配这个读点，且不在环里（否则读到的可能是上一轮的旧
+                // 容器，而它已经被新的一轮 rc_dec 释放 → 借用槽悬垂）。
+                if (!single_store_reaches(store_b, store_i, static_cast<int>(b), i)) return r;
                 if (!walk_uses(ins[i].dst, [&](const Inst& in, VReg x) {
                         if (in.op == IrOp::Len && in.a == x) return true;
                         if ((in.op == IrOp::IndexLoad || in.op == IrOp::IndexLoadUnchecked) &&
