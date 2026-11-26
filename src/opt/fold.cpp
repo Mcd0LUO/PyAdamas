@@ -38,6 +38,45 @@ void set_const_float(Inst& in, double v) {
     in.args.clear();
 }
 
+bool opt_may_raise(const Inst& in, const IRFunction* fn) {
+    switch (in.op) {
+        case IrOp::IndexLoad:
+        case IrOp::IndexStore:
+        case IrOp::Setjmp:
+        case IrOp::Call:
+        case IrOp::CallRt:
+        case IrOp::CallExtern:
+        case IrOp::CallPtr:
+        case IrOp::CallDirect:
+        case IrOp::VCall:
+        case IrOp::VCallStatic:
+        case IrOp::SuperVCall:
+            return true;
+        case IrOp::Bin:
+            // 整数 / 浮点的除零、取模零都抛；其它算术只回绕。
+            return in.bop == BinKind::Div || in.bop == BinKind::Mod ||
+                   in.bop == BinKind::FloorDiv;
+        case IrOp::Convert: {
+            if (!in.ty) return false;
+            // 只有「目标 Int（i64）」的转换可能抛：source 是 float 时 codegen 走
+            // cvttsd2si + INT64_MIN 哨兵检查（NaN / ±inf / 越界 → ValueError /
+            // OverflowError）。目标定宽整数走裸 cvttsd2si + 截断，Bool / Float /
+            // 其它目标也不抛。
+            if (in.ty->kind != TyKind::Int) return false;
+            // 拿不到操作数类型：保守，目标 Int 的转换一律算可能抛。
+            if (!fn) return true;
+            TypePtr at = (in.a != kNoReg && static_cast<size_t>(in.a) < fn->vreg_ty.size())
+                             ? fn->vreg_ty[static_cast<size_t>(in.a)]
+                             : nullptr;
+            if (!at) return true;
+            // unknown 运行期可能是 float（装箱）——按可能抛处理。
+            return ir_is_float(at) || at->kind == TyKind::Unknown;
+        }
+        default:
+            return false;
+    }
+}
+
 bool inst_is_pure(const Inst& in) {
     switch (in.op) {
         case IrOp::ConstInt:
@@ -64,11 +103,19 @@ bool inst_is_pure(const Inst& in) {
             if (ir_is_float(t)) return bin_is_safe_float(in.bop);
             return bin_is_safe_int(in.bop);
         }
-        case IrOp::Convert:
-            // float→int 从 0.427 起会抛 OverflowError/ValueError（NaN/±inf/越界），
-            // 因此目标为 int 的转换不再是纯指令：否则 `int(float("inf"))` 这种
-            // 结果没人用的语句会被 DCE 整条删掉、异常静默消失（-O2 实测）。
-            return in.ty && (in.ty->kind == TyKind::Bool || in.ty->kind == TyKind::Float);
+        case IrOp::Convert: {
+            // 转换本身无副作用，但 str 目标要走运行期调用 / 分配，按有副作用处理。
+            // 其余数值目标：可能抛异常与否**只由 opt_may_raise 决定**（DCE 删掉
+            // 一条会抛的指令会静默吞异常：`int(float("inf"))` 结果没人用的情况
+            // 0.427 实测错值）。这里同样按保守口径（没有 fn 上下文）调用，
+            // 与 0.676 的判定逐字一致。
+            if (!in.ty) return false;
+            if (in.ty->kind == TyKind::Str) return false;
+            const bool numeric_target = in.ty->kind == TyKind::Bool ||
+                                        in.ty->kind == TyKind::Int ||
+                                        is_fixed_int(in.ty) || ir_is_float(in.ty);
+            return numeric_target && !opt_may_raise(in, nullptr);
+        }
         default:
             return false;
     }

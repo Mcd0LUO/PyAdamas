@@ -23,6 +23,25 @@ void set_const_float(Inst& in, double f);
 bool inst_is_pure(const Inst& in);
 void dce_function(IRFunction& fn);
 
+/* 「这条指令执行时可能在运行期抛异常吗？」——**唯一事实来源**。
+ *
+ * 四处共用：fold（DCE / 删死值：删掉会静默吞异常）、loop（LICM 外提：
+ * 外提会让异常提前/让零次循环也抛）、global_promote（循环出口延迟写回：
+ * 异常展开跳过写回 → 被 catch 后读到陈旧全局）、ifconv（then 块被改成
+ * 无条件执行：可能多抛）。0.676 前 loop 与 global_promote 各自维护一份，
+ * 两处都漏了 float→int Convert，-O2 实测错值；此后只准走这一个入口。
+ *
+ * fn 用来取操作数静态类型。**fn == nullptr 表示拿不到类型上下文，按保守
+ * 口径**（Convert 目标为任何整数种类都算可能抛；多拒绝几个 int→int 转换
+ * 只是少一档优化）。有 fn 时精确到 codegen 的真实行为（backend/ops.cpp
+ * 的 gen_convert / 除法路径）：
+ *   - Convert 目标 Int：源 float / unknown / 取不到类型 → 可能抛
+ *     （cvttsd2si 的 INT64_MIN 哨兵检查抛 ValueError / OverflowError）；
+ *   - Convert 目标定宽整数（I8..U64）：裸 cvttsd2si + 截断，不抛；
+ *   - Convert 目标 Bool / Float / 其它：不抛；
+ *   - 调用族、IndexLoad / IndexStore、Setjmp、Div / Mod / FloorDiv → 可能抛。 */
+bool opt_may_raise(const Inst& in, const IRFunction* fn);
+
 std::unordered_map<int, int> collect_static_func_globals(const IRModule& m);
 std::vector<char> recursive_functions(const IRModule& m,
                                       const std::unordered_map<int, int>& gfunc);

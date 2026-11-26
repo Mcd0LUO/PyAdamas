@@ -132,38 +132,15 @@ std::vector<std::vector<int>> build_succ(const IRFunction& fn,
     return succ;
 }
 
-// 可能抛异常的指令。提升把「每轮写全局」推迟成「循环出口写回」：若循环中途
-// 抛异常并展开，全局会停在进入循环前的值。是否可观察取决于函数：
+// 可能抛异常的指令 → 用 opt/detail.h 的共享谓词 opt_may_raise。
+//
+// 提升把「每轮写全局」推迟成「循环出口写回」：若循环中途抛异常并展开，全局
+// 会停在进入循环前的值。是否可观察取决于函数：
 //   * 入口函数（__pa_main）里未捕获异常 = 进程终止，之后没有代码读全局 → 可观察不到；
 //   * 其它函数可能被调用方 catch 后读全局 → 必须要求循环内没有可能抛异常的指令。
-bool is_raising_op(const Inst& in) {
-    switch (in.op) {
-        case IrOp::IndexLoad:
-        case IrOp::IndexStore:
-        case IrOp::Setjmp:
-        case IrOp::Call:
-        case IrOp::CallRt:
-        case IrOp::CallExtern:
-        case IrOp::CallPtr:
-        case IrOp::CallDirect:
-        case IrOp::VCall:
-        case IrOp::VCallStatic:
-        case IrOp::SuperVCall:
-            return true;
-        case IrOp::Bin:
-            return in.bop == BinKind::Div || in.bop == BinKind::Mod ||
-                   in.bop == BinKind::FloorDiv;
-        case IrOp::Convert:
-            // 0.676：float → int 可能在运行期抛（NaN / ±inf / 越界，见 codegen 的
-            // cvttsd2si 哨兵检查）。漏掉这一类，异常展开会跳过循环出口的写回，
-            // 调用方 catch 后读到**陈旧**的全局值（实测 -O2 与 -O0 不同）。
-            // 保守取「目标类型是 Int」的全部转换（这里拿不到操作数类型；多拒绝几个
-            // int→int 转换只是少一档优化，不会错）。
-            return in.ty && in.ty->kind == TyKind::Int;
-        default:
-            return false;
-    }
-}
+//
+// 这里传 nullptr（保守口径）：本判定是「延后写回是否安全」的黑白分界，多拒绝几个
+// int→int Convert 只是少一档优化；0.676 就是这个保守口径，保持一致。
 
 // 零开销异常：函数里出现 EH 标记就整函数跳过（展开会跳过循环出口的写回）。
 bool has_eh_markers(const IRFunction& fn) {
@@ -342,7 +319,7 @@ bool promote_globals_in_loops(IRFunction& fn, const IRModule& m) {
             bool has_raise = false;
             for (int b : loop_set) {
                 for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
-                    if (is_raising_op(in)) { has_raise = true; break; }
+                    if (opt_may_raise(in, nullptr)) { has_raise = true; break; }
                 if (has_raise) break;
             }
             if (has_raise) continue;

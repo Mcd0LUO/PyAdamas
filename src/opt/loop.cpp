@@ -263,6 +263,11 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
                numeric_ty(fn.vreg_ty[r]);
     };
     auto hoistable = [&](const Inst& in) {
+        // 可能抛异常的指令绝不外提：外提会把异常提前到循环之前，甚至让
+        // 「零次循环」也抛（0.676 前 float→int Convert 就漏在这里，-O2 与
+        // -O0 实测输出不同）。判据统一走 opt_may_raise（共享谓词），不再
+        // 在下面各 case 里零散维护。
+        if (opt_may_raise(in, &fn)) return false;
         if (in.dst == kNoReg) return false;
         switch (in.op) {
             case IrOp::ConstInt:
@@ -295,11 +300,8 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
                 TypePtr at = in.a < static_cast<VReg>(fn.vreg_ty.size())
                                  ? fn.vreg_ty[in.a]
                                  : nullptr;
-                // 0.676：**float → int 的转换不是纯指令**。codegen 对 cvttsd2si 的
-                // INT64_MIN 哨兵做检查，NaN / ±inf / 越界会抛 ValueError / OverflowError
-                // （backend/ops.cpp 的 convert 分支）。外提会把异常提前到循环之前、
-                // 甚至让「零次循环」也抛——实测 -O2 与 -O0 输出不同。
-                if (in.ty && in.ty->kind == TyKind::Int && at && ir_is_float(at)) return false;
+                // 可能抛异常的 float→int 已由函数开头的 opt_may_raise 拦掉，
+                // 这里只管「能外提的数值转换」。
                 return numeric_ty(in.ty) && numeric_ty(at) && operand_ok(in.a);
             }
             case IrOp::LoadSlot: {

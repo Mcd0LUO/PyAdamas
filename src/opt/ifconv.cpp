@@ -38,7 +38,12 @@ namespace optdetail {
 namespace {
 
 // then 块里允许出现的「确定性安全」指令：不抛异常、无副作用、不读可能非法的指针。
-bool ifconv_safe_inst(const Inst& in) {
+bool ifconv_safe_inst(const Inst& in, const IRFunction& fn) {
+    // then 块会被 if-conversion 改成**无条件执行**：原本不执行的路径上多抛一次
+    // 异常就是错值。可能抛异常的判据统一走共享谓词；这里能拿到 fn（操作数静态
+    // 类型），用精确口径 —— 只有真正的 float→int 转换会被拒，int→int/bool 目标
+    // 的转换照旧放行（与 0.676 行为一致）。
+    if (opt_may_raise(in, &fn)) return false;
     switch (in.op) {
         case IrOp::ConstInt:
         case IrOp::ConstFloat:
@@ -53,7 +58,8 @@ bool ifconv_safe_inst(const Inst& in) {
             // 只收整数、无除法/取模（bin_is_safe_int 已排除 Div/Mod/FloorDiv）。
             return in.ty && !ir_is_float(in.ty) && bin_is_safe_int(in.bop);
         case IrOp::Convert:
-            // 只收整数/布尔目标（float→int 截断也不抛，但保守只收 int/bool）。
+            // 可能抛的 float→int 已被上面的 opt_may_raise 拦掉（精确口径，看源类型）；
+            // 剩下 int→int / int→bool 这类不抛的转换照旧放行（与 0.676 一致）。
             return in.ty && (in.ty->kind == TyKind::Int || in.ty->kind == TyKind::Bool);
         default:
             return false;
@@ -143,7 +149,7 @@ bool if_convert_accumulators(IRFunction& fn) {
                 store_i = k;
                 continue;
             }
-            if (!ifconv_safe_inst(in)) { ok = false; break; }
+            if (!ifconv_safe_inst(in, fn)) { ok = false; break; }
         }
         if (!ok || store_i < 0) continue;
         // 唯一 store 必须在块尾（终止符前一条），否则后面还有指令要执行。
