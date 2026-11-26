@@ -53,6 +53,11 @@ struct ModuleInfo {
     // 0.543：跨模块导出的**用户** struct 定义（.cpya 的 c_struct 不导出）。
     // 导入方持有这些 StructInfo（拷贝），类型里的 Type::st 指向它们。
     std::map<std::string, std::shared_ptr<StructInfo>> structs;
+    // 0.644：跨模块类引用（tag 29）解析时，Type::cls 指向**别的模块**的
+    // ClassInfo。那个 ModuleInfo 目前由 Program 的 unit 持有，代价是一条没写
+    // 下来的隐含约定。这里显式持有解码期间取到的所有外部接口，保证
+    // Type::cls 的生命周期不依赖调用方。
+    std::vector<std::shared_ptr<ModuleInfo>> imported_refs;
 };
 
 // 11：类记录追加 is_exception_class / is_rich_exception / exc_parent。

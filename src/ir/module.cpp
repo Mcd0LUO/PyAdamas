@@ -1004,6 +1004,9 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(
             pc.ty->kind = TyKind::Class;
             pc.ty->cls = it->second.cls.get();
         }
+        // 显式持有解码期间加载的外部模块接口（0.644）。
+        for (auto& kv : d.loaded)
+            if (kv.second) info->imported_refs.push_back(kv.second);
         info->interface_hash = hex64(fnv1a64(bytes));
         return info;
     } catch (const std::exception& ex) {
