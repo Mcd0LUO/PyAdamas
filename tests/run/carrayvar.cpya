@@ -1,7 +1,8 @@
 cmodule("carrayvar")
 link("tests/run/carrayvar.c")
 
-# 数组变量：暴露符号地址（C 里数组名退化成 &arr[0]）
-arr_values: array[ptr, 3]
+# 数组变量：暴露符号地址（C 里数组名退化成 &arr[0]），元素宽度由 T 决定
+vals3: array[int32, 3]
+vals64: array[int, 3]
 
-def arr_addr() -> ptr: pass
+def vals_addr() -> ptr: pass

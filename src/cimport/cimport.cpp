@@ -661,7 +661,30 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                             is_array_var = true;
                     std::optional<CTypeRef> ct;
                     if (is_array_var) {
-                        ct = CTypeRef{CKind::Ptr};
+                        // array[T, N]：T 是元素类型（决定下标宽度），N 是元素个数（文档 + 校验）。
+                        CTypeRef at{CKind::Ptr};
+                        auto* sub = static_cast<const Subscript*>(aa.annotation.get());
+                        const Expr* elem_e = sub->slice.get();
+                        const Expr* dim_e = nullptr;
+                        if (auto* tup = dynamic_cast<const TupleExpr*>(elem_e)) {
+                            if (!tup->elts.empty()) elem_e = tup->elts[0].get();
+                            if (tup->elts.size() > 1) dim_e = tup->elts[1].get();
+                        }
+                        std::string ewhy;
+                        auto el = ctype_from_ast(elem_e, TypeCtx{&structs, nullptr}, ewhy);
+                        if (!el)
+                            pydecl::fail(aa.line,
+                                         std::format("'{}': array element type: {}", pyname, ewhy));
+                        at.elem = el->kind;
+                        at.stname = el->stname;
+                        if (dim_e) {
+                            auto* num = dynamic_cast<const Constant*>(dim_e);
+                            if (!num || num->ck != Constant::CK::Int || num->i < 1)
+                                pydecl::fail(aa.line,
+                                             std::format("'{}': array length must be a positive "
+                                                         "integer constant", pyname));
+                        }
+                        ct = at;
                     } else {
                         ct = ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
                         if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));

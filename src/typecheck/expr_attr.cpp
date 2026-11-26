@@ -21,7 +21,15 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                     if (StructInfo* st = struct_info(v.struct_name))
                         return mk_optional(mk_struct_ptr(st));
                 }
-                return ckind_type(v.kind);
+                // 0.563：ptr[T] 的变量要带上元素宽度（celem），否则 `p[i]` 没有下标语义。
+                // 与降低阶段的 cvar_type 同口径（原来只有那边设了 celem）。
+                TypePtr t = ckind_type(v.kind);
+                if (v.kind == CKind::Ptr && v.elem != CKind::None && t) {
+                    TypePtr nt = std::make_shared<Type>(*t);
+                    nt->celem = v.elem;
+                    return nt;
+                }
+                return t;
             }
             // 0.561：.cpya 里声明的 struct/union —— `sizeof(c.div_t)` 和
             // `p: c.pair` 都需要它能当类型值取到。

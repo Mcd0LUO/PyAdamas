@@ -392,8 +392,14 @@ TypePtr TypeChecker::narrow_isinstance(const TypePtr& t, const ClassInfo* cls, b
 TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
         auto non_none = [](const TypePtr& t) -> TypePtr {
             if (!t) return t;
-            if (t->kind == TyKind::Optional)
+            if (t->kind == TyKind::Optional) {
+                // 0.563：`ptr[T]` 的内部表示就是 Optional[int] + celem，收窄**不能**把它
+                // 拆成纯 int —— 否则 `p = c.malloc_f(16); if p is not None: p[0] = 1.0`
+                // 会报 "'int' object does not support item assignment"。指针形状原样保留，
+                // 运行期的 guard_not_none 仍然会检查。
+                if (t->celem != CKind::None || !t->cdims.empty()) return t;
                 return t->sub.empty() ? t_unknown() : t->sub[0];
+            }
             if (t->kind == TyKind::None) return t_unknown();  // 分支实际不可达
             return t;
         };
