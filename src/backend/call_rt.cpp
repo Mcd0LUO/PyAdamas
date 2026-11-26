@@ -193,6 +193,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeProcessTime:
         case RtFn::RegexPurge:
         case RtFn::OsEnviron:
+        case RtFn::PrintFlush:
         case RtFn::VtShutdown:
             gen_rt_none(in);
             break;

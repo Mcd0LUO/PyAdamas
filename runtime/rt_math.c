@@ -451,6 +451,7 @@ void pa_print_none(void) { fputs("None", stdout); }
 
 void pa_print_sep(void) { fputc(' ', stdout); }
 
+void pa_print_flush(void) { fflush(stdout); }
 void pa_print_end(void) { fputc('\n', stdout); }
 
 void pa_panic(PyAdamasStr* msg) {

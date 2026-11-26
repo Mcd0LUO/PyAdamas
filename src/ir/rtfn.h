@@ -690,6 +690,7 @@ enum class RtFn : uint16_t {
     BigFromU64,            // (u64) -> big*
     AnyToBig,              // (i64 unknown) -> big*  探针分派：big 原样/int 加宽/float 截断
     AnyBigBinary,          // (op, a, b, desc_a, desc_b) -> unknown
-    AnyInvert,             // (a, desc_a) -> unknown
+    AnyInvert,             // (a, desc_a) -> unknown,
+    PrintFlush,  // stdout 刷新（print(flush=True) 终端进度条）
 };
 #include "ir/rtfn_names.h"

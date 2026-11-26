@@ -285,6 +285,41 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             switch_to(end);
             return;
         }
+        case TyKind::U64: {
+            // 无符号：必须走 u64 转字符串，按有符号转会在大数上静默变负。
+            VReg s = call_runtime(RtFn::StrFromU64, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
+        case TyKind::Complex: {
+            VReg s = call_runtime(RtFn::ComplexStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
+        case TyKind::Big: {
+            VReg s = call_runtime(RtFn::BigStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
+        case TyKind::Exception: {
+            VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
+        case TyKind::Template: {
+            VReg s = call_runtime(RtFn::TemplateRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
+        case TyKind::DYLIB:
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()),
+                                         const_str("<dylib handle>")});
+            return;
         default: {
             VReg s = convert_to(v, ty, t_str());
             call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
@@ -414,7 +449,15 @@ void Lowerer::print_elem(VReg ev, TypePtr et, bool to_file, int line, int col) {
         // 容器用元素 repr）。原来落到 pa_print_any 的「str 原样输出」，
         // 于是 [1, "a"] 打成 [1, a]。
         if (to_file) {
-            print_value_to_file(ev, et, line, col);
+            // Unknown 元素：stdout 走 PrintAnyRepr（字符串带引号），文件侧必须同样用 repr，
+            // 否则 print([1, "a"], file=f) 会写成 [1, a]。
+            if (!et || et->kind == TyKind::Unknown) {
+                VReg s = call_runtime(RtFn::ReprAny, t_str(), {ev});
+                push_temp(s);
+                call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            } else {
+                print_value_to_file(ev, et, line, col);
+            }
         } else {
             call_void(RtFn::PrintAnyRepr, {ev});
         }
@@ -849,6 +892,16 @@ VReg Lowerer::lower_print(Call& c) {
         call_void(RtFn::PrintStr, {expr(*kw_end->value)});
     } else {
         call_void(RtFn::PrintEnd, {});
+    }
+    // stdout 的 flush：之前只在 file 分支处理，print(".", end="", flush=True) 会被行缓冲卡住。
+    if (file_slot < 0 && kw_flush) {
+        expr(*kw_flush->value);
+        bool skip = false;
+        if (kw_flush->value->kind == ExprKind::Constant) {
+            const auto& cc = static_cast<const Constant&>(*kw_flush->value);
+            if (cc.ck == Constant::CK::Bool && !cc.b) skip = true;
+        }
+        if (!skip) call_void(RtFn::PrintFlush, {});
     }
     print_file_slot_ = saved_file_slot;
     return const_none();

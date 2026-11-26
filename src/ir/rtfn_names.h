@@ -705,6 +705,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyToBig: return "pa_any_to_big";
         case RtFn::AnyBigBinary: return "pa_any_big_binary";
         case RtFn::AnyInvert: return "pa_any_invert";
+        case RtFn::PrintFlush: return "pa_print_flush";
     }
     return "?";
 }
