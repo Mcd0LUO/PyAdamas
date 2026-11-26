@@ -1,25 +1,18 @@
-# 默认参数支持常量表达式（0.547）：两侧都是字面量的二元运算在编译期折叠。
+# 0.580：模块级字面量常量当默认值（def f(a=_ONE)）编译期折叠
+_ONE = 1
+LIMIT = 10
+NAME = "x"
 
+def f(a: int = _ONE, b: int = LIMIT) -> int:
+    return a + b
 
-def scale(x: int = 2 ** 10) -> int:
-    return x
+def g(s: str = NAME) -> str:
+    return s
 
+def h(*, k: int = LIMIT) -> int:
+    return k
 
-def shift(x: int = 1 << 4, y: float = 1.5 * 2.0) -> float:
-    return x + y
-
-
-def label(tag: str = "a" + "b") -> str:
-    return tag
-
-
-def mixed(n: int = 7 % 3, m: int = 100 // 7) -> int:
-    return n + m
-
-
-print(scale(), scale(3))
-print(shift(), label(), mixed())
+print(f(), f(2, 3), g(), h(), h(k=7))
 
 # --- expect ---
-# 1024 3
-# 19.0 ab 15
+# 11 5 x 10 7

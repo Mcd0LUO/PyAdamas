@@ -203,8 +203,16 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             return lit_to_const(*info->pos[pos_index].default_lit);
         // 签名里的默认表达式优先：通过函数值 / lambda 调用时没有
         // FunctionDef 可查，只能靠 FuncInfo 带着的 AST 指针。
-        if (info && pos_index < info->pos.size() && info->pos[pos_index].default_expr)
-            return as_const(info->pos[pos_index].default_expr);
+        if (info && pos_index < info->pos.size() && info->pos[pos_index].default_expr) {
+            const Expr* de = info->pos[pos_index].default_expr;
+            if (auto cv = as_const(de)) return cv;
+            // 0.580：def f(a=_ONE) —— 模块级字面量常量编译期折叠
+            if (de && de->kind == ExprKind::Name) {
+                auto it = module_consts_.find(static_cast<const Name&>(*de).id);
+                if (it != module_consts_.end()) return it->second;
+            }
+            return std::nullopt;
+        }
         if (!defn) return std::nullopt;
         size_t nd = defn->args.defaults.size();
         if (pos_index + nd < npos) return std::nullopt;
@@ -271,8 +279,14 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         std::optional<ConstVal> cv;
         if (info && i < info->kwonly.size() && info->kwonly[i].default_lit)
             cv = lit_to_const(*info->kwonly[i].default_lit);
-        if (!cv && info && i < info->kwonly.size() && info->kwonly[i].default_expr)
-            cv = as_const(info->kwonly[i].default_expr);
+        if (!cv && info && i < info->kwonly.size() && info->kwonly[i].default_expr) {
+            const Expr* de = info->kwonly[i].default_expr;
+            cv = as_const(de);
+            if (!cv && de && de->kind == ExprKind::Name) {
+                auto it = module_consts_.find(static_cast<const Name&>(*de).id);
+                if (it != module_consts_.end()) cv = it->second;
+            }
+        }
         if (!cv && defn && i < defn->args.kw_defaults.size() && defn->args.kw_defaults[i])
             cv = as_const(defn->args.kw_defaults[i].get());
         if (!cv) {

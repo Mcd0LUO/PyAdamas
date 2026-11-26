@@ -313,6 +313,8 @@ private:
     std::string file_;
     LowerOptions opts_;
     std::vector<LowerError> errors_;
+    // 0.580：模块级字面量常量（name → 值），用于折叠 Name/Attribute 默认值
+    std::unordered_map<std::string, ConstVal> module_consts_;
 
     std::vector<std::unique_ptr<FuncCtx>> frames_;
     FuncCtx* st_ = nullptr;

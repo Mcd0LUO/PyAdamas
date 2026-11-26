@@ -305,6 +305,14 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
 // ────────────────────────── 入口 ──────────────────────────
 
 void Lowerer::run(Module& ast) {
+    // 0.580：先收集模块级字面量常量，默认值折叠要用（def f(a=_ONE)）。
+    for (auto& st : ast.body) {
+        if (st->kind != StmtKind::Assign) continue;
+        auto& as = static_cast<Assign&>(*st);
+        if (as.targets.size() != 1 || as.targets[0]->kind != ExprKind::Name) continue;
+        if (auto cv = as_const(as.value.get()))
+            module_consts_[static_cast<Name&>(*as.targets[0]).id] = *cv;
+    }
     mod_.module_symbol = opts_.module_symbol;
     mod_.runtime_name = opts_.runtime_name;
     mod_.source_path = opts_.source_path.empty() ? file_ : opts_.source_path;
