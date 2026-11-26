@@ -584,6 +584,8 @@ static int cmd_frontend(const std::string& path, const std::string& src,
             if (!no_imports) {
                 std::vector<std::string> missing;
                 lookup = pyadamas::load_check_lookup(path, include_dirs, missing, resolve_imports);
+                // 0.665：依赖有语法/词法错时，check 不能报 ok —— 诊断已在加载时打印。
+                if (pyadamas::check_hard_errors() > 0) return 1;
             }
             auto fe = run_frontend(path, src, false, lookup, !lenient_names);
             if (!fe) return 1;

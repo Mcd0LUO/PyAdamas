@@ -112,6 +112,10 @@ std::string reject_message(const std::string& module, const std::string& name);
 // 返回一个 module_lookup 闭包给 TypeChecker。无法解析的依赖返回 nullptr
 // （调用方按 unknown 处理）。diagnostics 里收集真正解析失败的模块。
 using CheckLookup = std::function<ModuleInfoPtr(const std::string&)>;
+// 依赖侧**硬错误**计数（语法/词法错误）。0 表示所有依赖都至少能解析。
+// check 模式用它决定退出码：依赖都解析不了时，「ok」是假绿。
+int check_hard_errors();
+
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,
                                std::vector<std::string>& missing,

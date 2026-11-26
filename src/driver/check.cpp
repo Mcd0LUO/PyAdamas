@@ -30,6 +30,9 @@ namespace pyadamas {
 // nullptr（调用方按 unknown 处理），并把失败的模块名记进 missing。
 namespace {
 
+// 0.665：依赖侧硬错误（语法/词法）计数，供 main 决定 check 的退出码。
+int g_check_hard_errors = 0;
+
 struct CheckCtx {
     std::vector<std::string> include_dirs;
     std::map<std::string, pyadamas::ModuleInfoPtr> loaded;
@@ -237,6 +240,20 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
         }
         ctx.loading.erase(name);
         return info;
+    } catch (const pyadamas::ParseError& e) {
+        // 0.665：依赖的语法错以前被 catch(...) 吞成「模块缺失」，于是 check 报
+        // ok、build 才报错。这里显式打出来并计入硬错误，由 main 决定退出码。
+        ctx.loading.erase(name);
+        std::fprintf(stderr, "%s:%d:%d: error: %s\n", path.c_str(), e.line, e.col,
+                     e.what());
+        ++g_check_hard_errors;
+        return nullptr;
+    } catch (const pyadamas::LexError& e) {
+        ctx.loading.erase(name);
+        std::fprintf(stderr, "%s:%d:%d: error: %s\n", path.c_str(), e.line, e.col,
+                     e.what());
+        ++g_check_hard_errors;
+        return nullptr;
     } catch (...) {
         ctx.loading.erase(name);
         ctx.missing.push_back(name);
@@ -340,6 +357,8 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
 }
 
 }  // namespace
+
+int check_hard_errors() { return g_check_hard_errors; }
 
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,

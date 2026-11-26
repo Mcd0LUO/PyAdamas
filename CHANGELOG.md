@@ -6,6 +6,32 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.665] - 2026-11-27
+
+> fix(driver)：**依赖有语法/词法错误时，`check` 不再报 ok**（审计 A3-1，重做）。
+>
+> ```
+> # badep.py: def f(          ← 语法错
+> # usesbad.py: import badep
+>
+> 修前: $ pyadamas check usesbad.py
+>       ok: usesbad.py (2 statements, ...)        exit=0
+> 修后: $ pyadamas check usesbad.py
+>       /tmp/a3probe/badep.py:2:1: error: expected parameter name, found 'newline'
+>       exit=1
+> ```
+>
+> 根因：`check_load_file` 的 `catch (...)` 把 `ParseError`/`LexError` 一起吞成「模块缺失」，
+>于是 check 说 ok、build 才在编译到那个文件时炸。
+>
+> 这次的做法与 0.663 撤掉的那版**刻意不同**——只做这一件事，不碰同名不同文件、不碰槽冲突：
+>- `check.cpp` 单独 `catch (const ParseError&/LexError&)` → 打到原文件原行列 + 计数；
+>- `build.h` 暴露 `check_hard_errors()`，`main.cpp` 在加载 import 图后据此返回 1。
+>
+> 之所以重做而不是留着：这正是「静默放过」的典型——依赖都解析不了，主文件当然不可能编过。
+>
+> 四口径复测：syntax 626/626、default 507、old 509、**imports 173**（与改动前逐项相同），
+>说明这条修复没有把任何 stdlib 文件误伤。
 ## [0.664] - 2026-11-27
 
 > fix(typecheck)：**定义了 `__getattr__` 的类，未知属性不再误报**。
