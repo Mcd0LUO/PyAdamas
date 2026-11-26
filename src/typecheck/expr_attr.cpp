@@ -334,8 +334,19 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
             // 类接收者：`C.x` / `cls.x` / `mod.C.x` 只可能是类属性或方法，
             // 实例字段在类上不存在（同名时也不能被它挡住）。
             if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
-            if (const MethodInfo* m = ot->cls->method(a.attr))
+            if (const MethodInfo* m = ot->cls->method(a.attr)) {
+                // A8-5：在**类对象**上取实例方法的值（C.get / C2.get / mod.K.get）
+                // 一律用同一条诊断。以前本地要到降级层才报这句，而导入类因为接口
+                // 只带 call_sig（不含 self），会一直走到调用点才报
+                // 「function '<imported>' takes 0 positional arguments but 1 were given」
+                // —— 同一件事三种文案。静态/类方法不受影响（它们本来就能当值取）。
+                if (m->kind == MethodKind::Normal && !m->decorated)
+                    err(a.line, a.col,
+                        std::format("'{}.{}' is an instance method; take the value on an "
+                                    "instance",
+                                    ot->cls->name, a.attr));
                 return mk_method_value(*m, true);
+            }
             if (ot->cls->is_open()) return t_unknown();
             err(a.line, a.col,
                 std::format("class '{}' has no attribute '{}'", ot->cls->name,
