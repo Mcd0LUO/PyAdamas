@@ -1128,6 +1128,14 @@ static void cpy_repr(CpyBuf* b, int64_t v) {
         cb_ch(b, '}');
         return;
     }
+    /* BUG-3：容器里的类实例。以前落到 cb_i64 印裸指针。 */
+    if (h->kind == PYADAMAS_RC_INSTANCE) {
+        PyAdamasStr* s = pa_instance_str((void*)(uintptr_t)v, 1);
+        if (!s) s = pa_instance_default_str((void*)(uintptr_t)v);
+        cb_raw(b, s->data, (size_t)s->len);
+        pa_rc_dec(s);
+        return;
+    }
     cb_i64(b, v);
 }
 

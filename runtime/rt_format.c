@@ -905,6 +905,14 @@ void pa_print_any_repr(int64_t v) {
             pa_print_cpy_value(v);
             return;
         }
+        /* BUG-3：容器里 repr 语义的实例（__repr__ → <Name object>）。 */
+        if (h->kind == PYADAMAS_RC_INSTANCE) {
+            PyAdamasStr* s = pa_instance_str((void*)(uintptr_t)v, 1);
+            if (!s) s = pa_instance_default_str((void*)(uintptr_t)v);
+            pa_print_str(s);
+            pa_rc_dec(s);
+            return;
+        }
     }
     pa_print_i64(v);
 }

@@ -489,7 +489,7 @@ void TypeChecker::stmt_if(If& f) {
             restore_types();
             expr(*b.cond);
             auto ns = narrow_all(*b.cond, true);
-            stmts(b.body);
+            stmts_block(b.body);
             // 先合并再恢复窄化（0.498）：`if x is None: x = 0` 之后，分支末尾的
             // 类型是 int（赋值 + 窄化），恢复在前会让 merge 又看到 Optional，
             // 合并结果退回归声明类型，下一步 `x + 1` 就误报 may be None。
@@ -504,7 +504,7 @@ void TypeChecker::stmt_if(If& f) {
         // `if x is None: x = 0` 之后没有 else，但走到下一句时条件必为假，
         // x 就是非 None；漏了这条，分支合并会把 Optional 又并回来。
         if (f.branches.size() == 1) ns = narrow_all(*f.branches[0].cond, false);
-        stmts(f.orelse);
+        stmts_block(f.orelse);
         merge_in();
         for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         // 写回：类型取各分支上界，分支里新出现的名字保留
@@ -528,10 +528,10 @@ void TypeChecker::stmt_while(While& w) {
         // 循环体内条件必为真（0.498）：`while cur is not None: cur = cur.next`
         // 里 cur 在体内是非 None。退出后不做反向窄化（循环可能零次执行）。
         auto ns = narrow_all(*w.cond, true);
-        stmts(w.body);
+        stmts_block(w.body);
         for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         --loop_depth_;
-        stmts(w.orelse);
+        stmts_block(w.orelse);
         return;
     }
 
@@ -635,14 +635,14 @@ void TypeChecker::stmt_for(For& f) {
             sit->second.ty = b.body;
         }
         ++loop_depth_;
-        stmts(f.body);
+        stmts_block(f.body);
         --loop_depth_;
         for (auto& b : binds) {
             auto sit = b.sc->vars.find(b.name);
             if (sit == b.sc->vars.end() || sit->second.annotated) continue;
             sit->second.ty = join(b.exit, sit->second.ty);
         }
-        stmts(f.orelse);
+        stmts_block(f.orelse);
         return;
     }
 
@@ -652,7 +652,7 @@ void TypeChecker::stmt_try(Try& t) {
         // 不做这个回滚，`v = int(v)` 之后的 `except: v.replace(...)`
         // 会被当成 int 调 str 方法。
         auto snapshot = cur_->vars;
-        stmts(t.body);
+        stmts_block(t.body);
         for (auto& h : t.handlers) {
             if (h.type) expr(*h.type);
             for (auto& [name, sym] : cur_->vars) {
@@ -705,7 +705,7 @@ void TypeChecker::stmt_try(Try& t) {
                 cur_ = sc.get();
                 pool_.push_back(std::move(sc));
                 cur_->vars[h.name] = Symbol{et, t.line, false, false};
-                stmts(h.body);
+                stmts_block(h.body);
                 // Python 是**函数级作用域**：handler 体里绑定的名字（除 as e 外）
                 // 属于函数作用域，必须回写到父作用域。只建临时作用域放 e 会让
                 // `x = str(e)` 在子作用域里造一个同名新符号，外层 x 保持旧类型；
@@ -721,11 +721,11 @@ void TypeChecker::stmt_try(Try& t) {
                 }
                 cur_ = cur_->parent;
             } else {
-                stmts(h.body);
+                stmts_block(h.body);
             }
         }
-        stmts(t.orelse);
-        stmts(t.finalbody);
+        stmts_block(t.orelse);
+        stmts_block(t.finalbody);
         return;
     }
 
@@ -791,7 +791,7 @@ void TypeChecker::stmt_with(With& w) {
             if (item.optional_vars)
                 assign(*item.optional_vars, vt, w.line, w.col);
         }
-        stmts(w.body);
+        stmts_block(w.body);
         return;
     }
 

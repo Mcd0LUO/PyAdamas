@@ -2045,6 +2045,15 @@ void pa_print_any(int64_t v) {
             pa_rc_dec(s);
             return;
         }
+        /* BUG-3：类实例走 str 语义（__str__ → __repr__ → <Name object>）。
+           以前 unknown 槽里的实例落到下面按机器字印指针。 */
+        if (h->kind == PYADAMAS_RC_INSTANCE) {
+            PyAdamasStr* s = pa_instance_str((void*)(uintptr_t)v, 0);
+            if (!s) s = pa_instance_default_str((void*)(uintptr_t)v);
+            pa_print_str(s);
+            pa_rc_dec(s);
+            return;
+        }
     }
     pa_print_i64(v);
 }

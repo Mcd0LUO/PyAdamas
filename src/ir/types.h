@@ -347,6 +347,11 @@ struct IRClass {
     int del_slot = -1;
     int lt_slot = -1;
     int hash_slot = -1;
+    // BUG-3：__str__ / __repr__ 的槽号（-1 = 没有可用实现）。unknown 域的
+    // print / repr 拿不到静态类型，只能运行期按这张表分派到用户实现的
+    // __str__/__repr__；没有实现时退回 <Name object> 形状。
+    int str_slot = -1;
+    int repr_slot = -1;
 };
 
 // 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：

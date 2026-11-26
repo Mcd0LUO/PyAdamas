@@ -155,6 +155,16 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
         case PYADAMAS_RC_JSONBOOL:
             ar_cstr(b, *(int64_t*)(uintptr_t)v ? "True" : "False");
             return;
+        /* BUG-3：类实例（异构容器里的元素）。以前落到 default 按机器字印
+           指针 —— 调试时看到一串数字。这里按 repr 语义调用户实现的
+           __repr__；没有实现退回 <Name object>（与静态路径同形）。 */
+        case PYADAMAS_RC_INSTANCE: {
+            PyAdamasStr* s = pa_instance_str((void*)(uintptr_t)v, 1);
+            if (!s) s = pa_instance_default_str((void*)(uintptr_t)v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
         default: {
             /* P4（lang_gaps）：类对象（异常类当值）→ <class '...'>。
                门控关时类对象值不存在，探针不会命中魔数。 */

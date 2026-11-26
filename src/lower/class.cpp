@@ -377,6 +377,24 @@ void Lowerer::lower_classdef(ClassDef& c) {
         mod_.classes[cid].lt_slot = slot_of("__lt__");
         mod_.classes[cid].hash_slot = slot_of("__hash__");
         mod_.classes[cid].del_slot = slot_of("__del__");
+        // BUG-3：unknown 域的 print/repr 要在运行期调用户实现的
+        // __str__/__repr__。只登记「零参普通方法 + 返回 str」的（与
+        // dunder_str → dunder_call(want_ret=str) 同一口径）：别的签名
+        // 按 str 指针解释返回值会读错。
+        auto slot_of_text = [&](const char* name) -> int {
+            const MethodInfo* m = ci->method(name);
+            if (!m || m->kind != MethodKind::Normal || m->decorated) return -1;
+            if (!m->call_sig || m->call_sig->varargs || m->call_sig->kwargs) return -1;
+            if (!m->call_sig->pos.empty() || !m->call_sig->kwonly.empty()) return -1;
+            TypePtr rt = m->call_sig->ret;
+            if (!rt || rt->kind != TyKind::Str) return -1;
+            int s = m->slot;
+            bool has = s >= 0 && s < static_cast<int>(vt.size()) && vt[s] >= 0;
+            if (!has && s >= 0 && s < static_cast<int>(ve.size()) && !ve[s].empty()) has = true;
+            return has ? s : -1;
+        };
+        mod_.classes[cid].str_slot = slot_of_text("__str__");
+        mod_.classes[cid].repr_slot = slot_of_text("__repr__");
     }
 
     // P4（lang_gaps）：把本类声明的普通方法按「限定名.方法名→槽」登记进
