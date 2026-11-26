@@ -66,6 +66,9 @@ bool Lowerer::reject_suspend_in_close() {
                        : st_->is_coroutine     ? "coroutine ignored GeneratorExit"
                                                : "generator ignored GeneratorExit";
     call_void(RtFn::Raise, {const_str("RuntimeError"), const_str(what)});
+    // Raise 是 noreturn：必须给当前块收尾，否则 finally 体里排在后面的语句
+    // 会继续追加到 Raise 之后，形成一段永远执行不到的死指令。
+    end_unreachable();
     return true;
 }
 
@@ -232,7 +235,32 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
         return load_slot(ev_slot, et);
     }
 
-    if (!is_seq(vt)) {
+    // 与 lower_for_seq 同口径的归一化（0.615）：range / deque / bytes 先物化成
+    // list 再走下标迭代；用户类先调 __iter__，拿回来的类型再判一次。
+    // 原来这里只认 List/Tuple/Str/Dict/Set，`yield from range(n)` 直接报错。
+    if (vt && (vt->kind == TyKind::Range || vt->kind == TyKind::Deque ||
+               vt->kind == TyKind::Bytes)) {
+        RtFn conv = vt->kind == TyKind::Range    ? RtFn::RangeToList
+                    : vt->kind == TyKind::Deque  ? RtFn::DequeToList
+                                                 : RtFn::BytesToList;
+        TypePtr lty = mk_list(vt->kind == TyKind::Bytes ? t_int() : t_unknown());
+        VReg xs = call_runtime(conv, lty, {sub});
+        push_temp(xs);
+        sub = xs;
+        vt = lty;
+    }
+    if (vt && vt->kind == TyKind::Class) {
+        VReg it = dunder_call(sub, vt, "__iter__", {}, nullptr);
+        if (it != kNoReg) {
+            sub = it;
+            vt = vreg_ty(it);
+        }
+    }
+    if (!is_seq(vt) && vt && (vt->kind == TyKind::List || vt->kind == TyKind::Tuple ||
+                              vt->kind == TyKind::Str || vt->kind == TyKind::Dict ||
+                              vt->kind == TyKind::Set)) {
+        // 归一化后已经是可迭代序列：继续走下面的下标路径。
+    } else if (!is_seq(vt)) {
         err(y.value->line, y.value->col,
             std::format("cannot 'yield from' '{}'", type_name(vt)));
         return result;
@@ -512,12 +540,25 @@ void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
     int end = new_block("for.gen.end");
     int orelse = f.orelse.empty() ? end : new_block("for.gen.else");
 
+    // 每轮清理（0.615）：GenNextOpt 取出的元素会 push_temp，循环体里的临时值
+    // 也一样。没有 mark 的话这些引用一直堆到整条 for 结束——实测 200 万轮
+    // yield 40 字节字符串时峰值 RSS 341MB（≈170 字节/轮）。
+    int loop_mark_block = -1;
+    size_t loop_mark_pos = 0;
+    VReg loop_mark = st_->is_generator ? kNoReg : rc_mark_at(loop_mark_block, loop_mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(loop_mark);
+    };
+
     Inst j;
     j.op = IrOp::Jump;
     j.target = cond;
     emit(std::move(j));
 
     switch_to(cond);
+    // 先清上一轮（本轮的 ev 还没产生，清在这里才不会误释放）。
+    clean();
     Inst sa;
     sa.op = IrOp::SlotAddr;
     sa.idx = ok_slot;
@@ -554,6 +595,7 @@ void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
     }
 
     switch_to(orelse);
+    clean();  // 最后一轮的临时值
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {

@@ -597,6 +597,17 @@ TypePtr TypeChecker::expr(Expr& e) {
                         case TyKind::Str:
                             elem = t_str();
                             break;
+                        // 0.615：bytes / deque / 用户类（__iter__）也允许 yield from，
+                        // 降级层先物化成 list（或调 __iter__）再按下标迭代。
+                        case TyKind::Bytes:
+                            elem = t_int();
+                            break;
+                        case TyKind::Deque:
+                            elem = vt->sub.empty() ? t_unknown() : vt->sub[0];
+                            break;
+                        case TyKind::Class:
+                            elem = t_unknown();
+                            break;
                         case TyKind::AsyncGenerator:
                             err(e.line, e.col,
                                 "cannot 'yield from' an async generator; use 'async for'");
