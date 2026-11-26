@@ -6,6 +6,41 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.653] - 2026-11-27
+
+> fix(iface)：**类属性进接口**，跨模块 `mod.C.X` / 实例 `c.X` 可读（审计 A8-3）。
+>
+> ```python
+> # kattr.py
+> class C:
+>     LIMIT: int = 42      # 无标注 = 类属性（带标注的是字段，见 0.647）
+>     NAME: str = "hi"
+>
+> # main.py
+> import kattr
+> print(kattr.C.LIMIT)    # 修前：error: class 'C' has no attribute 'LIMIT'
+> print(kattr.C.NAME)     # 修后：42 / hi
+> ```
+>
+> 改动链条（5 个文件，运行期没动）：
+>
+> 1. `ClassAttrInfo` 增加 `external_symbol`（定义模块里那个隐藏全局的符号名）与 `writable`；
+> 2. `build.cpp` / `check.cpp` 的扁平类导出按 C3 MRO 收集 `class_attrs`（同名方法不导出成类属性），
+>    符号用 `module_global_symbol(声明模块, "__pa_cattr_<类>_<属性>")`；
+> 3. 接口在 `match_args` 之后加段（name/type/writable/symbol），`kModuleFormatVersion 18 → 19`；
+> 4. `lower/class.cpp` 新增 `class_attr_decl_slot()`：带 `external_symbol` 的走 `extern_global()`，
+>    引用定义模块的全局——原来无条件按本模块分配，导入方读到自己那份空槽（`0` / 空串）；
+> 5. 类对象上的类属性**写**（`mod.C.X = v`）给出明确诊断：
+>    `class attribute 'Base.X' of an imported class is read-only across modules`。
+>
+> A8-1 没有被放回去：带标注的 `LIMIT: int = 42` 仍是字段，`mod.C.LIMIT` 仍报错。
+>
+> 新夹具 `tests/modules/class_attr_xmod`：类对象读、实例读、from-import、继承来的类属性、
+>定义模块 bump 后导入方读到新值。套件 **596**。
+>
+> 已知残余（edgefix 实测）：本地子类覆盖**导入基类**的类属性时，基类方法里 `self.X` 仍读基类那份
+>（`ncow.D().gx()` 给 11，CPython 给 5）。机制是基类方法在定义模块编译，看不到跨模块子类；
+>要修需要运行期按类号查属性，属新机制，未做。
 ## [0.652] - 2026-11-27
 
 > perf(async)：**就绪队列 pop 从 O(n) 改 O(1)** —— 协程基准 `1.61 s → 0.18 s`（8.9×）。
