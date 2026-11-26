@@ -91,6 +91,10 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 # 生成物一致性：rtfn_names.h 由 src/ir/rtfn.def 生成，漂移就地拦住。
+if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check-enum >/dev/null 2>&1; then
+    echo "结果：src/ir/rtfn.h 的枚举与 src/ir/rtfn.def 不一致（顺序必须完全一致）。"
+    exit 1
+fi
 if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check >/dev/null 2>&1; then
     echo "结果：src/ir/rtfn_names.h 与 src/ir/rtfn.def 不一致（运行 tools/gen_rtfn.py 重新生成）。"
     exit 1

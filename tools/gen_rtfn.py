@@ -37,8 +37,45 @@ def render(entries):
     return chr(10).join(out) + chr(10)
 
 
+
+
+def enum_names():
+    """解析 src/ir/rtfn.h 的枚举成员（一行可能多个，注释去掉）。"""
+    text = (ROOT / 'src/ir/rtfn.h').read_text(encoding='utf-8')
+    m = re.search(r'enum class RtFn : uint16_t \{(.*?)\n\};', text, re.S)
+    assert m, 'rtfn.h 里找不到 enum class RtFn'
+    body = m.group(1)
+    body = re.sub(r'//[^\n]*', '', body)
+    names = []
+    for item in body.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        mm = re.match(r'^([A-Z][A-Za-z0-9]*)$', item)
+        assert mm, '无法解析的枚举项: ' + item
+        names.append(mm.group(1))
+    return names
+
+
+def check_enum():
+    """枚举顺序必须与 rtfn.def 完全一致：名字表按枚举值索引，错位即静默错名。"""
+    want = [n for n, _ in load()]
+    have = enum_names()
+    if want != have:
+        print('rtfn.h 与 rtfn.def 不一致：', file=sys.stderr)
+        for i, (a, b) in enumerate(zip(want, have)):
+            if a != b:
+                print('  第 ' + str(i) + ' 项：def=' + a + ' enum=' + b, file=sys.stderr)
+                break
+        print('  def ' + str(len(want)) + ' 项，enum ' + str(len(have)) + ' 项', file=sys.stderr)
+        return 1
+    print('rtfn.h 与 rtfn.def 一致（' + str(len(want)) + ' 项）')
+    return 0
+
 def main():
     text = render(load())
+    if '--check-enum' in sys.argv:
+        return check_enum()
     if '--check' in sys.argv:
         cur = OUT.read_text(encoding='utf-8') if OUT.exists() else ''
         if cur != text:
