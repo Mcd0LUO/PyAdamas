@@ -51,13 +51,19 @@ void Lowerer::stmt(Stmt& s) {
                     else if (auto* ra = dynamic_cast<Attribute*>(at.value.get()))
                         if (auto* bn = dynamic_cast<Name*>(ra->value.get()))
                             recv_key = bn->id + "." + ra->attr;
-                    if (recv_key.empty()) break;
-                    FuncCtx::BmBinding b;
-                    b.at = &at;
-                    b.recv = recv_key;
-                    b.version = st_->name_version[recv_key];
-                    st_->bm_names[tn->id] = b;
-                    break;
+                    // 接收者既不是名字也不是 x.y（例如 f = get().method）：既然
+                    // 认不出用于版本比对的接收者，就**不要**走 B1-min，退回普通赋值。
+                    // 这里原来是 break —— 会直接跳出外层 switch，把整个赋值语句
+                    // （包括接收者求值的副作用和 f 的写入）一并吞掉。
+                    bool bm_ok = !recv_key.empty();
+                    if (bm_ok) {
+                        FuncCtx::BmBinding b;
+                        b.at = &at;
+                        b.recv = recv_key;
+                        b.version = st_->name_version[recv_key];
+                        st_->bm_names[tn->id] = b;
+                        break;
+                    }
                 }
             }
             if (a.targets.size() == 1)
