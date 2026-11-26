@@ -22,8 +22,8 @@
 | [zero-cost-exceptions.md](zero-cost-exceptions.md) | 零开销异常怎么做？LSDA / personality 的实测格式与 Z1-Z5 路线 | `runtime/rt_personality.c` `tests/exc/` `tools/lsda_ref/` |
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower/exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
-| [mem-rc-header.md](mem-rc-header.md) | RC 头 64 字节花在哪？能压到多少？（**测量与评估，未实现**） | `runtime/rt_internal.h` `src/backend/codegen.cpp` |
-| [exc-path-performance.md](exc-path-performance.md) | 抛出路径为什么比 setjmp 慢 7×？profile 与三个可选方向（**只有测量，未实现**） | `runtime/rt_personality.c` `runtime/rt_eh.c` |
+| [mem-rc-header.md](mem-rc-header.md) | RC 头 64 字节花在哪？为什么**不能**单做 48 字节？（评估，未实现） | `runtime/rt_internal.h` `src/backend/codegen.cpp` |
+| [exc-path-performance.md](exc-path-performance.md) | 抛出路径为什么比 setjmp 慢 7×？B 与分配侧**均已证否**，A 的施工图 | `runtime/rt_personality.c` `runtime/rt_eh.c` |
 | [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？第三层 / 块级分裂为什么被判负？全局提升为何最终以「入口私有标量全局」落地？ | `src/backend/regalloc.cpp` |
 | [experiment-switches.md](experiment-switches.md) | **实验开关结账表**：每个开关的默认值、结论（默认开/保持 opt-in/删代码）、证据与触发条件；A/B 工具 `tools/flagbench.sh` 的用法 | `src/main.cpp`、`runtime/rt_core.c` |
 | [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：当前 5/12 命中（含 masked）、7 个 0 触发基准各自的第一道拒绝门（IR 证据）与逐条判负 | `backend/vect*.cpp`、`backend/masked.cpp`、`src/opt/vect_planner_loop.cpp` |
