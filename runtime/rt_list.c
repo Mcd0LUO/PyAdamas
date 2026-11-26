@@ -169,9 +169,22 @@ void list_gc_release(void* p) {
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     if (cap < 0) panic_c("negative list capacity");
     if (elem_kind < 0 || elem_kind > 3) panic_c("invalid list element kind");
-    if (cap < 4) cap = 4;
+    // 按**请求容量**（而不是归一化后的 cap）选内联块大小：
+    //   req 1..4 -> 4 槽块（144B）：编译期已知元素数的列表字面量，
+    //               通常就停在这个规模（[i] 之后 append 一两个也装得下）；
+    //   req 0    -> 8 槽块：空列表，常见于 append 构建（fannkuch 每轮
+    //               temp = [] 再 append 8 个），4 槽会多一次增长+拷贝；
+    //   req 5..8 -> 8 槽块。
     PyAdamasList* l;
-    if (cap <= PYADAMAS_LIST_INLINE_CAP) {
+    if (cap >= 1 && cap <= PYADAMAS_LIST_INLINE4_CAP) {
+        // 合并分配：头 + 4 元素缓冲一次池操作（144B 块）
+        l = (PyAdamasList*)rc_alloc_ex((int64_t)sizeof(PyAdamasList), list_destroy,
+                                       list_gc_release, PYADAMAS_RC_LIST,
+                                       PYADAMAS_LIST_INLINE4_BYTES);
+        l->cap = PYADAMAS_LIST_INLINE4_CAP;
+        l->data = list_inline_at(l);
+    } else if (cap <= PYADAMAS_LIST_INLINE_CAP) {
+        // cap == 0（空列表，append 构建的热路径）或 5..8：8 槽块。
         // 合并分配：头 + 8 元素缓冲一次池操作（原来 list_pool_get +
         // list_buf_get 两次）。queue_sim 每步建/销各一个列表，这是热路径。
         l = (PyAdamasList*)rc_alloc_ex((int64_t)sizeof(PyAdamasList), list_destroy,

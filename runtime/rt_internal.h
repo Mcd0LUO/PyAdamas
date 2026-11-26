@@ -286,13 +286,23 @@ typedef struct {
     int64_t bits_cap;      /* heap_bits 的字数（cap 会被缓冲池抬高，不能复用） */
 } PyAdamasList;
 
-/* 小列表合并分配：容量 <= 8 元素的列表，data 缓冲直接内联在
-   「RC 头 + PyAdamasList」同一个 malloc 块的尾部（rt_core.c 的
-   list_inline_pool），建/销各省一次池操作。内联缓冲是块内指针，
-   **不能 realloc / free**：增长走 list_buf_grow 换外部块，销毁时
-   按 data 是否等于 list_inline_at(l) 判断。 */
+/* 小列表合并分配：data 缓冲直接内联在「RC 头 + PyAdamasList」同一个
+   malloc 块尾部（rt_core.c 的 list_inline_pool / list_inline4_pool），
+   建/销各省一次池操作。内联缓冲是块内指针，**不能 realloc / free**：
+   增长走 list_buf_grow 换外部块，销毁时按 data 是否等于 list_inline_at(l) 判断。
+
+   两种块（按 pa_list_new 的**请求容量**选，不是按最终长度）：
+     - 8 槽块（64+48+64 = 176B）：请求容量 0（空列表，常见于 append
+       构建，留足增长余量：fannkuch 每轮 `temp = []` 再 append 8 个）、
+       5..8；元组/定长填充列表也用它（codegen 的内联快路径认这个布局）；
+     - 4 槽块（64+48+32 = 144B）：请求容量 1..4 的**列表字面量**
+       （`[i]`、`[a,b,c]`），编译期已知元素数通常就停在这个规模。
+       用途是省内存：200K 个 2 元素列表的 gcbench cycles 场景每块省
+       32B（glibc chunk 192 -> 160），RSS 47.8MB -> 41.4MB。 */
 #define PYADAMAS_LIST_INLINE_CAP 8
 #define PYADAMAS_LIST_INLINE_BYTES ((int64_t)PYADAMAS_LIST_INLINE_CAP * (int64_t)sizeof(int64_t))
+#define PYADAMAS_LIST_INLINE4_CAP 4
+#define PYADAMAS_LIST_INLINE4_BYTES ((int64_t)PYADAMAS_LIST_INLINE4_CAP * (int64_t)sizeof(int64_t))
 static inline int64_t* list_inline_at(PyAdamasList* l) { return (int64_t*)(l + 1); }
 
 /* range 是惰性对象：只存边界，元素按需算。和 CPython 的 range 一样，
