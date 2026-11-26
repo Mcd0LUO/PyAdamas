@@ -21,6 +21,22 @@ VReg Lowerer::lower_go(Expr& e) {
         err(e.line, e.col, "go expects a user-defined function with a known signature");
         return const_none();
     }
+    // 防御：类型检查已经拦过一遍，这里再挡一次——下面按下标取 fn->kwonly
+    // 的元素，一旦实参个数和形参对不上就会越界。
+    if (fn->varargs || fn->kwargs) {
+        err(e.line, e.col, "go does not support functions with *args/**kwargs yet");
+        return const_none();
+    }
+    if (!call->keywords.empty()) {
+        err(e.line, e.col, "go does not support keyword arguments yet");
+        return const_none();
+    }
+    if (call->args.size() != fn->pos.size() + fn->kwonly.size()) {
+        err(e.line, e.col,
+            std::format("go requires all {} arguments explicitly",
+                        fn->pos.size() + fn->kwonly.size()));
+        return const_none();
+    }
     // 求值顺序与普通调用一致：先 f，再从左到右实参。
     VReg fnv = expr(*call->func);
     std::vector<VReg> vals;
@@ -137,7 +153,13 @@ VReg Lowerer::lower_builtin_vthread(const std::string& name, Call& c) {
         if (tn == "int" || tn == "bool") { kind = 0; elem = t_int(); }
         else if (tn == "float") { kind = 0; elem = t_float(); }
         else if (tn == "str") { kind = 1; elem = t_str(); }
-        else { kind = 2; elem = t_unknown(); }
+        else if (tn == "unknown") { kind = 2; elem = t_unknown(); }
+        else {
+            // 类型检查已经拦过；这里再挡一次，避免将来放宽后静默降级成 unknown
+            // （那样 ch.send 的类型检查和 ch.recv 的静态类型会一起消失）。
+            err(c.line, c.col, "make_chan() element type must be int/float/str/unknown");
+            return const_none();
+        }
         VReg cap = expr(*c.args[1]);
         Inst in;
         in.op = IrOp::CallRt;
