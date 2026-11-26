@@ -225,9 +225,14 @@ ExprPtr Parser::parse_primary() {
                         auto gen = std::make_unique<GeneratorExp>();
                         gen->line = cur().line;
                         gen->col = cur().col;
+                        // 与括号形式同口径：单实参调用里也要置位，否则
+                        // f(x async for x in y) / f(await x for x in y) 会被
+                        // 误判成「在同步函数里用异步」而拒绝（0.639）。
+                        ++genexp_depth_;
                         gen->elt = parse_namedexpr();
                         while (check(Tok::KW_FOR) || check(Tok::KW_ASYNC))
                             gen->generators.push_back(parse_comp_for());
+                        --genexp_depth_;
                         n->args.push_back(std::move(gen));
                     } else {
                         while (true) {
@@ -549,10 +554,11 @@ ExprPtr Parser::parse_paren() {
         // 生成器表达式
         if (looks_like_genexp()) {
             auto gen = node_at<GeneratorExp>(ln, cl);
-            gen->elt = parse_namedexpr();
-            // async for 在生成器表达式里任何位置都合法（PEP 530，3.7 起）：
-            // 生成器体是延迟求值的，不需要当前就在协程里
+            // async for / await 在生成器表达式里任何位置都合法（PEP 530）：
+            // 生成器体是延迟求值的，不需要当前就在协程里。**必须**在解析
+            // 元素表达式之前就置位——(await f(x) for x in xs) 的 await 在 elt 里。
             ++genexp_depth_;
+            gen->elt = parse_namedexpr();
             while (check(Tok::KW_FOR) || check(Tok::KW_ASYNC))
                 gen->generators.push_back(parse_comp_for());
             --genexp_depth_;
@@ -797,6 +803,14 @@ std::unique_ptr<JoinedStr> Parser::parse_fstring(const Token& tok) {
                     i += triple_q ? 3 : 1;
                     continue;
                 }
+                // PEP 701：f-string 表达式里允许 # 注释（到行尾）。
+                // 不跳过的话注释里出现的 } / : / 单引号会让扫描器提前截断。
+                // 只有**表达式部分**的 # 才是注释：格式说明符里的 # 是
+                // 合法标志位（f"{x:#_b}" 的二进制前缀），不能吃掉。
+                if (ch == '#' && spec_pos == std::string::npos) {
+                    while (i < s.size() && s[i] != '\n') ++i;
+                    continue;
+                }
                 if (ch == '(' || ch == '[' || ch == '{') { ++depth; ++i; continue; }
                 if (ch == ')' || ch == ']') { --depth; ++i; continue; }
                 if (ch == '}') {
@@ -855,7 +869,10 @@ std::unique_ptr<JoinedStr> Parser::parse_fstring(const Token& tok) {
             fv->line = tok.line;
             fv->col = tok.col;
             fv->expr_src = expr_src;  // t-string 的 Interpolation.expression
-            if (self_doc) fv->conversion = 'r';
+            // 0.639：只有**没有格式说明符**时才默认 !r。f"{x=:.1f}" 必须对原始值
+            // 应用 :.1f；先转 repr 会变成「对字符串套数值格式」（实测
+            // ValueError: Invalid format specifier for str）。
+            if (self_doc && spec_pos == std::string::npos) fv->conversion = 'r';
 
             // 解析内嵌表达式：重新走一遍 lex + parse。
             // 外面套一层括号：三引号 f-string 的表达式可以跨行
