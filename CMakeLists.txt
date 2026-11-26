@@ -81,10 +81,10 @@ set(PYADAMAS_SOURCES
   src/lower/stmt_async.cpp
   src/lower/stmt_assign.cpp
   src/lower/exc.cpp
-  src/lower/import.cpp
-  src/lower/import_native.cpp
-  src/lower/import_stdlib.cpp
-  src/lower/import_misc.cpp
+  src/lower/module/import.cpp
+  src/lower/module/import_native.cpp
+  src/lower/module/import_stdlib.cpp
+  src/lower/module/import_misc.cpp
   src/lower/vthread.cpp
   src/lower/cpy.cpp
   src/lower/match.cpp
@@ -97,18 +97,18 @@ set(PYADAMAS_SOURCES
   src/lower/call.cpp
   src/lower/call_asyncio.cpp
   src/lower/c_lazy.cpp
-  src/lower/builtin.cpp
-  src/lower/builtin_reflect.cpp
-  src/lower/builtin_seq.cpp
-  src/lower/builtin_container.cpp
-  src/lower/builtin_text.cpp
-  src/lower/builtin_misc.cpp
+  src/lower/builtin/builtin.cpp
+  src/lower/builtin/builtin_reflect.cpp
+  src/lower/builtin/builtin_seq.cpp
+  src/lower/builtin/builtin_container.cpp
+  src/lower/builtin/builtin_text.cpp
+  src/lower/builtin/builtin_misc.cpp
   src/lower/aggregate.cpp
-  src/lower/method.cpp
-  src/lower/method_native.cpp
-  src/lower/method_containers.cpp
-  src/lower/method_str.cpp
-  src/lower/method_misc.cpp
+  src/lower/method/method.cpp
+  src/lower/method/method_native.cpp
+  src/lower/method/method_containers.cpp
+  src/lower/method/method_str.cpp
+  src/lower/method/method_misc.cpp
   src/lower/print.cpp
   src/lower/gen.cpp
   src/lower/gen_async.cpp

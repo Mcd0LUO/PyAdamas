@@ -105,8 +105,37 @@ def check_groups():
     print('rtfn.def 编组与 call_rt.cpp 一致（' + str(len(pairs)) + ' 项）')
     return 0
 
+
+
+def check_runtime():
+    """每个 .def 符号都必须在 runtime/ 里有一份定义；反之 runtime 里的 pa_* 也应在 .def 中。
+
+    编译器按符号名直接调用运行时函数，名字错了只有链接期才会暴露（而且是未定义符号），
+    这条检查把问题提前到闸门。"""
+    import pathlib
+    rt = ROOT / 'runtime'
+    defined = set()
+    for f in rt.glob('*.c'):
+        text = f.read_text(encoding='utf-8', errors='ignore')
+        for m in re.finditer(r'^[A-Za-z_][\w \*]*\b(pa_[a-z0-9_]+)\s*\(', text, re.M):
+            defined.add(m.group(1))
+    want = {sym for _n, sym, _g in load()}
+    missing = sorted(want - defined)
+    # runtime 里有、.def 里没有：可能是内部辅助函数，只报告数量供参考
+    extra = sorted(defined - want)
+    if missing:
+        print('以下符号在 runtime/ 里找不到定义：', file=sys.stderr)
+        for m in missing[:10]:
+            print('  ' + m, file=sys.stderr)
+        return 1
+    print('rtfn.def 的 ' + str(len(want)) + ' 个符号在 runtime/ 中均有定义（runtime 另有 ' +
+          str(len(extra)) + ' 个内部 pa_* 未登记）')
+    return 0
+
 def main():
     text = render(load())
+    if '--check-runtime' in sys.argv:
+        return check_runtime()
     if '--check-groups' in sys.argv:
         return check_groups()
     if '--check-enum' in sys.argv:
