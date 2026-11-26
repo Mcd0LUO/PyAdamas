@@ -724,7 +724,7 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 比 0.168 多 37 个（+6.1pp）。两块高优先级：
 
 - **getattr/setattr/hasattr 属性名非字面量**：属性名是变量（`getattr(obj, name)`）的写法，之前只对类实例放行、其它接收者（模块/函数/unknown）直接报错。现在 check 一律放过（返回 unknown），build 阶段类实例走运行期动态属性表。
-- **内置异常构造多参 + 关键字**：`ValueError(a, b, c)` 任意多个位置参、`Error(code=1)` 关键字构造不再拒绝。lower/运行时给异常值建 args 元组、消息取元组 repr（`(a, b, c)`）；在 raise→except 间保留 args（`pending_exc_args`），`e.args` 与 CPython 一致。新增 `tests/run/159_exc_multi.py`（输出与 CPython 逐字一致）。
+- **内置异常构造多参 + 关键字**：`ValueError(a, b, c)` 任意多个位置参、`Error(code=1)` 关键字构造不再拒绝。lower/运行时给异常值建 args 元组、消息取元组 repr（`(a, b, c)`）；在 raise→except 间保留 args（`pending_exc_args`），`e.args` 与 CPython 一致。新增用例（0.382 合并进 `tests/run/155_exc_value.py`，见该文件头「0.382 合并自 155_dunder_ret / 157_rich_exc / 159_exc_multi」；输出与 CPython 逐字一致）。
 
 剩余失败的新 top：`undefined name`（39）、`has no method`（24）、`has no attribute`（21）、`cannot assign`（18）。isinstance/bytes/getattr/异常构造等高价值簇都已收口。
 
@@ -739,7 +739,7 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 比 0.167 多 26 个（+4.4pp）。两块：
 
 - **isinstance 前端**：第二参数现在接受的内置类型扩展到 `bytes`/`bytearray`/`memoryview`/`type`/`slice`/`frozenset`/`property`/`classmethod`/`staticmethod`，以及 `(A, B, ...)` 元组/列表、unknown 与可迭代目标。运行时对元组/列表目标短路 OR：逐个元素检查，任一命中为真；known 类型静态判定（`isinstance(b'x', bytes)`→True 等）；unknown 值带运行期标签的内置（str/list/tuple/dict/complex）按标签查，无标签的保守返回 false。
-- **bytes**：`bytes()` 构造接受 2 参（对象+编码，编码忽略）与 list/tuple/生成器/range 的 int 元素；`bytes.decode` 放宽到 0..2 参；`bytes * int` 重复、`bytes.translate`；内置类型名当值（`int_.from_bytes`）走类型级方法。新增 `tests/run/158_isinstance_bytes.py`（输出与 CPython 逐字一致）。
+- **bytes**：`bytes()` 构造接受 2 参（对象+编码，编码忽略）与 list/tuple/生成器/range 的 int 元素；`bytes.decode` 放宽到 0..2 参；`bytes * int` 重复、`bytes.translate`；内置类型名当值（`int_.from_bytes`）走类型级方法。新增用例（0.382 合并进 `tests/run/135_hetero_tuple.py`，见该文件头「0.382 合并自 … / 158_isinstance_bytes」；输出与 CPython 逐字一致）。
 
 剩余失败已高度分散（undefined name、各类运算符、异常构造、跨模块类成员等），isinstance/bytes 两簇基本收口。
 

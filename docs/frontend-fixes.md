@@ -142,7 +142,7 @@ unknown 携带类身份（P2 标签）。代价：前者要设计「unknown 实�
 后者是表示层改动；两者都不是本轮范围。
 
 回归：`tests/run/local_var_method.py` 钉住「局部变量 / 链式 / 容器元素三条路
-行为一致」，`tests/unsupported/unknown_receiver_method.py` 钉住 unknown 接收者
+行为一致」，`tests/strict/unknown_receiver_method.py` 钉住 unknown 接收者
 仍然**明确拒绝**（不静默按机器字调用）。
 
 ## 3. `unknown` 上的下标
