@@ -287,6 +287,16 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
             return;
         }
         auto vt = expr(*a.value);
+        // tuple 的原地运算没有运行时入口（降级层会退化成指针算术，实测打出野指针）。
+        // 在类型检查就拒绝，别等到 codegen。
+        if (cur_ty && cur_ty->kind == TyKind::Tuple &&
+            (a.op == Tok::PLUSEQUAL || a.op == Tok::STAREQUAL)) {
+            err(a.line, a.col,
+                std::format("'{}' does not support in-place operator here; write it out "
+                            "explicitly (e.g. res = a + b)",
+                            type_name(cur_ty)));
+            return;
+        }
         // x += y：优先原地 dunder，没有再看普通 __add__ / __radd__。
         if (TypePtr irt = dunder_aug_ret(a.op, cur_ty, vt)) {
             assign(*a.target, irt, a.line, a.col);

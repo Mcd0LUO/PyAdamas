@@ -45,9 +45,11 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
     // 这里显式分派到既有运行时入口：update（|= / +=）、dict 的 |=。
     if (ty && (ty->kind == TyKind::Set || ty->kind == TyKind::Dict)) {
         bool is_set = ty->kind == TyKind::Set;
-        bool ok_op = a.op == Tok::PLUSEQUAL || a.op == Tok::VBAREQUAL ||
-                     (is_set && (a.op == Tok::AMPEREQUAL || a.op == Tok::MINUSEQUAL ||
-                                 a.op == Tok::CIRCUMFLEXEQUAL));
+        // dict 只有 |=（Python 的 d += x 是 TypeError）；set 才有 |= / += / &= / -= / ^=。
+        bool ok_op = is_set ? (a.op == Tok::PLUSEQUAL || a.op == Tok::VBAREQUAL ||
+                               a.op == Tok::AMPEREQUAL || a.op == Tok::MINUSEQUAL ||
+                               a.op == Tok::CIRCUMFLEXEQUAL)
+                            : (a.op == Tok::VBAREQUAL);
         if (ok_op) {
             TypePtr ot = rhs_t;
             bool same = ot && (ot->kind == ty->kind || ot->kind == TyKind::Unknown);
@@ -59,7 +61,7 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
             }
             // set 复用 dict 的键集合：|= / += 是 pa_dict_update（同 set.update），
             // 其余是专门的原地集合运算；dict 只有 |=。
-            RtFn fn = is_set ? RtFn::DictUpdate : RtFn::DictUpdate;
+            RtFn fn = RtFn::DictUpdate;  // set |= / dict |= 都复用 dict.update
             if (is_set) {
                 switch (a.op) {
                     case Tok::AMPEREQUAL: fn = RtFn::SetIntersectUpdate; break;
@@ -104,6 +106,15 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
             return;
         }
     }
+    // tuple 的原地运算没有运行时入口：落到下面的 IrOp::Bin 会走指针算术
+    // （实测 tuple += tuple 打出野指针、bytes += bytes 段错误），必须显式拒绝。
+    if (ty && (ty->kind == TyKind::Tuple)) {
+        err(a.line, a.col,
+            std::format("'{}' does not support in-place operator here; write it out "
+                        "explicitly (e.g. res = a + b)",
+                        type_name(ty)));
+        return;
+    }
     Inst in;
     in.op = IrOp::Bin;
     in.bop = map_bin(aug_to_bin(a.op));
@@ -113,7 +124,6 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
     // 下标目标会重新求值一次下标；Python 只求一次。
     // 纯下标表达式没有副作用，先这样，等有优化遍再消。
     assign_to(*a.target, r, ty);
-    return;
-    }
+}
 
 }  // namespace pyadamas
