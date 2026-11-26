@@ -491,6 +491,28 @@ static bool setup_program(Program& prog, const std::string& path,
     return true;
 }
 
+static int cmd_ir_asm(pyadamas::Program& prog, const std::string& mode) {
+            if (!prepare_program(prog, false, true)) return 1;
+            if (!prog.entry->ir) return 1;
+            if (mode == "ir") {
+                pyadamas::dump_ir(*prog.entry->ir, std::cout);
+            } else {
+                auto a = std::chrono::steady_clock::now();
+                std::string asm_text = pyadamas::generate_asm(
+                    *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
+                    false, prog.ra_opt,
+                    prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big,
+                    prog.vect_fastfloat);
+                auto b = std::chrono::steady_clock::now();
+                if (std::getenv("PYADAMAS_TIMING"))
+                    std::fprintf(stderr, "[timing] codegen=%.1f ms\n",
+                                 std::chrono::duration<double, std::milli>(b - a).count());
+                std::cout << asm_text;
+            }
+            return 0;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -721,26 +743,8 @@ int main(int argc, char** argv) {
                            zero_cost_exc))
             return 1;
 
-        if (mode == "ir" || mode == "asm") {
-            if (!prepare_program(prog, false, true)) return 1;
-            if (!prog.entry->ir) return 1;
-            if (mode == "ir") {
-                pyadamas::dump_ir(*prog.entry->ir, std::cout);
-            } else {
-                auto a = std::chrono::steady_clock::now();
-                std::string asm_text = pyadamas::generate_asm(
-                    *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.ra_opt,
-                    prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big,
-                    prog.vect_fastfloat);
-                auto b = std::chrono::steady_clock::now();
-                if (std::getenv("PYADAMAS_TIMING"))
-                    std::fprintf(stderr, "[timing] codegen=%.1f ms\n",
-                                 std::chrono::duration<double, std::milli>(b - a).count());
-                std::cout << asm_text;
-            }
-            return 0;
-        }
+        if (mode == "ir" || mode == "asm")
+            return cmd_ir_asm(prog, mode);
 
         // build / run：模块各自汇编成 .o，再链接。
         if (!prepare_program(prog, true, false)) return 1;
