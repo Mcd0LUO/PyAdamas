@@ -20,7 +20,7 @@ cimport clib as c          syntax/stmt.cpp: parse_cimport
   → stmt_cimport           typecheck/stmt_forms.cpp: 建 FuncInfo(is_extern)，
                            CKind → TypePtr（ckind_type），struct 布局进 structs_
   → c.f(...)               call_attr 按 extern_fns_ 查签名 → check_args
-  → lower_cimport_call     lower/method.cpp: 逐实参 coerce + 选 CKind（ptr 接
+  → lower_cimport_call     lower/method/method.cpp: 逐实参 coerce + 选 CKind（ptr 接
                            list/bytes 时改 Buf*），登记 IRExtern（按 symbol 去重），
                            发 CallExtern（cargs 逐调用点记编组）
   → gen_call_extern        backend/call.cpp: SysV 分类（6 int / 8 xmm / 栈溢出 /
@@ -200,8 +200,8 @@ fi>8（浮点实参溢出到栈）时 %al 原样塞 fi 会让 va_arg 寄存器�
 | 类型 | typecheck/types.h | TyKind::DYLIB / t_dylib / FuncInfo.c_lazy+c_symbol / ckind_type(Float32) |
 | 类型检查 | typecheck/stmt_forms.cpp | from c import 绑定；标注覆盖（ann_assign/return） |
 | 类型检查 | typecheck/call.cpp / typecheck/call_forms.cpp | check_c_lazy；DYLIB 接收者属性调用 |
-| 模块 | driver/build.cpp / typecheck/builtin_sigs.cpp / lower/import.cpp | c/dylib 伪模块登记；native_fn；-ldl |
-| 降级 | lower/c_lazy.cpp（新）/ lower/call.cpp / lower/method.cpp / lower/import_native.cpp | 调用点编组推断 + 分派 |
+| 模块 | driver/build.cpp / typecheck/builtin_sigs.cpp / lower/module/import.cpp | c/dylib 伪模块登记；native_fn；-ldl |
+| 降级 | lower/c_lazy.cpp（新）/ lower/call.cpp / lower/method/method.cpp / lower/module/import_native.cpp | 调用点编组推断 + 分派 |
 | IR | ir/types.h / ir/ops.h / backend/call_rt.cpp | IRExtern.lazy/sym_name；IRModule.c_lazy_syms；RtFn::DYLIBLoad/Close |
 | 发射 | backend/call.cpp / backend/codegen.cpp / backend/block.cpp | dlsym 解析序列 + 间接 call；float32 编组；符号串/缓存槽；暂存上界 |
 | 运行时 | rt_cffi.c（新）/ rt_internal.h / CMakeLists.txt | dlopen/dlsym 后端（Win32 给 NotImplementedError 桩） |

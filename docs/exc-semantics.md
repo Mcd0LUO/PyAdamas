@@ -26,9 +26,9 @@
 - 可挂起函数把 handler 记录从全局栈摘下/重挂并重新 `setjmp`（rt_exc.c:320-332；
   src/lower/gen_async.cpp:430-544），异常上下文另用 `pa_exc_enter/leave` 节点栈换进换出
   （rt_exc.c:371-433）。
-- 已知不一致 10 条 + 2 条改造陷阱见第 4 节。其中 3 条是改造后仍会存在 / 会被放大的：跨模块自定义异常
-  不能出现在 `except`/`raise` 名里（4.8）、没有隐式 `__context__`（4.2）、生成器里逃出的
-  `StopIteration` 不转 `RuntimeError`（4.9）。
+- 已知不一致 9 条（4.8 跨模块异常类名已在 0.178 修掉）+ 2 条改造陷阱见第 4 节。其中 2 条是改造后
+  仍会存在 / 会被放大的：没有隐式 `__context__`（4.2）、生成器里逃出的 `StopIteration`
+  不转 `RuntimeError`（4.9）。
 
 ## 1. 机制坐标（谁负责什么）
 
@@ -54,7 +54,7 @@
 | 运行时 | runtime/rt_async.c:732-788 | 协程 `coro_step` 的 C 级 setjmp 兜底 |
 | 运行时 | runtime/rt_agen.c:120-179 | 异步生成器驱动的 C 级 setjmp 兜底 |
 | 运行时 | runtime/rt_debug.c:66-123 | 未捕获 traceback（`_Unwind_Backtrace` 逐帧查 PC 表） |
-| 目标 ABI | src/backend/target_abi.h:57-58、77-78 | `gnu_cfi` 开关、`setjmp_sym`/`longjmp_sym`（Win64 换自带实现） |
+| 目标 ABI | src/common/target_abi.h:57-58、77-78 | `gnu_cfi` 开关、`setjmp_sym`/`longjmp_sym`（Win64 换自带实现） |
 | 构建 | src/driver/build.cpp:558 | `cc -c` 汇编；`:1114-1127` `cc -Wl,--eh-frame-hdr` 链接 |
 
 已经具备的表驱动前置条件（实测 `readelf`）：生成程序已有 `.eh_frame`/`.eh_frame_hdr`
@@ -214,7 +214,7 @@ begin/end/landing-pad 标签数量一一对应，多插一个 end 会破坏整�
 | 帧记录 / GC 影子根 / 槽标记 | **保留**，供新的逐帧释放 helper 复用 |
 | 异常对象、`pending_exc`/`current_exc`、`ExcValue`、匹配表、`exc_enter/leave` | **保留**，是 landing 分发的语义基础 |
 | 生成器/协程的挂起/恢复、close 重放、C 级 setjmp 兜底 | Z4 之前**保持 setjmp 路径**；Z2/Z3 必须用 `has_handlers && !is_generator` 之类的门把可挂起函数排除在新路径外（见 5.2） |
-| Win64 | 维持 SEH/自带 setjmp；新路径用 `target_abi().gnu_cfi`/新增 `eh_model` 字段 gate 住（src/backend/target_abi.h:57-58） |
+| Win64 | 维持 SEH/自带 setjmp；新路径用 `target_abi().gnu_cfi`/新增 `eh_model` 字段 gate 住（src/common/target_abi.h:57-58） |
 
 ## 4. 已知不一致与静默出错点（按危险程度排序）
 
@@ -304,17 +304,24 @@ CPython 是 `(ValueError, ValueError("boom"), traceback)`。文档也登记了�
 `tb is not None` 的代码语义不同；表驱动不要顺手把这里改成实例，否则基线里
 tests/run/22_exception.py、20_with.py 的期望输出会变（它们按字符串写的）。
 
-### 4.8 【不一致】跨模块自定义异常类不能出现在 `except` / `raise` 的名字位置
+### 4.8 【已修（0.178）】跨模块自定义异常类在 `except` / `raise` 的名字位置
 
-`lower_exc_match` 只认内置异常名或**本模块** `classes_` 里的异常类（src/lower/exc.cpp:22-32）；
-`lower_raise` 的 `is_exc_name` 同样（`:91-95`）。导入类存在 `imported_classes_` 里
-（src/lower/import.cpp:466、487），但 `lower/exc.cpp` 从不查它。
-实测（lib.py 定义 `class LibError(ValueError)`，main.py `from lib import LibError`）：
-`except LibError as e:` 与 `except lib.LibError as e:` 都在 codegen 阶段报
-`except requires an exception name`；main.py 里 `raise LibError(...)` 报同类错误。
-但**跨模块按名匹配是好的**：lib.py 里 `raise ValueError(...)`、`raise LibError(...)`
-能在 main.py 的 `except ValueError` 里被接住（实测 caught / rich-as-valueerror）。
-改造影响：表驱动若改成类型表，必须先解决“跨模块异常类名解析”，否则会出现
+**现状（本轮复测，lib.py 定义 `class LibError(ValueError)` 带 `self.msg` 字段）**：
+`from lib import LibError` 后 `raise LibError(...)`、`except LibError as e`（`e.msg` 可取）、
+以及 `from lib import LibError as LE` 的别名写法都正常，输出与 CPython 逐字一致。
+仍不一致的只剩**点号形态的富实例绑定**：`import lib` + `except lib.LibError as e` 能按名
+匹配接住（不带 `as` 时正常），但 `e` 只按内置 `Exception` 基类视图绑定，访问自定义属性
+报 `'Exception' object has no attribute ...`。
+原诊断（0.178 前）：`lower_exc_match` 只认内置异常名或**本模块** `classes_` 里的异常类
+（src/lower/exc.cpp:22-32）；`lower_raise` 的 `is_exc_name` 同样（`:91-95`）。导入类存在
+`imported_classes_` 里（src/lower/module/import.cpp:445、479），但 `lower/exc.cpp` 从不查它
+→ `except LibError as e:` 与 `except lib.LibError as e:` 都在 codegen 阶段报
+`except requires an exception name`，`raise LibError(...)` 报同类错误。
+现在 `src/lower/exc.cpp` 的 `exc_type_name()` / `rich_exc_handler()` 都查 `imported_classes_`，
+跨模块类靠接口里的 `is_exception_class` / `is_rich_exception` 标记识别（a8d51f3
+「fix: 0.178 — 清掉三处异常静默算错 / 误拒」）。跨模块按名匹配本来就好的那半边
+（lib.py 里 `raise ValueError`/`raise LibError` 能被 main.py 的 `except ValueError` 接住）不变。
+改造影响（仍然成立）：表驱动若改成类型表，必须继续走「跨模块异常类名解析」，否则会出现
 “旧路径能按父类 catch、新路径连编译都不过”的分裂；Z2/Z3 不要动这条路径。
 
 ### 4.9 【不一致】生成器里逃出的 `StopIteration` 不转 `RuntimeError`（PEP 479）

@@ -71,11 +71,13 @@
   [go-concurrent-gc-study.md](go-concurrent-gc-study.md)、[vthread-design.md](vthread-design.md)（虚拟线程原型）、
   [memory-debug.md](memory-debug.md)（ASan/canary/guard 实战）、[ir-verify.md](ir-verify.md)
 - **构建 / 速度 / 模块化**：[compile-speed.md](compile-speed.md)、[compile-speed-throughput.md](compile-speed-throughput.md)、
-  [modularization.md](modularization.md)
+  [modularization.md](modularization.md)、[refactor-plan.md](refactor-plan.md)（剩余三个大文件的拆分方案与已验证的障碍）
 - **互操作与生态**：[cpybridge-design.md](cpybridge-design.md)（CPython 桥，仅作逃生口）、
   [cffi-design.md](cffi-design.md)、[package-management-design.md](package-management-design.md)、
   [lang-gaps-landing.md](lang-gaps-landing.md)、[native-stdlib-cookbook.md](native-stdlib-cookbook.md)、
-  [stdlib-batch1.md](stdlib-batch1.md) ～ [stdlib-batch7.md](stdlib-batch7.md)
+  [stdlib-batch1.md](stdlib-batch1.md)、[stdlib-batch2.md](stdlib-batch2.md)、[stdlib-batch3.md](stdlib-batch3.md)、
+  [stdlib-batch4.md](stdlib-batch4.md)、[stdlib-batch6.md](stdlib-batch6.md)、[stdlib-batch7.md](stdlib-batch7.md)
+  （批次 5 不存在）、[stdlib-round2.md](stdlib-round2.md)（标准库第二轮优化）
 - **语料 / 流程 / 历史**：[daily-corpus.md](daily-corpus.md)（日常语料口径）、
   [iteration-roadmap.md](iteration-roadmap.md)、[optimization-roadmap.md](optimization-roadmap.md)、
   [nightly-roadmap.md](nightly-roadmap.md)、[overnight-plan.md](overnight-plan.md)、

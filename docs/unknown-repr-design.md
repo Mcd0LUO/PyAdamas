@@ -285,7 +285,7 @@ kind=8；print/repr/str/truth 已有分派（rt_cpy/rt_str/rt_format）。
   increment on a freed object" 崩溃。修：miss 分支 pa_own_inc(key_own,key)。
 - opt/dict_bump.cpp：融合模式原来要求值侧一定有一条 RcIncUnknown；值类型
   变成 int 后没有这条 retain。改成 6/7 指令两种形态都接受。
-- lower/method.cpp / lower/c_lazy.cpp：def_heap(in.ty, std::move(in)) 在同一
+- lower/method/method.cpp / lower/c_lazy.cpp：def_heap(in.ty, std::move(in)) 在同一
   实参列表里读 in.ty，求值顺序未指定；GCC 先构造 by-value 参数移走 in.ty，
   导致 cimport 返回 float 的 vreg 被记成 unknown（机器值在 xmm、静态类型
   unknown 的长期不一致）。先取 TypePtr 再 move。这是 unknown -> float 解盒
