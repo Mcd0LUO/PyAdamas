@@ -581,12 +581,18 @@ static int cmd_frontend(const std::string& path, const std::string& src,
             // 非 --imports 时返回 nullptr（按 unknown 处理），避免 0.486 的误杀；
             // 本地模块接口完整，跨模块调用不再退化成 unknown。--no-imports 关整张图。
             pyadamas::ModuleLookup lookup = nullptr;
+            // A3：依赖侧硬错误（依赖语法错 / 同名不同文件 / 跨模块槽冲突）。
+            // 诊断已在 check 的加载器里打印；这里只需要在 typecheck 之后判失败，
+            // 与 build 端一致（以前这些被吞成 unknown，check 返回 ok）。
+            std::vector<std::string> dep_errors;
             if (!no_imports) {
                 std::vector<std::string> missing;
-                lookup = pyadamas::load_check_lookup(path, include_dirs, missing, resolve_imports);
+                lookup = pyadamas::load_check_lookup(path, include_dirs, missing, dep_errors,
+                                                      resolve_imports);
             }
             auto fe = run_frontend(path, src, false, lookup, !lenient_names);
             if (!fe) return 1;
+            if (!dep_errors.empty()) return 1;
             if (mode == "types") {
                 for (auto& [name, ty] : fe->tc.top_symbols())
                     std::printf("%-24s %s\n", name.c_str(), ty.c_str());

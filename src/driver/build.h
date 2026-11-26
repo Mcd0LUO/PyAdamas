@@ -112,9 +112,13 @@ std::string reject_message(const std::string& module, const std::string& name);
 // 返回一个 module_lookup 闭包给 TypeChecker。无法解析的依赖返回 nullptr
 // （调用方按 unknown 处理）。diagnostics 里收集真正解析失败的模块。
 using CheckLookup = std::function<ModuleInfoPtr(const std::string&)>;
+// A3：errors 收集「依赖侧硬错误」（依赖语法错、同名不同文件、跨模块槽冲突）。
+// 与 missing（解析不了 → 按 unknown 继续）不同：这些在 build 端是拒绝的，
+// check 必须同样失败，诊断在加载时已打印到 stderr。
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,
                                std::vector<std::string>& missing,
+                               std::vector<std::string>& errors,
                                bool strict_native = false);
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p);

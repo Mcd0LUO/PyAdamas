@@ -35,6 +35,16 @@ struct CheckCtx {
     std::map<std::string, pyadamas::ModuleInfoPtr> loaded;
     std::set<std::string> loading;
     std::vector<std::string> missing;
+    // A3：依赖侧硬错误（与 build 同口径的拒绝）。指向调用方的 vector，
+    // 生命周期由 load_check_lookup 的调用方保证（main 里越过后面的 typecheck）。
+    std::vector<std::string>* errors = nullptr;
+    // A3-2：模块名 → 已加载的规范路径 / 首次请求它的 importer。同名解析到
+    // 不同文件时 build 报错，check 以前只看名字（记忆化），会把两个文件当
+    // 同一个模块。importer 用来避免同一处重复 import 时重复解析。
+    std::map<std::string, std::string> paths;
+    std::map<std::string, std::string> path_importer;
+    // 同一处 (importer, name) 在预加载和 typecheck 里可能各问一次；冲突只报一次。
+    std::set<std::pair<std::string, std::string>> dup_reported;
     // 依赖模块的 TypeChecker 拥有 ClassInfo；必须活到 check 结束，
     // 否则接口里的 ClassInfo* 会悬空。
     std::vector<std::shared_ptr<pyadamas::TypeChecker>> keep_alive;
@@ -47,7 +57,10 @@ struct CheckCtx {
 // 把某个模块的类型检查结果压成扁平 ModuleInfo（类方法/字段按 MRO 拍平），
 // 和 build_unit 的接口导出逻辑保持一致，但不做编解码归一。
 pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
-                                          const std::string& runtime_name) {
+                                          const std::string& runtime_name,
+                                          const std::string& path,
+                                          const std::string& source,
+                                          std::vector<std::string>* errors) {
     auto info = std::make_shared<pyadamas::ModuleInfo>();
     auto* sc = tc.module_scope();
     if (!sc) return info;
@@ -114,15 +127,34 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
                     flat->class_attrs.push_back(std::move(a));
                 }
             }
+            // A3-3：槽冲突检测（与 build.cpp 的 add_slot 同一口径）。不同名同槽是
+            // 真冲突：build 在扁平导出时拒绝（cross-module slot conflict），check 侧
+            // 以前没有对应实现，于是 check 放行、build 才报。
+            std::map<int, std::string> slot_owner;
             for (const pyadamas::ClassInfo* k : mro) {
                 if (!k) continue;
                 for (auto& m : k->methods) {
                     if (!m.call_sig) continue;
                     std::string key = pyadamas::method_slot_key(m.name, m.kind);
-                    auto& v = key_slots[key];
-                    if (std::find(v.begin(), v.end(), m.slot) == v.end()) v.push_back(m.slot);
+                    auto add_slot = [&](int slot) -> bool {
+                        auto sit = slot_owner.find(slot);
+                        if (sit != slot_owner.end() && sit->second != key) {
+                            std::string msg = std::format(
+                                "method slot {} of '{}' is used by both '{}' and '{}' "
+                                "(cross-module slot conflict)",
+                                slot, name, sit->second, key);
+                            report(path, source, 0, 0, msg);
+                            if (errors) errors->push_back(msg);
+                            return false;
+                        }
+                        slot_owner[slot] = key;
+                        auto& v = key_slots[key];
+                        if (std::find(v.begin(), v.end(), slot) == v.end()) v.push_back(slot);
+                        return true;
+                    };
+                    if (!add_slot(m.slot)) continue;
                     for (int a : m.aliases)
-                        if (std::find(v.begin(), v.end(), a) == v.end()) v.push_back(a);
+                        if (!add_slot(a)) break;
                     if (!by_key.count(key)) by_key[key] = m;
                 }
             }
@@ -216,7 +248,7 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
                            src->find("dataclass") != std::string::npos));
         tc->check(*mod);
         ctx.keep_alive.push_back(tc);
-        auto info = check_build_info(*tc, name);
+        auto info = check_build_info(*tc, name, path, *src, ctx.errors);
         info->name = name;
         info->source_path = path;
         // 与 build 端同口径：接口做一次 encode→decode 归一。检查模式此前直接
@@ -237,6 +269,22 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
         }
         ctx.loading.erase(name);
         return info;
+    } catch (const pyadamas::LexError& e) {
+        // A3-1：依赖的词法/语法错误以前和 bad_alloc 一起被 `catch (...)` 吞掉，
+        // 记成 missing 后按 unknown 继续，check 于是返回 ok（还会给出误导的
+        // 「parsed but not yet compiled」提示）。build 端在 parse_unit 里是
+        // 直接 report + 拒绝的，这里对齐：打印同样的诊断并让 check 失败。
+        report(path, *src, e.line, e.col, e.what());
+        ctx.loading.erase(name);
+        if (ctx.errors)
+            ctx.errors->push_back(std::format("{}: {}", path, e.what()));
+        return nullptr;
+    } catch (const pyadamas::ParseError& e) {
+        report(path, *src, e.line, e.col, e.what());
+        ctx.loading.erase(name);
+        if (ctx.errors)
+            ctx.errors->push_back(std::format("{}: {}", path, e.what()));
+        return nullptr;
     } catch (...) {
         ctx.loading.erase(name);
         ctx.missing.push_back(name);
@@ -246,7 +294,33 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
 
 pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
                                     const std::string& name) {
-    if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) return it->second;
+    if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) {
+        // A3-2：名字命中缓存不代表还是同一个文件——不同 importer 的搜索路径不同。
+        // 只在 importer 与首次加载者不同时才重新解析（同一文件重复 import 不付
+        // 这份开销），解析到别的文件就按 build 的口径报错。
+        auto pit = ctx.paths.find(name);
+        auto iit = ctx.path_importer.find(name);
+        if (pit != ctx.paths.end() && iit != ctx.path_importer.end() &&
+            iit->second != importer) {
+            if (auto found = resolve_import_source(importer, name, ctx.include_dirs)) {
+                std::string other = canonical_path(found->path);
+                if (other != pit->second) {
+                    if (ctx.dup_reported.insert({importer, name}).second) {
+                        std::fprintf(
+                            stderr,
+                            "%s: error: module '%s' resolves to two different files\n",
+                            importer.c_str(), name.c_str());
+                        if (ctx.errors)
+                            ctx.errors->push_back(std::format(
+                                "{}: module '{}' resolves to two different files", importer,
+                                name));
+                    }
+                    return nullptr;  // 本次请求按 unknown；缓存里那份留给别的 importer
+                }
+            }
+        }
+        return it->second;
+    }
     // 0.552：**请求方是不是项目代码**。编译器自带的 stdlib（stdlib/*.py，我们自己写的、
     // 接口完整）在「项目代码导入它」时按完整接口解析；**标准库扫描**（626 文件那套，
     // 请求方也在标准库里）仍保持 unknown —— 那条红线是 0.523 实测 499 → 223 换来的。
@@ -318,6 +392,21 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
         return nullptr;
     }
     std::string path = canonical_path(found->path);
+    // A3-2：同名不同文件。build 端在 build.cpp 里比对 Program::units 的路径并拒绝
+    // （module 'x' resolves to two different files）；check 端以前只按 name 记忆化，
+    // 第二个同名文件会被当成同一个模块（实测 check 放行、build 拒绝）。这里按
+    // 「模块名 → 首次加载的规范路径」比对，口径与 build 对齐。
+    if (auto pit = ctx.paths.find(name); pit != ctx.paths.end() && pit->second != path) {
+        std::fprintf(stderr, "%s: error: module '%s' resolves to two different files\n",
+                     importer.c_str(), name.c_str());
+        if (ctx.errors)
+            ctx.errors->push_back(std::format("{}: module '{}' resolves to two different files",
+                                              importer, name));
+        ctx.loaded[name] = nullptr;
+        return nullptr;
+    }
+    ctx.paths[name] = path;
+    ctx.path_importer[name] = importer;
     // 非 --imports：**CPython 标准库**（/usr/lib/python3.x、dist-packages）里的模块按
     // unknown 处理——我们的接口对自己的 stdlib 完整，对 CPython 整个 Lib 不完整，
     // 严格解析会大面积误杀（实测 626 文件默认口径 499 → 223）。本项目自己的模块
@@ -343,9 +432,13 @@ pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
 
 CheckLookup load_check_lookup(const std::string& entry_path,
                                const std::vector<std::string>& include_dirs,
-                               std::vector<std::string>& missing, bool strict_all) {
+                               std::vector<std::string>& missing,
+                               std::vector<std::string>& errors, bool strict_all) {
     auto ctx = std::make_shared<CheckCtx>();
     ctx->strict_all = strict_all;
+    // A3：依赖侧硬错误写回调用方（诊断在加载时已打印到 stderr）；
+    // 调用方的 vector 必须活过整个 typecheck —— 闭包只持有 ctx，ctx 只持有指针。
+    ctx->errors = &errors;
     ctx->include_dirs = include_dirs;
     ctx->include_dirs.emplace_back(pyadamas::stdlib_dir());
     std::string entry = canonical_path(entry_path);
