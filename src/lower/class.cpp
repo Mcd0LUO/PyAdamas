@@ -412,7 +412,16 @@ void Lowerer::lower_classdef(ClassDef& c) {
         if (!ba.value || ba.target->kind != ExprKind::Name) continue;
         auto& bn = static_cast<Name&>(*ba.target);
         if (ci->class_attr(bn.id)) continue;
-        st_->class_body_globals.insert("__pyadamas$cbv$" + ci->name + "$" + bn.id);
+        std::string gname = "__pyadamas$cbv$" + ci->name + "$" + bn.id;
+        // 关键（0.621）：必须**现在**就按字段类型建全局。ctor 包装体在类体之前
+        // 编译，会先 global_idx(gname) 按默认 Unknown 建出来；类体随后往同一个
+        // 全局写 Float，而读侧仍按 Unknown（通用寄存器）装载 → double 的位模式
+        // 被当整数（实测 rate: float = base + 0.1 打出 4.59e+18）。
+        TypePtr gty = t_unknown();
+        for (auto& fld : ci->fields)
+            if (fld.name == bn.id && fld.ty) gty = fld.ty;
+        (void)global_idx_as(gname, gty);
+        st_->class_body_globals.insert(gname);
     }
     if ((!opts_.module_symbol.empty() && !opts_.is_entry) || need_class_obj)
         compile_ctor_wrapper(c, ci, cid);
@@ -513,8 +522,9 @@ void Lowerer::lower_classdef(ClassDef& c) {
                     // 字段（带标注）：把类体求值结果存进隐藏全局，ctor 直接读它，
                     // 不再重算表达式（否则 y: int = x + 1 会在构造时以 x=0 重算）。
                     std::string gname = "__pyadamas$cbv$" + ci->name + "$" + nm.id;
-                    int gi = global_idx(gname);
-                    store_global(gi, v);
+                    int gi = global_idx_as(gname, vt ? vt : t_unknown());
+                    TypePtr gty = mod_.globals[static_cast<size_t>(gi)].ty;
+                    store_global(gi, coerce(v, vt, gty));
                     st_->class_body_attrs[nm.id] = gi;
                     st_->class_body_globals.insert(gname);
                 }
@@ -720,7 +730,9 @@ int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int 
             if (f.default_lit)
                 v = const_literal(*f.default_lit);
             else if (f.default_expr) {
-                std::string gname = "__pyadamas$cbv$" + ci->name + "$" + f.name;
+                // 全局名要用**声明这个字段的基类**（(*it)）而不是派生类：
+                // 基类在类体求值时写的是 __pyadamas$cbv$<Base>$<field>。
+                std::string gname = "__pyadamas$cbv$" + (*it)->name + "$" + f.name;
                 if (st_->class_body_globals.count(gname)) {
                     int gi = global_idx(gname);
                     v = load_global(gi, mod_.globals[static_cast<size_t>(gi)].ty);
