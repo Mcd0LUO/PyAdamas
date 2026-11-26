@@ -137,6 +137,7 @@ VReg Lowerer::lower_binop(BinOp& b) {
         s = coerce(s, rt, t_str());
         VReg v = call_runtime(RtFn::PathJoin, new_ty(TyKind::Path), {p, s});
         push_temp(v);
+        st_->fresh_vregs.insert(v);
         return v;
     }
     // datetime / timedelta 的算术：按运算符和两侧类型直接调运行时函数。
@@ -150,24 +151,28 @@ VReg Lowerer::lower_binop(BinOp& b) {
         if (b.op == Tok::MINUS && is_dt(lt) && is_dt(rt)) {
             VReg v = call_runtime(RtFn::DateTimeDiff, new_ty(TyKind::TimeDelta), {l, r});
             push_temp(v);
+        st_->fresh_vregs.insert(v);
             return v;
         }
         if ((b.op == Tok::PLUS || b.op == Tok::MINUS) && is_dt(lt) && is_td(rt)) {
             VReg v = call_runtime(RtFn::DateTimeAddDelta, new_ty(TyKind::DateTime),
                                   {l, r, const_int(b.op == Tok::MINUS ? 1 : 0)});
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
         if (b.op == Tok::PLUS && is_td(lt) && is_dt(rt)) {
             VReg v = call_runtime(RtFn::DateTimeAddDelta, new_ty(TyKind::DateTime),
                                   {r, l, const_int(0)});
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
         if ((b.op == Tok::PLUS || b.op == Tok::MINUS) && is_td(lt) && is_td(rt)) {
             RtFn fn = b.op == Tok::PLUS ? RtFn::TimeDeltaAdd : RtFn::TimeDeltaSub;
             VReg v = call_runtime(fn, new_ty(TyKind::TimeDelta), {l, r});
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
         if (b.op == Tok::STAR && (is_td(lt) || is_td(rt))) {
@@ -175,6 +180,7 @@ VReg Lowerer::lower_binop(BinOp& b) {
             VReg k = is_td(lt) ? r : l;
             VReg v = call_runtime(RtFn::TimeDeltaMul, new_ty(TyKind::TimeDelta), {td, k});
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
         if ((b.op == Tok::SLASH || b.op == Tok::DOUBLESLASH) && is_td(lt)) {
@@ -188,6 +194,7 @@ VReg Lowerer::lower_binop(BinOp& b) {
                                              : RtFn::TimeDeltaFloorDivInt;
                 VReg v = call_runtime(fn, new_ty(TyKind::TimeDelta), {l, r});
                 push_temp(v);
+                st_->fresh_vregs.insert(v);
                 return v;
             }
         }
@@ -246,6 +253,7 @@ VReg Lowerer::lower_binop(BinOp& b) {
             VReg r = expr(*b.right);
             VReg v = call_runtime(fn, ty ? ty : lt, {l, r});
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
     }
@@ -276,6 +284,8 @@ VReg Lowerer::lower_binop(BinOp& b) {
     // 0.565：`d1 | d2` —— 等价 copy(d1) 再 update(d2)，右操作数覆盖同名键。
     if (ty && ty->kind == TyKind::Dict && b.op == Tok::VBAR) {
         VReg out = call_runtime(RtFn::DictCopy, ty, {l});
+        push_temp(out);  // rc=1 的新字典：不入临时栈就会漏（同 SetUnion/PathJoin）
+        st_->fresh_vregs.insert(out);
         VReg other = coerce(r, rt, ty);
         call_void(RtFn::DictUpdate, {out, other});
         return out;
@@ -458,6 +468,12 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
     }
     if (ty && ty->kind == TyKind::Complex) {
         if (u.op == Tok::PLUS) return v;
+        // ~z 在 CPython 里是 TypeError（complex 不支持位运算）。落到通用 BitNot 会
+        // 对堆指针按位取反并当成有效指针返回——静默野指针，必须显式拦住。
+        if (u.op == Tok::TILDE) {
+            err(u.line, u.col, "bad operand type for unary ~: 'complex'");
+            return const_none();
+        }
         if (u.op == Tok::MINUS) {
             Inst in;
             in.op = IrOp::CallRt;
@@ -1106,35 +1122,24 @@ VReg Lowerer::lower_compare(Compare& c) {
     // P3：每个比较数按**自己的静态类型**落借用槽（big/str 等必须按值
     // 比；统一按 unknown 装载会退化成机器字比），每步走 lower_cmp_single。
     TypePtr prev_ty = tc_.type_of(c.left.get());
-    const auto is_big = [](const TypePtr& t) { return t && t->kind == TyKind::Big; };
-    bool has_big = is_big(prev_ty) ||
-        std::any_of(c.comparators.begin(), c.comparators.end(),
-                    [&](const auto& v) { return is_big(tc_.type_of(v.get())); });
+    // 每一环都走 lower_cmp_single（0.619）：原来只在「有 Big 参与」时才走它，
+    // 其余全部退化成裸机器字 Cmp，左操作数还按 t_unknown() 装载——字符串/容器
+    // 比的是堆指针、浮点按整型位模式比、定宽有符号/无符号混比跳过提升。
+    // 去掉这条分支后，类型分派（str/容器/类/float/int_promote/身份比较）逐环生效。
     int res = new_temp_slot(t_bool());
-    int prev_slot = has_big ? -1 : new_borrow_slot(prev_ty);
+    int prev_slot = new_borrow_slot(prev_ty);
     store_slot(res, const_bool(true));
-    if (has_big) prev_slot = new_borrow_slot(prev_ty);
     store_borrow_slot(prev_slot, expr(*c.left));
 
     int fail = new_block("cmp.fail");
     int done = new_block("cmp.end");
 
     for (size_t i = 0; i < c.ops.size(); ++i) {
-        VReg l = load_slot(prev_slot, has_big ? prev_ty : t_unknown());
+        VReg l = load_slot(prev_slot, prev_ty);
         TypePtr rty = tc_.type_of(c.comparators[i].get());
         VReg r = expr(*c.comparators[i]);
         int cont = new_block("cmp.next");
-        VReg cr;
-        if (has_big) {
-            cr = lower_cmp_single(l, prev_ty, r, rty, c.ops[i], c.line, c.col);
-        } else {
-            Inst cmp;
-            cmp.op = IrOp::Cmp;
-            cmp.cop = map_cmp(c.ops[i]);
-            cmp.a = l;
-            cmp.b = r;
-            cr = def(t_bool(), std::move(cmp));
-        }
+        VReg cr = lower_cmp_single(l, prev_ty, r, rty, c.ops[i], c.line, c.col);
         Inst br;
         br.op = IrOp::Branch;
         br.a = cr;
@@ -1143,7 +1148,7 @@ VReg Lowerer::lower_compare(Compare& c) {
         emit(std::move(br));
 
         switch_to(cont);
-        if (has_big) prev_slot = new_borrow_slot(rty);
+        prev_slot = new_borrow_slot(rty);
         store_borrow_slot(prev_slot, r);
         prev_ty = rty;
         if (i + 1 == c.ops.size()) {
