@@ -651,6 +651,8 @@ private:
     void enum_member_assign(ClassInfo* cls, const std::string& name, const Expr* value,
                             int line, int col);
     void finalize_enum(const ClassDef& c, ClassInfo* cls);
+    // P1：enum 构造的实参与值类型校验（本模块 + 跨模块共用）。
+    void check_enum_call(const ClassInfo* cls, Call& c);
     // itertools/collections 没有泛型，按调用点的实参类型特化。
     std::optional<TypePtr> itertools_call(const std::string& member, Call& c);
     // operator 的包装函数没有泛型：按调用点实参类型给出结果类型。

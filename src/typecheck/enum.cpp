@@ -66,6 +66,30 @@ void TypeChecker::enum_member_assign(ClassInfo* cls, const std::string& name, co
     cls->class_attrs.push_back(std::move(ai));
 }
 
+// P1：enum 构造的实参校验（本模块 Color(...) 与跨模块 mod.Color(...) 共用）。
+// 以前实参只求值不检查：给 int 值枚举传 str 能编过，降级层的 coerce 静默放过，
+// 比较指令按 str 语义生成（pa_str_eq），运行期读串头直接段错误。
+// 形状（恰好一个位置实参）与值类型（int 值枚举只收 int-like）都在这里判；
+// unknown 放行（静态不知道），str 值枚举的实参不在这里判（降级层明确拒绝）。
+void TypeChecker::check_enum_call(const ClassInfo* cls, Call& c) {
+    std::vector<TypePtr> ats;
+    ats.reserve(c.args.size());
+    for (auto& arg : c.args) ats.push_back(expr(*arg));
+    for (auto& kw : c.keywords) expr(*kw.value);
+    if (c.args.size() != 1 || !c.keywords.empty()) {
+        err(c.line, c.col,
+            std::format("enum '{}' takes exactly one value argument", cls->name));
+        return;
+    }
+    const FieldInfo* vfl = cls->field("value");
+    if (!vfl || !vfl->ty || vfl->ty->kind != TyKind::Int) return;  // str 值枚举另判
+    TypePtr at = ats.empty() ? nullptr : ats[0];
+    if (at && !is_unknown(at) && !is_int_like(at))
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("enum '{}' expects an int value, got '{}'", cls->name,
+                        type_name(at)));
+}
+
 void TypeChecker::finalize_enum(const ClassDef& c, ClassInfo* cls) {
     if (!cls->fields.empty())
         err(c.line, c.col, std::format("enum class '{}' cannot declare fields", cls->name));

@@ -328,13 +328,9 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                     }
                     // A8-4：导入的 enum 类按值反查成员（kenum.Color(1)），
                     // 不能走「没有 __init__ 就不收实参」的判断。
+                    // P1：实参形状与值类型由 check_enum_call 统一校验。
                     if (cls->is_enum) {
-                        for (auto& arg : c.args) expr(*arg);
-                        for (auto& kw : c.keywords) expr(*kw.value);
-                        if (c.args.size() != 1 || !c.keywords.empty())
-                            err(c.line, c.col,
-                                std::format("enum '{}' takes exactly one value argument",
-                                            cls->name));
+                        check_enum_call(cls.get(), c);
                         return mk_class(cls.get());
                     }
                     if (cls->has_init && ci->second.ctor_sig) {
@@ -609,12 +605,9 @@ TypePtr TypeChecker::call_value(Call& c) {
             return mk_class(cls);
         }
         // enum 构造：Color(1) 是按值反查成员（CPython EnumMeta.__call__）。
+        // P1：实参形状与值类型由 check_enum_call 统一校验。
         if (cls->is_enum) {
-            for (auto& arg : c.args) expr(*arg);
-            for (auto& kw : c.keywords) expr(*kw.value);
-            if (c.args.size() != 1 || !c.keywords.empty())
-                err(c.line, c.col,
-                    std::format("enum '{}' takes exactly one value argument", cls->name));
+            check_enum_call(cls, c);
             return mk_class(cls);
         }
         if (cls->has_init) {
