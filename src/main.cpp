@@ -656,21 +656,8 @@ struct Options {
     std::string sanitize;
 };
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr,
-                     "pyadamas —— Python 语法外壳的编译器\n"
-                     "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
-                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
-                     "[--asan|--ubsan] [-o out|--out out] [--json] [--o.locked] "
-                     "[--manifest file] [--module-map file] <file.py>\n",
-                     argv[0]);
-        return 2;
-    }
-
-    Options o;
-
+// 0.600：命令行解析从 main() 提出。返回 0 表示继续，非 0 是进程退出码。
+static int parse_options(int argc, char** argv, Options& o) {
     static const std::vector<std::string> kModes = {"tokens", "ast",  "check", "types", "ir",
                                                     "asm",    "build", "run",  "deps",  "cdecl",
                                                     "resolve"};
@@ -738,6 +725,28 @@ int main(int argc, char** argv) {
         else if (o.mode.empty() && std::ranges::find(kModes, a) != kModes.end()) o.mode = a;
         else o.path = a;
     }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr,
+                     "pyadamas —— Python 语法外壳的编译器\n"
+                     "\n"
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
+                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
+                     "[--asan|--ubsan] [-o out|--out out] [--json] [--o.locked] "
+                     "[--manifest file] [--module-map file] <file.py>\n",
+                     argv[0]);
+        return 2;
+    }
+
+    Options o;
+
+    static const std::vector<std::string> kModes = {"tokens", "ast",  "check", "types", "ir",
+                                                    "asm",    "build", "run",  "deps",  "cdecl",
+                                                    "resolve"};
+    if (int rc = parse_options(argc, argv, o)) return rc;
     if (o.mode.empty()) o.mode = "ast";
     // resolve 可以只给项目目录（甚至什么都不给：用 cwd），不需要入口文件。
     if (o.path.empty() && o.mode != "resolve") {
