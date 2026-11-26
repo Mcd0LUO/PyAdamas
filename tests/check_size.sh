@@ -95,6 +95,10 @@ if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check-enum >/dev/null 2>&1
     echo "结果：src/ir/rtfn.h 的枚举与 src/ir/rtfn.def 不一致（顺序必须完全一致）。"
     exit 1
 fi
+if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check-groups >/dev/null 2>&1; then
+    echo "结果：src/ir/rtfn.def 的参数编组与 backend/call_rt.cpp 不一致。"
+    exit 1
+fi
 if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check >/dev/null 2>&1; then
     echo "结果：src/ir/rtfn_names.h 与 src/ir/rtfn.def 不一致（运行 tools/gen_rtfn.py 重新生成）。"
     exit 1
