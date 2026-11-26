@@ -104,6 +104,14 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
                     std::format("cannot expand '{}' into '*args'", type_name(st)));
                 continue;
             }
+            // 元素级转换：ListExtend 是内存拷贝，不做 coerce。
+            // `def f(*args: float)` + `f(*[1, 2])` 会把整数位模式直接塞进
+            // list[float]（实测打印 1.5e-323）。list/tuple 元素类型不同就先提升。
+            if (st && (st->kind == TyKind::List || st->kind == TyKind::Tuple) && vty &&
+                !st->sub.empty() && st->sub[0] && st->sub[0]->kind != vty->kind) {
+                VReg conv = promote_container(s, st, lty);
+                if (conv != kNoReg) s = conv;
+            }
             call_void(RtFn::ListExtend, {vararg_list(), s});
             continue;
         }
@@ -379,10 +387,9 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
         }
         call_void(RtFn::Raise,
                   {const_str("ValueError"), const_str("enum value is not a valid member")});
-        Inst jd;
-        jd.op = IrOp::Jump;
-        jd.target = end;
-        emit(std::move(jd));
+        // Raise 是 noreturn：不能发 Jump 到 end（那条假边还会让 tmp 在未初始化
+        // 的路径上汇入 load_slot）。
+        end_unreachable();
         switch_to(end);
         return load_slot(tmp, inst_ty);
     }
@@ -420,7 +427,15 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
         else if (fi->default_expr) {
             // 0.579：类体已经算过的字段初值（x: int = 5 之后的 y: int = x + 1）
             // 直接用那份值；否则会在构造时以 x=0 重算，得到错的 1。
-            std::string gname = "__pyadamas$cbv$" + cls->name + "$" + fi->name;
+            // 全局名要用**声明该字段的基类**：类体求值时写的是 <Base>$<field>。
+            const ClassInfo* decl = cls.get();
+            for (const ClassInfo* q = cls.get(); q; q = q->base) {
+                bool has = false;
+                for (auto& qf : q->fields)
+                    if (qf.name == fi->name) has = true;
+                if (has) decl = q;
+            }
+            std::string gname = "__pyadamas$cbv$" + decl->name + "$" + fi->name;
             if (st_->class_body_globals.count(gname)) {
                 int gi = global_idx(gname);
                 v = load_global(gi, mod_.globals[static_cast<size_t>(gi)].ty);
@@ -900,8 +915,11 @@ VReg Lowerer::value_as_list(VReg x, TypePtr xt, TypePtr& elem_out) {
 
 
 VReg Lowerer::lower_struct_builtin(const std::string& name, Call& c) {
-    if (c.args.empty()) {
-        err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+    // 正好一个位置实参、且没有关键字实参（0.623）。原来只查了 empty()，
+    // sizeof(Point, 1) / addr(p, extra=1) 的多余实参会被静默忽略。
+    if (c.args.size() != 1 || !c.keywords.empty()) {
+        err(c.line, c.col,
+            std::format("{}() takes exactly one positional argument", name));
         return const_int(0);
     }
     if (name == "sizeof") {
