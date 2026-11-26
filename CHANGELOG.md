@@ -6,6 +6,33 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.668] - 2026-11-27
+
+> chore(gate)：跑 `tools/checkall.sh --full` 全量闸门，**其余全过、perf-baseline 失败一处**，
+>定位为**陈旧基线**而非今晚引入。
+>
+> ```
+> 闸门              状态    备注
+> build            PASS   4:15（cmake -j4）
+> suite            PASS   598 ran ok / 0 失败
+> difftest         PASS   541 例 0 不一致
+> check_size       PASS
+> bench-12x3       PASS   36/36 逐字节一致
+> vect-variants    PASS
+> perf-baseline    FAIL   nqueens +49.99%（298.7M → 448.1M）
+> ```
+>
+> **nqueens 那 50% 不是今晚的改动**：用 0.665 的二进制（`perf6` worktree，早于 0.666/0.667 的融合）
+>编同一个 `bench/compare/nqueens.py`，指令数是 **450,606,992**，与当前 448,066,824 同量级。
+>而 `tools/perf_baseline.txt` 的写入时间是 **2026-11-24T21:23（HEAD `44ca045`，约 0.482）**——
+>也就是说 nqueens 在 0.482 之后的某个版本里涨了 50%，与今晚无关。
+>
+> 其余 11 个基准都在阈值内，其中 **fib −16.19%** 正是 0.666/0.667 的收益，闸门如实记录。
+>
+> 待办（下一轮或之后）：
+> 1. 在 `44ca045..0.665` 之间对 nqueens 二分，找出 50% 的来源；
+> 2. 找到后要么修，要么在 `--write-baseline` 人工确认下刷新基线；
+> 3. `tools/perf_baseline.txt` 已陈旧 6 天，刷新前 perf-baseline 闸门会一直红。
 ## [0.667] - 2026-11-27
 
 > perf(codegen)：**直接调用的整数返回值直接参与紧邻的 Bin** —— 指令数再降 **6.0%**，
