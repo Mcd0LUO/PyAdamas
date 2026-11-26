@@ -133,6 +133,15 @@ VReg Lowerer::lower_comp(Expr& e) {
         }
         auto& g = static_cast<Comprehension&>(*(*gens)[gi]);
         VReg seq = expr(*g.iter);
+        // 与 stmt_for.cpp 同口径：迭代源若是从变量/属性读来的借用，循环体里
+        // 重绑该名字会把最后一份引用 dec 掉，后续迭代读到已释放对象。
+        {
+            TypePtr sty0 = tc_.type_of(g.iter.get());
+            if (ir_is_heap(sty0) && !st_->fresh_vregs.count(seq)) {
+                rc_inc(seq);
+                push_temp(seq);
+            }
+        }
         TypePtr sty = tc_.type_of(g.iter.get());
         // bytes 迭代产出 int（0..255）：先转 list[int] 再走普通列表路径。
         if (sty && sty->kind == TyKind::Bytes) {
@@ -309,8 +318,22 @@ VReg Lowerer::lower_comp(Expr& e) {
             return;
         }
         TypePtr ety = t_unknown();
-        if (sty->kind == TyKind::Str) ety = t_str();
-        else if (!sty->sub.empty()) ety = sty->sub[0];
+        if (sty->kind == TyKind::Str) {
+            ety = t_str();
+        } else if (sty->kind == TyKind::Tuple && !sty->variadic && sty->sub.size() > 1) {
+            // 定长异构元组（"a", 1）：各元素类型不同，取 sub[0] 会把整数当字符串
+            // 做引用计数（实测 [x for x in ("a", 1)] 段错误）。元素类型全同才
+            // 沿用 sub[0]，否则按 unknown 处理。与 stmt_for.cpp 同口径。
+            bool homogeneous = true;
+            for (auto& sub : sty->sub)
+                if (sub->kind != sty->sub[0]->kind) {
+                    homogeneous = false;
+                    break;
+                }
+            ety = homogeneous ? sty->sub[0] : t_unknown();
+        } else if (!sty->sub.empty()) {
+            ety = sty->sub[0];
+        }
 
         // 本层元素装载的位置；循环体降级完、且期间没有用户副作用时，
         // 把它改成免检查。必须在 erase_cleanup 之前打补丁。
@@ -340,6 +363,13 @@ VReg Lowerer::lower_comp(Expr& e) {
         int idx = new_temp_slot(t_int());
         store_slot(idx, const_int(0));
         int str_cur = sty->kind == TyKind::Str ? new_str_cursor() : -1;
+        // dict 迭代守卫除了长度还要看版本号：删一个再加一个时长度不变，
+        // 只比 Len 抓不到（CPython 会抛 RuntimeError）。
+        int ver_slot = -1;
+        if (sty->kind == TyKind::Dict) {
+            ver_slot = new_temp_slot(t_int());
+            store_slot(ver_slot, call_runtime(RtFn::DictVersion, t_int(), {seq_val()}));
+        }
 
         int cond = new_block("comp.cond");
         int body = new_block("comp.body");
@@ -391,7 +421,30 @@ VReg Lowerer::lower_comp(Expr& e) {
                        const_str(sty->kind == TyKind::Dict
                                      ? "dictionary changed size during iteration"
                                      : "Set changed size during iteration")});
+            end_unreachable();  // Raise 是 noreturn
             switch_to(ok_b);
+            if (sty->kind == TyKind::Dict && ver_slot >= 0) {
+                VReg cur_v = call_runtime(RtFn::DictVersion, t_int(), {seq_val()});
+                Inst ve;
+                ve.op = IrOp::Cmp;
+                ve.cop = CmpKind::Ne;
+                ve.a = cur_v;
+                ve.b = load_slot(ver_slot, t_int());
+                int kchanged = new_block("comp.iter.keys");
+                int kok = new_block("comp.iter.keys_ok");
+                Inst vbr;
+                vbr.op = IrOp::Branch;
+                vbr.a = def(t_bool(), std::move(ve));
+                vbr.target = kchanged;
+                vbr.target2 = kok;
+                emit(std::move(vbr));
+                switch_to(kchanged);
+                call_void(raise_rt(RtFn::Raise),
+                          {const_str("RuntimeError"),
+                           const_str("dictionary keys changed during iteration")});
+                end_unreachable();
+                switch_to(kok);
+            }
         }
         VReg iv = load_slot(idx, t_int());
         Inst cmp;
