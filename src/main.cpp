@@ -630,19 +630,9 @@ static int cmd_frontend(const std::string& path, const std::string& src,
     return 1;
 }
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr,
-                     "pyadamas —— Python 语法外壳的编译器\n"
-                     "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
-                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
-                     "[--asan|--ubsan] [-o out|--out out] [--json] [--locked] "
-                     "[--manifest file] [--module-map file] <file.py>\n",
-                     argv[0]);
-        return 2;
-    }
-
+// 0.599：main() 的命令行选项。以前是 21 个 main 里的局部变量，
+// 每个 cmd_* 都要带一长串参数；收进结构体后签名稳定、加选项不再改调用点。
+struct Options {
     std::string mode;
     std::string path;
     std::string output;
@@ -651,67 +641,71 @@ int main(int argc, char** argv) {
     std::vector<std::string> cdecl_links;
     bool syntax_only = false;
     bool verbose = false;
-    bool no_unsupported_note = false;  // 0.571：默认显示未建模构造，--no-unsupported-note 关闭
+    bool no_unsupported_note = false;
     bool rebuild = false;
     int opt_level = 2;
     bool fast_math = false;
-    // Z5（0.202）：表驱动展开是默认路径。可挂起函数（生成器/协程）仍然走
-    // setjmp —— 它们有 5 处 C 级 setjmp 兜底，抓不到 _Unwind，这是设计上的
-    // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
     bool zero_cost_exc = true;
-    bool resolve_imports = false;  // check：加载 import 图（模块属性检查，opt-in）
-    bool no_imports = false;       // check：显式关掉 import 图（默认就是关，保留兼容）
-    bool lenient_names = false;    // check：不报模块级未定义名字（逃生口）
-    // deps：JSON 输出（默认就是 JSON；--json 显式写出来便于脚本自解释）。
+    bool resolve_imports = false;
+    bool no_imports = false;
+    bool lenient_names = false;
     bool json_out = false;
-    // --module-map：外部模块映射文件（deps --json 的产物，可互相喂）。
     std::string module_map_path;
-    // 包管理（P0）：--manifest 显式指定清单；--locked 要求锁与清单一致。
     std::string manifest_flag;
     bool locked = false;
-    // 生成程序的内存检查器。空 = 不启用。
-    //
-    // RC/GC 这类「堆被写坏」的 bug 在 IR 层面完全看不出问题 —— 只有内存
-    // 检查器能抓到第一现场（谁第一个读到已释放内存）。0.216 的 unknown 槽
-    // 提升 bug 就是靠 ASan 定位的：IR 配平、-O0 也崩、关 GC 就好，
-    // 单看代码无从下手。
     std::string sanitize;
+};
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr,
+                     "pyadamas —— Python 语法外壳的编译器\n"
+                     "\n"
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
+                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
+                     "[--asan|--ubsan] [-o out|--out out] [--json] [--o.locked] "
+                     "[--manifest file] [--module-map file] <file.py>\n",
+                     argv[0]);
+        return 2;
+    }
+
+    Options o;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",  "check", "types", "ir",
                                                     "asm",    "build", "run",  "deps",  "cdecl",
                                                     "resolve"};
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--syntax") syntax_only = true;
-        else if (a == "--imports") resolve_imports = true;
-        else if (a == "--no-imports") no_imports = true;
-        else if (a == "--lenient-names") lenient_names = true;
-        else if (a == "--json") json_out = true;
-        else if (a.starts_with("--out=")) output = a.substr(6);
-        else if (a == "--out" && i + 1 < argc) output = argv[++i];
-        else if (a.starts_with("--module-map=")) module_map_path = a.substr(13);
-        else if (a == "--module-map" && i + 1 < argc) module_map_path = argv[++i];
-        else if (a == "--locked") locked = true;
-        else if (a.starts_with("--manifest=")) manifest_flag = a.substr(11);
-        else if (a == "--manifest" && i + 1 < argc) manifest_flag = argv[++i];
-        else if (a == "-v" || a == "--verbose") verbose = true;
+        if (a == "--syntax") o.syntax_only = true;
+        else if (a == "--imports") o.resolve_imports = true;
+        else if (a == "--no-imports") o.no_imports = true;
+        else if (a == "--lenient-names") o.lenient_names = true;
+        else if (a == "--json") o.json_out = true;
+        else if (a.starts_with("--out=")) o.output = a.substr(6);
+        else if (a == "--out" && i + 1 < argc) o.output = argv[++i];
+        else if (a.starts_with("--module-map=")) o.module_map_path = a.substr(13);
+        else if (a == "--module-map" && i + 1 < argc) o.module_map_path = argv[++i];
+        else if (a == "--locked") o.locked = true;
+        else if (a.starts_with("--manifest=")) o.manifest_flag = a.substr(11);
+        else if (a == "--manifest" && i + 1 < argc) o.manifest_flag = argv[++i];
+        else if (a == "-v" || a == "--verbose") o.verbose = true;
         else if (a == "--no-unsupported-note" || a == "-Wno-unsupported")
-            no_unsupported_note = true;
-        else if (a == "--rebuild") rebuild = true;
-        else if (a == "--fast-math") fast_math = true;
-        else if (a == "--asan") sanitize = "address";
-        else if (a == "--ubsan") sanitize = "undefined";
-        else if (a.starts_with("--sanitize=")) sanitize = a.substr(11);
-        else if (a == "--zero-cost-exc") zero_cost_exc = true;
-        else if (a == "--no-zero-cost-exc") zero_cost_exc = false;
-        else if (a == "-O0") opt_level = 0;
-        else if (a == "-O1") opt_level = 1;
-        else if (a == "-O2") opt_level = 2;
+            o.no_unsupported_note = true;
+        else if (a == "--rebuild") o.rebuild = true;
+        else if (a == "--fast-math") o.fast_math = true;
+        else if (a == "--asan") o.sanitize = "address";
+        else if (a == "--ubsan") o.sanitize = "undefined";
+        else if (a.starts_with("--sanitize=")) o.sanitize = a.substr(11);
+        else if (a == "--zero-cost-exc") o.zero_cost_exc = true;
+        else if (a == "--no-zero-cost-exc") o.zero_cost_exc = false;
+        else if (a == "-O0") o.opt_level = 0;
+        else if (a == "-O1") o.opt_level = 1;
+        else if (a == "-O2") o.opt_level = 2;
         else if (a.starts_with("--opt=")) {
             std::string v = a.substr(6);
-            if (v == "0") opt_level = 0;
-            else if (v == "1") opt_level = 1;
-            else if (v == "2") opt_level = 2;
+            if (v == "0") o.opt_level = 0;
+            else if (v == "1") o.opt_level = 1;
+            else if (v == "2") o.opt_level = 2;
             else {
                 std::fprintf(stderr, "error: invalid optimization level '%s' (expected 0,1,2)\n",
                              v.c_str());
@@ -732,41 +726,41 @@ int main(int argc, char** argv) {
             }
             pyadamas::set_target_abi(abi);
         }
-        else if (a == "-o" && i + 1 < argc) output = argv[++i];
-        else if (a == "--link" && i + 1 < argc) cdecl_links.push_back(argv[++i]);
-        else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
-        else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
+        else if (a == "-o" && i + 1 < argc) o.output = argv[++i];
+        else if (a == "--link" && i + 1 < argc) o.cdecl_links.push_back(argv[++i]);
+        else if (a == "-I" && i + 1 < argc) o.include_dirs.push_back(argv[++i]);
+        else if (a.starts_with("-I") && a.size() > 2) o.include_dirs.push_back(a.substr(2));
         else if (a == "--") {
             // `pyadamas run prog.py -- a b`：余下参数原样传给被运行的程序。
-            for (++i; i < argc; ++i) prog_args.push_back(argv[i]);
+            for (++i; i < argc; ++i) o.prog_args.push_back(argv[i]);
             break;
         }
-        else if (mode.empty() && std::ranges::find(kModes, a) != kModes.end()) mode = a;
-        else path = a;
+        else if (o.mode.empty() && std::ranges::find(kModes, a) != kModes.end()) o.mode = a;
+        else o.path = a;
     }
-    if (mode.empty()) mode = "ast";
+    if (o.mode.empty()) o.mode = "ast";
     // resolve 可以只给项目目录（甚至什么都不给：用 cwd），不需要入口文件。
-    if (path.empty() && mode != "resolve") {
+    if (o.path.empty() && o.mode != "resolve") {
         std::fprintf(stderr, "error: no input file\n");
         return 2;
     }
-    const bool package_mode = mode == "resolve" || mode == "deps" || mode == "asm" ||
-                              mode == "ir" || mode == "build" || mode == "run";
-    if (!package_mode && (locked || !manifest_flag.empty())) {
+    const bool package_mode = o.mode == "resolve" || o.mode == "deps" || o.mode == "asm" ||
+                              o.mode == "ir" || o.mode == "build" || o.mode == "run";
+    if (!package_mode && (o.locked || !o.manifest_flag.empty())) {
         std::fprintf(stderr,
-                     "error: --locked/--manifest are only supported by "
+                     "error: --o.locked/--manifest are only supported by "
                      "resolve/build/run/asm/ir/deps\n");
         return 2;
     }
 
-    if (mode == "cdecl")
-        return cmd_cdecl(path, output, cdecl_links, include_dirs);
+    if (o.mode == "cdecl")
+        return cmd_cdecl(o.path, o.output, o.cdecl_links, o.include_dirs);
 
     // resolve：清单 → path 依赖闭包 → 写锁。不读入口文件（可以只给项目目录）。
-    if (mode == "resolve")
-        return cmd_resolve(path, manifest_flag, locked);
+    if (o.mode == "resolve")
+        return cmd_resolve(o.path, o.manifest_flag, o.locked);
 
-    auto src = read_file(path);
+    auto src = read_file(o.path);
     if (!src) {
         std::fprintf(stderr, "error: %s\n", src.error().c_str());
         return 1;
@@ -774,34 +768,34 @@ int main(int argc, char** argv) {
 
     try {
         if (!package_mode) {
-            return cmd_frontend(path, *src, include_dirs, mode, syntax_only, lenient_names,
-                                no_imports, resolve_imports, no_unsupported_note);
+            return cmd_frontend(o.path, *src, o.include_dirs, o.mode, o.syntax_only, o.lenient_names,
+                                o.no_imports, o.resolve_imports, o.no_unsupported_note);
         }
 
         // deps：只建模块图与接口（不降级、不汇编），输出确定性 JSON。
-        if (mode == "deps") {
-            return cmd_deps(path, include_dirs, module_map_path, manifest_flag,
-                            output, verbose,
-                            json_out, locked);
+        if (o.mode == "deps") {
+            return cmd_deps(o.path, o.include_dirs, o.module_map_path, o.manifest_flag,
+                            o.output, o.verbose,
+                            o.json_out, o.locked);
         }
 
         Program prog;
-        if (!setup_program(prog, path, include_dirs, sanitize, rebuild, module_map_path,
-                           manifest_flag, locked, verbose, opt_level, fast_math,
-                           zero_cost_exc))
+        if (!setup_program(prog, o.path, o.include_dirs, o.sanitize, o.rebuild, o.module_map_path,
+                           o.manifest_flag, o.locked, o.verbose, o.opt_level, o.fast_math,
+                           o.zero_cost_exc))
             return 1;
 
-        if (mode == "ir" || mode == "asm")
-            return cmd_ir_asm(prog, mode);
+        if (o.mode == "ir" || o.mode == "asm")
+            return cmd_ir_asm(prog, o.mode);
 
         // build / run：模块各自汇编成 .o，再链接。
-        return cmd_build_or_run(prog, mode, prog_args, output, path);
+        return cmd_build_or_run(prog, o.mode, o.prog_args, o.output, o.path);
     } catch (const pyadamas::LexError& e) {
-        report(path, *src, e.line, e.col, e.what());
+        report(o.path, *src, e.line, e.col, e.what());
     } catch (const pyadamas::ParseError& e) {
-        report(path, *src, e.line, e.col, e.what());
+        report(o.path, *src, e.line, e.col, e.what());
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "%s: internal error: %s\n", path.c_str(), e.what());
+        std::fprintf(stderr, "%s: internal error: %s\n", o.path.c_str(), e.what());
     }
     return 1;
 }
