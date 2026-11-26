@@ -46,6 +46,10 @@ void TypeChecker::stmts_impl(std::vector<StmtPtr>& body, bool inherit_del) {
     DelGuard del_guard(deleted_names_, inherit_del);
     // 提前退出的 None 守卫：`if x is None: return` 之后 x 一定不是 None；收窄保持到块末。
     std::vector<Narrowing> active;
+    // 0.679：本序列是 assert 窄化的作用域上界；嵌套体（循环/try/with）各自
+    // 建立自己的 sink，出块时恢复，所以窄化不会泄漏到块之后。
+    std::vector<Narrowing>* const saved_sink = narrow_sink_;
+    narrow_sink_ = &active;
     for (auto& s : body) {
         if (s->kind == StmtKind::If) {
             auto& f = static_cast<If&>(*s);
@@ -63,6 +67,7 @@ void TypeChecker::stmts_impl(std::vector<StmtPtr>& body, bool inherit_del) {
         }
         stmt(*s);
     }
+    narrow_sink_ = saved_sink;
     for (auto& n : active) restore_narrowing(n);
 }
 

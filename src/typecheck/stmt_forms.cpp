@@ -810,10 +810,13 @@ void TypeChecker::stmt_raise(Raise& r) {
 void TypeChecker::stmt_assert(Assert& a) {
         expr(*a.test);
         if (a.msg) expr(*a.msg);
-        // `assert x is not None` 之后 x 一定非 None（0.498）：只在这里施加窄化，
-        // 不登记恢复点 —— 它的作用域就是余下的语句；外层 if 分支的
-        // restore_types 快照会自然地把它限制在该分支内。
-        (void)narrow_on(*a.test, true);
+        // `assert x is not None` 之后 x 一定非 None（0.498）。作用域是**余下的语句**，
+        // 所以窄化必须登记到当前语句序列的恢复点集合：0.679 之前它不登记，
+        // 靠「外层 if 分支的 restore_types 快照」兜着——但只有 if 有快照，
+        // while/for/with/try 的体没有，于是循环体一次都不执行时窄化仍泄漏到块之后，
+        // `return x.m()` 会把 None 当类指针解引用（实测段错误）。
+        Narrowing n = narrow_on(*a.test, true);
+        if (narrow_sink_ && (n.sym || !n.akey.empty())) narrow_sink_->push_back(n);
         return;
     }
 

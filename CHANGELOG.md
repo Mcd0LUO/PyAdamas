@@ -6,6 +6,35 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.679] - 2026-11-27
+
+> fix(typecheck)：**`assert x is not None` 的窄化不再是「泄漏出块」的** —— 修掉一个段错误。
+>
+> ```python
+> def f(x: Optional[C], n: int) -> int:
+>     while i < n:              # n = 0，循环体一次都不执行
+>         assert x is not None
+>         i = i + 1
+>     return x.m()              # 修前：段错误（把 None 当类指针解引用）
+>                               # 修后：显式类型错误（x 仍可能是 None）
+> ```
+>
+> 根因：`stmt_assert` 施加窄化时**不登记恢复点**，注释假设「外层 if 分支的 restore_types
+>快照会把它限制在分支内」——但**只有 `if` 有快照**，`while`/`for`/`with`/`try` 的体没有。
+>于是循环体（或 try 体里 assert 之前抛异常跳过 assert）未执行时，窄化仍然生效到块之后。
+>
+> 修法：在 `TypeChecker` 里加 `narrow_sink_`——`stmts_impl` 把当前序列的恢复点集合挂上去，
+>`stmt_assert` 把窄化登记进去，出序列时统一 `restore_narrowing`。嵌套体各自建 sink，
+>所以作用域就是**余下的语句**，与 CPython 的语义一致。
+>
+> 直行代码里的 assert 窄化不受影响（`assert x is not None; return x.m()` 仍通过，输出与 CPython 一致）。
+>
+> 三个探针从「段错误 / 静默错值」变成**显式类型错误**：
+>`p8_assert_loop_crash`（段错误）、`p2_assert_for`（静默错值 8）、`r16_try_realistic`（段错误）。
+>
+> 新增回归用例 `tests/run/assert_narrow_scope.py`（循环零次执行 + 直行 assert 两种形态）。
+>
+> 闸门：套件 **600**、difftest **543-0**、check_size。
 ## [0.678] - 2026-11-27
 
 > fix(typecheck)：**联合接收者的方法调用只在「其余成员都是 None」时才按命中者查**。

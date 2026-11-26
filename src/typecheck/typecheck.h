@@ -451,6 +451,10 @@ private:
         std::string akey;
         bool had_old = false;
     };
+    // 0.679：当前 statements 序列的恢复点集合。`assert x is not None` 施加的窄化
+    // 必须登记在这里，否则它会泄漏出循环体/try 体（那些块没有 if 的 restore_types
+    // 快照），导致「循环零次执行却按非 None 解引用」→ 段错误。
+    std::vector<Narrowing>* narrow_sink_ = nullptr;
     // 0.537：del 的可见范围 = 当前 statements 序列（保守版）。
     // 两种进入方式（BUG-2 修复后）：
     //   新的作用域（函数体）—— 保存并清空，函数里读同名全局不受外层 del 影响；
