@@ -306,6 +306,31 @@ static int cmd_deps(const std::string& path,
             return 0;
 }
 
+static int cmd_resolve(const std::string& path, const std::string& manifest_flag,
+                         bool locked) {
+    (void)locked;
+        std::string manifest_path = manifest_flag;
+        if (manifest_path.empty()) manifest_path = pyadamas::find_manifest(path).value_or("");
+        if (manifest_path.empty()) {
+            std::fprintf(stderr,
+                         "error: no pyadamas.toml found from '%s' upward; run resolve inside a "
+                         "package project or pass --manifest <file>\n",
+                         path.empty() ? "." : path.c_str());
+            return 1;
+        }
+        auto manifest = pyadamas::load_manifest(manifest_path);
+        if (!manifest) return 1;
+        auto lock = pyadamas::resolve_lock(*manifest);
+        if (!lock) return 1;
+        const std::string lock_file =
+            (std::filesystem::path(manifest_path).parent_path() / "pyadamas.lock").string();
+        if (!pyadamas::write_lock_file(lock_file, lock->render())) return 1;
+        std::printf("wrote %s (%zu package%s, %zu module%s)\n", lock_file.c_str(),
+                    lock->packages.size(), lock->packages.size() == 1 ? "" : "s",
+                    lock->modules.size(), lock->modules.size() == 1 ? "" : "s");
+        return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -457,28 +482,8 @@ int main(int argc, char** argv) {
     }
 
     // resolve：清单 → path 依赖闭包 → 写锁。不读入口文件（可以只给项目目录）。
-    if (mode == "resolve") {
-        std::string manifest_path = manifest_flag;
-        if (manifest_path.empty()) manifest_path = pyadamas::find_manifest(path).value_or("");
-        if (manifest_path.empty()) {
-            std::fprintf(stderr,
-                         "error: no pyadamas.toml found from '%s' upward; run resolve inside a "
-                         "package project or pass --manifest <file>\n",
-                         path.empty() ? "." : path.c_str());
-            return 1;
-        }
-        auto manifest = pyadamas::load_manifest(manifest_path);
-        if (!manifest) return 1;
-        auto lock = pyadamas::resolve_lock(*manifest);
-        if (!lock) return 1;
-        const std::string lock_file =
-            (std::filesystem::path(manifest_path).parent_path() / "pyadamas.lock").string();
-        if (!pyadamas::write_lock_file(lock_file, lock->render())) return 1;
-        std::printf("wrote %s (%zu package%s, %zu module%s)\n", lock_file.c_str(),
-                    lock->packages.size(), lock->packages.size() == 1 ? "" : "s",
-                    lock->modules.size(), lock->modules.size() == 1 ? "" : "s");
-        return 0;
-    }
+    if (mode == "resolve")
+        return cmd_resolve(path, manifest_flag, locked);
 
     auto src = read_file(path);
     if (!src) {
