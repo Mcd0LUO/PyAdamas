@@ -6,6 +6,30 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.655] - 2026-11-27
+
+> fix(typecheck)：**`Color('RED')`（int 值枚举传 str）从运行时段错误变成编译期报错**。
+>
+> ```python
+> from enum import Enum
+> class Color(Enum):
+>     RED = 1
+> print(Color("RED"))
+> # 修前：Segmentation fault (core dumped)，exit 139
+> # 修后：error: enum 'Color' expects an int value, got 'str'
+> ```
+>
+> ASan 单例确认**不是内存管理错误，是读错地址**：`SEGV in pa_str_eq`（`rdi=0x9`）——
+>`coerce(str -> int)` 静默放过，比较指令按 vreg 的 str 类型生成 `pa_str_eq`，
+>把成员值 `1` 当串指针读串头。
+>
+> 修法：新增 `TypeChecker::check_enum_call()` 集中做「恰好一个位置实参」+「int 值枚举
+>只收 int-like（unknown 放行）」，本模块 `Color(...)` 与跨模块 `mod.C(...)` 两个分支都走它，
+>`from kenum import Color` 的调用点一并覆盖。降级层没动——typecheck 报错后不再进降级。
+>
+> `Color(2).name` → `GREEN`、`Color(99)` → 仍运行期 `ValueError`、`Color(True)` → `RED`（同 CPython）。
+>
+> 新增 `tests/fail/enum_ctor_arg.py`。套件 / check_size 见下。
 ## [0.654] - 2026-11-27
 
 > fix(iface)+feat：**跨模块 enum 可按值构造、可迭代、可 `len`**（审计 A8-4）。
