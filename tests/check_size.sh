@@ -89,4 +89,11 @@ if [ "$fail" -ne 0 ]; then
     echo "结果：文件规模超限。请拆分，或把确实需要保留的文件登记到 ALLOW_FILES。"
     exit 1
 fi
+
+# 生成物一致性：rtfn_names.h 由 src/ir/rtfn.def 生成，漂移就地拦住。
+if ! python3 "$(dirname "$0")/../tools/gen_rtfn.py" --check >/dev/null 2>&1; then
+    echo "结果：src/ir/rtfn_names.h 与 src/ir/rtfn.def 不一致（运行 tools/gen_rtfn.py 重新生成）。"
+    exit 1
+fi
+
 echo "结果：文件规模检查通过。"
