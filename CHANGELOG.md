@@ -6,6 +6,31 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.677] - 2026-11-27
+
+> refactor(opt)：**把「哪条指令可能抛异常」收敛成一个共享谓词** —— `opt_may_raise()`。
+>
+> 起因是 0.676 修的那两个 bug：`float→int` 转换会抛（cvttsd2si 的 `INT64_MIN` 哨兵检查），
+而 `fold` / `loop`(LICM) / `global_promote` / `ifconv` **各自维护一份判断**，两处漏了、一处仍在漏。
+>
+> ```cpp
+> // src/opt/detail.h 声明，src/opt/fold.cpp 实现
+> bool opt_may_raise(const Inst& in, const IRFunction* fn);   // fn == nullptr → 保守口径
+> ```
+>
+> - **保守口径**（拿不到操作数类型）：`Convert` 目标为任何整数种类都算可能抛；
+> - **精确口径**（有 fn）：目标 `Int` 且源是 float/unknown/取不到 → 抛；
+>   目标定宽整数（I8..U64）是裸 cvttsd2si + 截断，不抛；目标 Bool/Float 不抛；
+>   调用族、`IndexLoad`/`IndexStore`、`Setjmp`、`Bin` 的 Div/Mod/FloorDiv → 可能抛。
+>
+> 四处接入后的保守度：`fold` / `loop` / `global_promote` **逐字不变**；`ifconv` **收紧**
+>（原来「目标 Int/Bool 一律收」是最后一处潜在漏判，现在只拒真正的 float→int）。
+>
+> 验收：套件 **600**；全量 difftest **543 例 0 不一致**；`tests/opt_levels.sh` **40/40**
+>（13 用例 × O0/O1/O2 + fast-math，覆盖 backend 的 6 处 `opt_ >= 1`）；
+>12 基准**无一项退化**（最差 binary_trees −0.12%，方向为变好）。
+>
+> 约定（写进 `detail.h` 注释）：今后出现新的「可能抛异常」形态，**只改这一处**。
 ## [0.676] - 2026-11-27
 
 > fix(opt)：**两处 -O2 语义错误**（同一根因：`float → int` 转换被当成纯指令）。
