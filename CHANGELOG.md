@@ -6,6 +6,23 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.659] - 2026-11-27
+
+> docs：**审计 B2（8 处指向已搬迁/已删除的源文件）**逐条核对后修正。
+>
+> 多数是模块拆分后留下的旧路径：`src/lower/builtin.cpp` → `src/lower/builtin/builtin.cpp`、
+>`method_str.cpp` → `method/method_str.cpp`、`import.cpp` → `module/import.cpp`、
+>`backend/tag_defs.h` → `common/tag_defs.h` 等。有两处**同一个坏路径在全文出现多次**
+>（`str-codepoints.md` 7 处、`native-stdlib-cookbook.md` 12 处），一并改掉——只改审计点到的那一处
+>会留一堆坏引用。
+>
+> 0.480 已随特化模板删除的两个文件（`backend/simd.h`、`src/backend/simd.cpp`）按文档性质分别处理：
+>- `modularization.md` 那句是**现在时**描述 → 从列表删掉；
+>- `simd-vectorization-design.md` 是**历史设计存档**（文首自带「0.480 代码已删除」）→ 保留原句，
+>  就地补一句「0.480 已随特化模板一起删除」。
+>
+> 同类残留在审计清单外还有 8 处（`cffi-design.md`、`compile-speed.md`、`cpybridge-design.md`、
+>`exc-semantics.md`、`lang-gaps-landing.md`、`next-round-plan.md`、`stdlib-batch1.md`），已记录待下一批收。
 ## [0.658] - 2026-11-27
 
 > docs：**驱动层审计 B1（7 处「与代码矛盾」）**逐条核对后修正 6 处，1 处判定不成立。
