@@ -289,6 +289,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> cdecl_links;
     bool syntax_only = false;
     bool verbose = false;
+    bool no_unsupported_note = false;  // 0.571：默认显示未建模构造，--no-unsupported-note 关闭
     bool rebuild = false;
     int opt_level = 2;
     bool fast_math = false;
@@ -332,6 +333,8 @@ int main(int argc, char** argv) {
         else if (a.starts_with("--manifest=")) manifest_flag = a.substr(11);
         else if (a == "--manifest" && i + 1 < argc) manifest_flag = argv[++i];
         else if (a == "-v" || a == "--verbose") verbose = true;
+        else if (a == "--no-unsupported-note" || a == "-Wno-unsupported")
+            no_unsupported_note = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
         else if (a == "--asan") sanitize = "address";
@@ -484,15 +487,36 @@ int main(int argc, char** argv) {
                     std::printf("%-24s %s\n", name.c_str(), ty.c_str());
                 return 0;
             }
-            if (verbose && !fe->tc.unsupported.empty()) {
+            // 0.571：未建模构造默认**可见**。以前只在 -v 时打印，等于默认静默放过；
+            // 「不支持就是不支持」的前提是用户看得见。--no-unsupported-note 可关。
+            if (!fe->tc.unsupported.empty() && !no_unsupported_note) {
                 auto& uns = fe->tc.unsupported;
                 std::ranges::sort(uns);
                 auto uniq = std::ranges::unique(uns);
                 uns.erase(uniq.begin(), uniq.end());
-                std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled:",
-                             uns.size());
-                for (auto& u : uns) std::fprintf(stderr, " %s", u.c_str());
-                std::fprintf(stderr, "\n");
+                // 按类别（冒号/引号前的前缀）汇总，最多列 6 类，避免刷屏。
+                std::map<std::string, size_t> by_kind;
+                for (auto& u : uns) {
+                    auto pos = u.find_first_of("'\"");
+                    by_kind[u.substr(0, pos == std::string::npos ? u.size() : pos)]++;
+                }
+                if (uns.size() <= 4) {
+                    // 少量时逐条列出（测试与用户都更需要具体名字）
+                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled:",
+                                 uns.size());
+                    for (auto& u : uns) std::fprintf(stderr, " %s", u.c_str());
+                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
+                } else {
+                    std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled",
+                                 uns.size());
+                    size_t shown = 0;
+                    for (auto& [k, n] : by_kind) {
+                        if (shown++ == 6) { std::fprintf(stderr, ", ..."); break; }
+                        std::fprintf(stderr, "%s%s(%zu)", shown == 1 ? ": " : ", ", k.c_str(),
+                                     n);
+                    }
+                    std::fprintf(stderr, " [--no-unsupported-note to silence]\n");
+                }
             }
             std::printf("ok: %s (%zu statements, %zu functions, %zu expressions)\n", path.c_str(),
                         fe->mod->body.size(), fe->tc.n_func, fe->tc.n_expr);
