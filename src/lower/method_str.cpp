@@ -108,13 +108,15 @@ VReg Lowerer::lower_method_str(Attribute& at, Call& c, VReg recv) {
         VReg cnt = need_int(2, -1);
         return emit_op(StrOp::Replace, t_str(), old, nw, cnt);
     }
-    if (at.attr == "find" || at.attr == "rfind" || at.attr == "index") {
+    if (at.attr == "find" || at.attr == "rfind" || at.attr == "index" ||
+        at.attr == "rindex") {
         if (!arg_count(1, 3)) return const_none();
         VReg sub = need_str(0);
         VReg start = need_int(1, 0);
         VReg end = need_int(2, std::numeric_limits<int64_t>::max());
         StrOp op = at.attr == "find" ? StrOp::Find
-                   : at.attr == "rfind" ? StrOp::RFind : StrOp::Find;
+                   : at.attr == "rfind" ? StrOp::RFind
+                   : at.attr == "rindex" ? StrOp::RIndex : StrOp::Find;
         VReg pos = emit_op(op, t_int(), sub, start, end);
         if (at.attr == "index") {
             int ok_b = new_block("str.index.ok");

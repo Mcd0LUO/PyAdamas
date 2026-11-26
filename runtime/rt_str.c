@@ -1684,6 +1684,27 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
         }
         case 32: /* encode：str -> bytes 的真实转换（S2） */
             return (int64_t)pa_str_encode(s);
+        case 35: { /* rindex：rfind + 找不到抛 ValueError */
+            PyAdamasStr* sub = (PyAdamasStr*)a0;
+            int64_t start = a1, end = a2;
+            if (start < 0) start += s->pub;
+            if (start < 0) start = 0;
+            if (end < 0) end += s->pub;
+            if (end > s->pub) end = s->pub;
+            if (end < 0) end = 0;
+            if (sub->len == 0 && end >= start) return end;
+            if (start <= end) {
+                int64_t bstart = str_cp_to_byte(s, start);
+                int64_t bend = str_cp_to_byte(s, end);
+                for (int64_t i = bend - sub->len; i >= bstart; --i) {
+                    if (((unsigned char)s->data[i] & 0xC0) == 0x80) continue;
+                    if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0)
+                        return cp_index_of(s, i);
+                }
+            }
+            pa_raise_c("ValueError", "substring not found");
+            return -1;
+        }
         case 34: { /* isascii：所有码点 < 0x80 */
             int64_t off = 0;
             while (off < s->len) {
@@ -1928,6 +1949,23 @@ int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int6
         }
         case 32: /* decode：bytes -> str 的真实转换（S2） */
             return (int64_t)pa_bytes_decode(s);
+        case 35: { /* rindex：字节下标版 */
+            PyAdamasStr* sub = (PyAdamasStr*)a0;
+            int64_t start = a1, end = a2;
+            if (start < 0) start += s->len;
+            if (start < 0) start = 0;
+            if (end < 0) end += s->len;
+            if (end > s->len) end = s->len;
+            if (end < 0) end = 0;
+            if (sub->len == 0 && end >= start) return end;
+            if (start <= end) {
+                for (int64_t i = end - sub->len; i >= start; --i) {
+                    if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0) return i;
+                }
+            }
+            pa_raise_c("ValueError", "subsection not found");
+            return -1;
+        }
         case 34: { /* isascii：所有字节 < 0x80 */
             for (int64_t i = 0; i < s->len; ++i)
                 if ((unsigned char)s->data[i] >= 0x80) return 0;

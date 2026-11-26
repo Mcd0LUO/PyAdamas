@@ -68,6 +68,7 @@ enum class StrOp : int64_t {
     IsUpper, IsLower, IsAlphaNum, RemovePrefix, RemoveSuffix, SplitLines,
     Encode, Decode,
     IsAscii,  // 0.572：只含 ASCII（C locale 语义，不动码点）
+    RIndex,   // 0.573：rfind + 找不到就抛 ValueError
 };
 
 enum class IrOp : uint8_t {
