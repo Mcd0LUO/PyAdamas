@@ -1,64 +1,58 @@
-# 异常抛出路径的性能现状（2026-11-27）
+# 内存效率：RC 头 64 字节的构成与压缩评估（2026-11-27）
 
-> 状态：**只有测量与方案，没有实现**。写下来是为了下一次有人想动这块时不必重新测一遍。
+> 状态：**测量与评估，未实现**。结论：**不要按「只打包 size/kind/marked」做 48 字节**，两个硬冲突见 §3。
 
-## 1. 现象
+## 1. 现状
 
-`/src/luo-proj/excbench/pya/main.py`：10 万次「真的抛出并接住」。
+`PyAdamasRc` = 64 字节（`runtime/rt_internal.h`）：
 
-| 机制 | 时间 |
-|---|---|
-| pya 表驱动（默认，零开销异常） | **235–239 ms** |
-| pya `--no-zero-cost-exc`（setjmp 回退） | **33–61 ms** |
-| CPython | 57–72 ms |
-| Go（error 返回值） | 0 ms |
-
-**正常路径**（不抛）两边都是 0–2 ms——「零开销」这个设计本身没问题，慢的只有抛出路径。
-
-## 2. profile（指令级）
-
-```
-$ perf record -e cycles:u /tmp/ex_pya
-    79.52%  pa_eh_throw
-            --77.79%--_Unwind_RaiseException
-                        --24.76%-- (libgcc 内部，无符号)
+```c
+next, prev;            // 16  堆链，rc_unlink 靠它做 O(1) 摘除
+int64_t rc;            // 8
+void (*dtor)(void*);   // 8
+void (*release)(void*);// 8
+int64_t size;          // 8   GC 记账
+int64_t kind;          // 8
+int64_t marked;        // 8   标志位 **+ young 链表下标**
 ```
 
-- `pa_eh_throw` 自身很干净：一次 wrapper 分配、几个字段赋值、一次 `_Unwind_RaiseException`。
-- 时间几乎全在 **libgcc 的展开器**里：DWARF CFI 逐帧解析 + 每个 FDE 调用一次 personality。
-- 我们的 personality（`runtime/rt_personality.c`，677 行）**自采样占比是 0.00%**，
-  说明它不是热点；热点是「逐帧走一遍」这个动作本身，以及 phase1/phase2 **走两遍**。
+`_Static_assert(sizeof(PyAdamasRc) == 64)` 必须与 `src/backend/codegen.cpp` 里**预置字面量头**的
+三处（`codegen.cpp:157`/`196`/`392`，str / big / 闭包）一致——漏一处就是字面量对象头部错位。
 
-## 3. 可选方向（按风险从低到高）
+## 2. 开销占比（实测）
 
-### A. 同一帧内直接跳 landing pad（推荐先做这个）
-`raise` 在**同一个函数**的 `try` 里时，理论上不需要展开：直接跳到该 try 的 landing pad，
-把异常对象塞进槽即可。这是绝大多数 `try/except` 的形态。
+gcbench cycles 200K：`Maximum resident` **47.8 MB**（3 次：47,800 / 47,868 / 47,804 KB）。
+每个 2 元素 list 的块构成：`header(64) + PyAdamasList(48) + data(32) = 144B`（glibc chunk 160）。
+头部占 **44%**。
 
-- 需要 lowering 知道「当前 raise 点属于哪个 try 区域、该区域的 landing pad 在哪」；
-- 仍需处理中间的 `finally`、以及 handler 的执行顺序（不能跳过清理）；
-- 收益上限：把 235ms 拉到接近 setjmp 的 33ms（即 **7×**）。
+## 3. 两个硬冲突（2026-11-28 复核）
 
-### B. 在一次 throw 内缓存 LSDA 查询
-phase1（找 handler）与 phase2（清理）会遍历同一串帧。若把「IP → landing pad/filter」
-缓存在 `pa_eh_throw` 的栈上（每帧一次），可省掉一半解析。
+### 3.1 `marked` 不是纯标志位，它存着 young 链表的**下标**
 
-- 改动集中在 `runtime/rt_personality.c` + `rt_eh.c` 的 wrapper；
-- 收益不确定（未见 profile 显示 personality 是大头，但它是 libgcc 匿名帧之外的必然成本）；
-- 风险：缓存键必须含「帧的 CFA/SP」，增量标记/信号等边角要小心。
-
-### C. 明确文档化 `--no-zero-cost-exc`（零成本）
-热路径上频繁真的抛异常时，编译期开关已经能回退到 setjmp（33ms，与 CPython 持平）。
-README 里已经写了这条建议；如果再没有 A/B 的实现，这至少是**当下正确的答案**。
-
-## 4. 重测方法（照抄即可）
-
-```bash
-cd /src/luo-proj/pyadamas
-./build/lead/pyadamas build -O2 -o /tmp/ex_pya -I /src/luo-proj/excbench/pya /src/luo-proj/excbench/pya/main.py
-for i in 1 2 3; do /usr/bin/time -f '%e s' /tmp/ex_pya; done
-perf record -e cycles:u -o /tmp/perf_ex.data /tmp/ex_pya && perf report -i /tmp/perf_ex.data --stdio | head -20
+```c
+h->marked = ((int64_t)young_len << 8) | PYADAMAS_RC_YOUNG;   // rt_core.c:328
+size_t i = (size_t)(h->marked >> 8);                        // :333  删除时按下标回填
 ```
 
-⚠️ 不要用 `perf stat` 的 instructions 做唯一判据：这条路径的差异主要在**控制流/缓存**，
-指令数变化不大（235ms 与 33ms 的指令数只差 2×）。
+低 8 位是标志（YOUNG/DEFER/UNTRACKED/LEAF/CONS/MARK），**其余位是下标**——这是 young 代
+O(1) 摘除的基础。young 代长度自适应且无上限（`:3098`、`:3596`），gcbench cycles 一代就 20 万对象。
+压到 u16（8 位下标）会让 `young_del` 下标回绕 → `young_buf[i] != h` 判断失败 → **已 free 的对象留在
+young_buf**，下次 GC 拷进扫描集解引用 → 静默 UAF。
+
+### 3.2 即使做到 48 字节，RSS 也只降 6.7%
+
+每块省 16B → 3.2MB → **47.8 → 44.6 MB（−6.7%）**。而验收线是 ≥8%（需 ≥19B/对象）。
+**只有把 `dtor`/`release` 也去掉（32 字节头）才能到 ≈−13%**——那是「第二步」。
+
+## 4. 建议
+
+1. **不要单独做 48 字节**。把「RC 头压缩」合并到**第二步（dtor/release 表化 → 32 字节）**一次立项：
+   那时既腾出位给 `marked`/young 下标，RSS 也能到 −13%，8% 的验收才有意义。
+2. 只想降 gcbench RSS 的另一条路：缩 list 内联块 / pool 参数（不动头布局），需单独量化。
+
+## 5. 改头布局时的清单（给真要动手的人）
+
+- `->size` 读写点 **35** 处、`->kind` **110** 处（14 文件）、`->marked` **52** 处；
+- codegen 预置字面量头 **3** 处 + 1 条 `_Static_assert`；
+- `PYADAMAS_RC_HDR = sizeof(...)` 会自动跟随，无需改；
+- 验收：全套件 598 + **全量 difftest 541-0** + **ASan 单例 ≥3 个（0 报错）** + gcbench RSS + 12 基准不退化。
