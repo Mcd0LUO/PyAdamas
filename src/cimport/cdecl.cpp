@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -312,7 +313,35 @@ std::vector<Tok> cdecl_lex(const std::string& code) {
 std::string cdecl_generate(const std::string& header_path, const std::string& module,
                            const std::vector<std::string>& links,
                            const std::vector<std::string>& include_dirs, std::string& err) {
-    std::ifstream in(header_path);
+    // 0.561：头文件路径**找不到就搜**。`sys/socket.h` 在 Debian/Ubuntu 上位于
+    // /usr/include/x86_64-linux-gnu/ 下，让用户自己拼绝对路径不合理。
+    std::string resolved = header_path;
+    {
+        std::error_code ec;
+        auto is_file = [&](const std::string& p) {
+            return std::filesystem::is_regular_file(p, ec);
+        };
+        if (!is_file(resolved) && !std::filesystem::path(resolved).is_absolute()) {
+            std::vector<std::string> roots = include_dirs;
+            roots.push_back("/usr/include");
+            roots.push_back("/usr/local/include");
+            // 多架构目录：/usr/include/<triple>
+            for (auto& d : std::filesystem::directory_iterator("/usr/include", ec)) {
+                std::string name = d.path().filename().string();
+                if (name.find("-linux-gnu") != std::string::npos ||
+                    name.find("-linux-musl") != std::string::npos)
+                    roots.push_back(d.path().string());
+            }
+            for (auto& r : roots) {
+                std::string cand = std::filesystem::path(r) / resolved;
+                if (is_file(cand)) {
+                    resolved = cand;
+                    break;
+                }
+            }
+        }
+    }
+    std::ifstream in(resolved);
     if (!in) {
         err = std::format("cannot open header '{}'", header_path);
         return {};
@@ -326,14 +355,14 @@ std::string cdecl_generate(const std::string& header_path, const std::string& mo
     std::vector<MacroDef> defs;
     std::string internal = cdecl_preprocess(src, defs);
     std::string code;
-    if (!cpp_expand(header_path, include_dirs, code) || code.empty()) {
+    if (!cpp_expand(resolved, include_dirs, code) || code.empty()) {
         code = std::move(internal);
     } else {
         strip_directive_lines(code);
         strip_gcc_extensions(code);
     }
     std::vector<Tok> toks = cdecl_lex(code);
-    return cdecl_process(toks, defs, header_path, module, links, err);
+    return cdecl_process(toks, defs, resolved, module, links, err);
 }
 
 }  // namespace pyadamas

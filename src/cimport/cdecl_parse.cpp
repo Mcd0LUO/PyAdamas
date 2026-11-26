@@ -1055,6 +1055,15 @@ std::string cdecl_process(const std::vector<Tok>& toks, const std::vector<MacroD
                           const std::string& header_path, const std::string& module,
                           const std::vector<std::string>& links, std::string& err) {
     Cdecl cd;
+    // 0.561：编译器内建类型先登记成不透明指针 —— 最常见的是 `__builtin_va_list`
+    // （stdio.h 的 vprintf 家族全靠它），不登记就会被当成「unsupported typedef」整批跳过。
+    {
+        CType vp;
+        vp.k = CType::Ptr;
+        vp.inner = std::make_shared<CType>();
+        cd.alias["__builtin_va_list"] = vp;
+        cd.alias["__builtin_ms_va_list"] = vp;
+    }
     cd.handle_macros(defs, toks);
 
     size_t pos = 0;

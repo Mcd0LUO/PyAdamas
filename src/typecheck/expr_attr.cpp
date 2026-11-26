@@ -23,6 +23,13 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                 }
                 return ckind_type(v.kind);
             }
+            // 0.561：.cpya 里声明的 struct/union —— `sizeof(c.div_t)` 和
+            // `p: c.pair` 都需要它能当类型值取到。
+            for (auto& cs : cd->structs) {
+                if (cs.name != a.attr) continue;
+                if (StructInfo* st = struct_info(cs.name)) return mk_struct(st);
+                break;
+            }
             for (auto& x : cd->externs) {
                 if (x.py_name != a.attr) continue;
                 auto it = extern_fns_.find(&x);

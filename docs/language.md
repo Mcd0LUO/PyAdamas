@@ -1763,6 +1763,7 @@ sizeof(uint64)     # 8    sizeof(bool)    # 1
 sizeof(float)      # 8    sizeof(float32) # 4
 sizeof(ptr)        # 8    sizeof(ptr[float])  # 8
 sizeof(Point)      # 值类型 struct 的实际布局大小
+sizeof(c.pair)     # .cpya 里声明的 C struct（布局来自声明/头文件）
 ```
 
 于是上面的调用可以写成 `c.memcmp(xs, ys, len(xs) * sizeof(int))`，宽度跟着类型走，改类型不用改数字。
