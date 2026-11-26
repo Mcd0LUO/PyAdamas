@@ -172,6 +172,7 @@ src/opt/intloop.cpp
   src/cimport/cimport.cpp
   src/cimport/cdecl.cpp
   src/cimport/cdecl_parse.cpp
+  src/cimport/cdecl_types.cpp
   src/cimport/cdecl_eval.cpp
   src/backend/eh_emit.cpp
 )
