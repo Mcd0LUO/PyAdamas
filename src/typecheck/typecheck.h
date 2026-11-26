@@ -426,6 +426,11 @@ private:
     // 顶层 import 绑定预登记：签名在 collect_toplevel 里构建，早于导入
     // 语句执行，注解里的 `mod.Cls` 需要提前可见。
     void hoist_import_bindings(std::vector<StmtPtr>& body, bool in_block = false);
+    // 0.569：类体作用域里能看到的类变量（class C: x = 5; y = x + 1）。
+    std::unordered_map<std::string, Symbol> class_body_syms_;
+    const ClassInfo* class_body_cls_ = nullptr;
+    std::unordered_map<std::string, TypePtr> class_body_pre_;
+    void prescan_class_body(ClassDef& c);
 
     // 函数里的 `global x` 也会在模块作用域造名字，先整体登记
     void hoist_global_decls(std::vector<StmtPtr>& body);

@@ -246,6 +246,32 @@ Symbol* TypeChecker::lookup(const std::string& name) {
                 free_refs_[cur_fn_def_].insert(name);
             return &it->second;
         }
+        // 0.569：类体作用域 —— 类体语句与方法默认值在类命名空间里求值
+        //（class C: x = 5; y = x + 1）。放在作用域链**之后**：类体里也能看到
+        // 外层函数的局部变量（闭包），那比类属性优先。
+        if (class_body_cls_ && !cur_fn_def_) {
+            if (auto pit = class_body_pre_.find(name);
+                pit != class_body_pre_.end() && pit->second) {
+                auto& slot = class_body_syms_[name];
+                slot.ty = pit->second;
+                slot.annotated = true;
+                return &slot;
+            }
+            if (auto ait = class_body_attrs_.find(name);
+                ait != class_body_attrs_.end() && ait->second) {
+                auto& slot = class_body_syms_[name];
+                slot.ty = ait->second;
+                slot.annotated = true;
+                return &slot;
+            }
+            for (auto& fld : class_body_cls_->fields) {
+                if (fld.name != name || !fld.ty) continue;
+                auto& slot = class_body_syms_[name];
+                slot.ty = fld.ty;
+                slot.annotated = true;
+                return &slot;
+            }
+        }
         return nullptr;
     }
 

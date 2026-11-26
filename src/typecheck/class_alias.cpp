@@ -74,4 +74,21 @@ bool TypeChecker::class_body_method_alias(const ClassInfoPtr& cls, Stmt& s) {
     return true;
 }
 
+// 0.569：类体预扫描 —— class C: x = 5; y = x + 1 里 y 要看得到 x。
+void TypeChecker::prescan_class_body(ClassDef& c) {
+    for (auto& bs : c.body) {
+        if (auto* aa = dynamic_cast<AnnAssign*>(bs.get())) {
+            auto* nm = dynamic_cast<Name*>(aa->target.get());
+            if (!nm || !aa->annotation) continue;
+            class_body_pre_.try_emplace(nm->id,
+                                        parse_annotation(aa->annotation.get(), aa->line));
+        } else if (auto* as = dynamic_cast<Assign*>(bs.get())) {
+            if (as->targets.size() != 1) continue;
+            auto* nm = dynamic_cast<Name*>(as->targets[0].get());
+            if (!nm) continue;
+            class_body_pre_.try_emplace(nm->id, t_unknown());
+        }
+    }
+}
+
 }  // namespace pyadamas

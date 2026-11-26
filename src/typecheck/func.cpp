@@ -115,10 +115,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
                 func_defs_.push_back(&f);
             }
         }
-        FuncInfoPtr info;
+        FuncInfoPtr info;  // owner：方法；否则模块级/嵌套函数
         if (owner) {
-            // 方法名属于类命名空间，不进外层作用域；签名在 classdef 里
-            // 已经建好（方法之间要能互相调用），这里复用同一份对象。
+            // 方法签名 classdef 里已建好（方法间要能互调），这里复用同一份对象。
             auto fit = func_infos_.find(&f);
             if (fit != func_infos_.end() && fit->second) {
                 info = fit->second;
@@ -669,6 +668,12 @@ void TypeChecker::classdef(ClassDef& c) {
             // 走专门路径；这里继续走下面的字段/方法处理，不再提前 return。
         }
 
+        // 0.569：类体作用域（class C: x = 5; y = x + 1），字段预收集前生效。
+        const ClassInfo* saved_body_cls = std::exchange(class_body_cls_, cls.get());
+        class_body_pre_.clear();
+        class_body_attrs_.clear();
+        prescan_class_body(c);
+
         // 字段先处理：方法体里 `self.x` 的类型要靠它。
         for (auto& s : c.body) {
             if (s->kind != StmtKind::AnnAssign) continue;
@@ -966,11 +971,8 @@ void TypeChecker::classdef(ClassDef& c) {
             }
         }
 
-        // 类体里的其他语句：在类定义点执行。普通赋值是类属性（存进
-        // 模块里的隐藏全局，所有实例共享）；其他语句（if/for/with…）
-        // 仍然没法建模，把类标记成 open 后按模块全局处理。
+        // 类体其他语句在类定义点执行；普通赋值是类属性，其余语句标记 open 后按模块全局处理。
         auto saved_body_attrs = std::move(class_body_attrs_);
-        class_body_attrs_.clear();
         auto saved_body_methods = std::move(class_body_methods_);
         class_body_methods_.clear();
         for (auto& s : c.body) {
@@ -1142,6 +1144,7 @@ void TypeChecker::classdef(ClassDef& c) {
             }
         }
         cur_class_ = saved_cls;
+        class_body_cls_ = saved_body_cls;  // 方法默认值已在外层检查完
         // 无标注方法的返回类型是检查完才推断出来的，调用签名要重新切一份
         for (auto& m : cls->methods) rebuild_call_sig(m);
         if (cls->is_exception_class) {
@@ -1157,7 +1160,6 @@ void TypeChecker::classdef(ClassDef& c) {
 
 
     }
-
 
 // 协议 dunder 的返回类型校验。必须在所有函数体检查完之后跑：未标注的
 // 方法在定义处 ret 还是空的，只有 body 检查完才回填 ret_known。
