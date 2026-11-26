@@ -530,6 +530,23 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     if (b.values.size() == 1) return expr(*b.values[0]);
     TypePtr ty = tc_.type_of(&b);
     int tmp = new_borrow_slot(ty);
+    // 0.620：第二个槽专存「动态域表示」。CPython 里 float 是对象，unknown 槽只装
+    // 指针/整数；原实现把 double 的位模式直接存进 join 槽（常常是 unknown），
+    // `x = "" or 0.0` 读回来当整数 → 打印 0。float 落 tmp_out 前先装箱。
+    int tmp_out = new_borrow_slot(ty);
+    auto boolop_store = [&](VReg v, TypePtr vt) {
+        store_borrow_slot(tmp, v);  // 判真用：原样，按操作数自己的类型读回
+        if (ty && ty->kind == TyKind::Float) {
+            store_borrow_slot(tmp_out, coerce(v, vt, ty));
+        } else if (vt && vt->kind == TyKind::Float &&
+                   (!ty || ty->kind == TyKind::Unknown)) {
+            VReg boxed = call_runtime(RtFn::AnyFromF64, t_unknown(), {v});
+            push_temp_any_heap(boxed);
+            store_borrow_slot(tmp_out, boxed);
+        } else {
+            store_borrow_slot(tmp_out, v);
+        }
+    };
 
     bool is_and = b.op == Tok::KW_AND;
     int end = new_block(is_and ? "and.end" : "or.end");
@@ -570,10 +587,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     // 只对 float 结果做（big 路径在下面单独处理；unknown 结果不能在这里
     // 装箱，否则真值判断会被 CPYFLOAT 指针带偏）。
     TypePtr acc_ty = tc_.type_of(b.values[0].get());
-    if (ty && ty->kind == TyKind::Float)
-        store_borrow_slot(tmp, coerce(acc, acc_ty, ty));
-    else
-        store_borrow_slot(tmp, acc);
+    boolop_store(acc, acc_ty);
 
     for (size_t i = 1; i < b.values.size(); ++i) {
         // 从槽里重载时按**操作数自己的类型**判真：结果槽的 join 类型常常是
@@ -596,10 +610,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
         switch_to(rhs);
         VReg v = expr(*b.values[i]);
         TypePtr vt = tc_.type_of(b.values[i].get());
-        if (ty && ty->kind == TyKind::Float)
-            store_borrow_slot(tmp, coerce(v, vt, ty));
-        else
-            store_borrow_slot(tmp, v);
+        boolop_store(v, vt);
         acc_ty = vt;
         Inst j;
         j.op = IrOp::Jump;
@@ -611,7 +622,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     }
 
     switch_to(end);
-    return load_slot(tmp, ty);
+    return load_slot(tmp_out, ty);
 }
 
 // 容器的相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
