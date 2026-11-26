@@ -108,8 +108,7 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         }
     }
     // ptr[T] 解引用：Optional[int] 上带元素种类时读 *(p + i)。
-    if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None && !ot->sub.empty() &&
-        ot->sub[0]->kind == TyKind::Int) {
+    if (is_cptr(ot)) {
         VReg base = guard_not_none(obj, "pointer to dereference");
         idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
         Inst in;

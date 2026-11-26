@@ -1746,14 +1746,27 @@ q = c.pair()            # 全 0
 print(p.a, sizeof(p))   # 3.0 16
 ```
 
-C 的头文件里那种**数组类型的全局变量**（`extern char *tzname[2]`）用 `array[ptr, N]` 声明，
-取到的是**符号地址**（C 里数组名本来就退化成 `&arr[0]`）：
+
+### C 的数组变量：`T[N]`
+
+`.cpya` 里定长数组用 `T[N]` 声明，和 C 的声明同序：
+
+| C | .cpya |
+|---|---|
+| `int vals[3];` | `vals: int32[3]` |
+| `long vals[3];` | `vals: int64[3]`（`int` 也行，LP64 下都是 8 字节） |
+| `char *names[2];` | `names: ptr[2]` |
+| `struct pair pts[4];` | `pts: pair[4]` |
+
+取到的是**符号地址**（C 里数组名本来就退化成 `&arr[0]`），类型是**非空**的 `ptr[T]`——
+符号地址是编译期常量，永远不为空，所以不需要 None 检查：
 
 ```python
-# 在 .cpya 里：
-#   arr_values: array[ptr, 3]
-print(c.arr_values)     # 和 C 侧取到的地址一致，可以当 char** 之类传给别的 C 函数
+print(c.vals3[0], c.vals3[1], c.vals3[2])   # 10 20 30
+c.vals3[1] = 99
 ```
+
+`cdecl` 从真头文件生成的就是这个形态（`time.h` 的 `char *tzname[2]` → `tzname: ptr[2]`）。
 
 ### 字节数 vs 元素数：C 函数只认字节
 

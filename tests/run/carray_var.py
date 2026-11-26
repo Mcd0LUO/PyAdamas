@@ -1,20 +1,17 @@
-# 0.563：array[T, N] 的 T 是元素宽度、N 是元素个数；下标读写按 T 的宽度进行。
+# 0.564：T[N] 声明数组变量 —— T 是元素宽度，N 是元素个数，符号地址非空。
 cimport carrayvar as c
 
 print(c.vals_addr() == c.vals3)
 
-p = c.vals3
-if p is not None:
-    print(p[0], p[1], p[2])
-    p[1] = 99
-    print(p[1])
+# 符号地址是编译期常量，不需要 None 检查
+print(c.vals3[0], c.vals3[1], c.vals3[2])
+c.vals3[1] = 99
+print(c.vals3[1])
 
-q = c.vals64
-if q is not None:
-    print(q[0], q[1], q[2])
+print(c.vals64[0], c.vals64[2])
 
 # --- expect ---
 # True
 # 10 20 30
 # 99
-# 100 200 300
+# 100 300

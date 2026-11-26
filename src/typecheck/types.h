@@ -292,6 +292,14 @@ struct StructFieldInfo {
 
 // 值类型 struct 的布局。v1 只允许 int / float / bool 字段：
 // 分别对应 C 的 int64_t / double / _Bool，布局与 C 完全一致。
+// 0.564：`ptr[T]` —— 可空形态是 Optional[int]+celem，数组变量给出的非空形态是 Int+celem。
+inline bool is_cptr(const TypePtr& t) {
+    if (!t || t->celem == CKind::None) return false;
+    if (t->kind == TyKind::Int) return true;
+    return t->kind == TyKind::Optional && !t->sub.empty() && t->sub[0] &&
+           t->sub[0]->kind == TyKind::Int;
+}
+
 // 0.560：sizeof(T) 的编译期字节数（只覆盖 C 互操作会用到的定宽类型）。
 // 8 字节：int/int64/uint64/float/ptr；4：int32/uint32/float32；2：16 位；1：8 位与 bool。
 inline int64_t c_type_size(const std::string& n, bool* found) {

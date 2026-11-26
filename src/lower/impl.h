@@ -881,6 +881,9 @@ private:
             if (StructInfo* st = tc_.struct_info(v.struct_name))
                 t = mk_optional(mk_struct_ptr(st));
         } else if (v.kind == CKind::Ptr && v.elem != CKind::None && t) {
+            // 0.564：数组变量的符号地址是编译期常量，不可能是 None —— 给非空 ptr[T]，
+            // 省掉无意义的 `if p is not None:` 仪式。
+            if (v.addr_of) t = t_int();
             t->celem = v.elem;
         }
         return t;

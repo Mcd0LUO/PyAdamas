@@ -49,6 +49,8 @@ std::optional<CKind> parse_ckind(const std::string& text) {
     while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
     if (t == "None") return CKind::None;
     if (t == "int") return CKind::Int;
+    // 0.564：定宽别名也认（int64 是 long，C 的 long 在 LP64 上就是 8 字节）。
+    if (t == "int64" || t == "long") return CKind::Int;
     if (t == "int32") return CKind::Int32;
     if (t == "uint32") return CKind::UInt32;
     // P1 收尾：窄/无符号 C 类型 → 定宽 TyKind（见 ckind_type）。
@@ -652,43 +654,11 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     if (!aa.annotation)
                         pydecl::fail(aa.line, std::format("'{}' needs a type annotation", pyname));
                     std::string why;
-                    // 0.562：array[ptr, N] —— 数组类型的 extern 变量，不做 C 类型解析，
-                    // 直接暴露符号地址（ptr）。C 里数组名本来就退化成 &arr[0]。
-                    bool is_array_var = false;
-                    if (auto* sub = dynamic_cast<const Subscript*>(aa.annotation.get()))
-                        if (auto* bn = dynamic_cast<const Name*>(sub->value.get());
-                            bn && bn->id == "array")
-                            is_array_var = true;
-                    std::optional<CTypeRef> ct;
-                    if (is_array_var) {
-                        // array[T, N]：T 是元素类型（决定下标宽度），N 是元素个数（文档 + 校验）。
-                        CTypeRef at{CKind::Ptr};
-                        auto* sub = static_cast<const Subscript*>(aa.annotation.get());
-                        const Expr* elem_e = sub->slice.get();
-                        const Expr* dim_e = nullptr;
-                        if (auto* tup = dynamic_cast<const TupleExpr*>(elem_e)) {
-                            if (!tup->elts.empty()) elem_e = tup->elts[0].get();
-                            if (tup->elts.size() > 1) dim_e = tup->elts[1].get();
-                        }
-                        std::string ewhy;
-                        auto el = ctype_from_ast(elem_e, TypeCtx{&structs, nullptr}, ewhy);
-                        if (!el)
-                            pydecl::fail(aa.line,
-                                         std::format("'{}': array element type: {}", pyname, ewhy));
-                        at.elem = el->kind;
-                        at.stname = el->stname;
-                        if (dim_e) {
-                            auto* num = dynamic_cast<const Constant*>(dim_e);
-                            if (!num || num->ck != Constant::CK::Int || num->i < 1)
-                                pydecl::fail(aa.line,
-                                             std::format("'{}': array length must be a positive "
-                                                         "integer constant", pyname));
-                        }
-                        ct = at;
-                    } else {
-                        ct = ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
-                        if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
-                    }
+                    // 0.564：定长数组变量用 C/Python 同形的 `T[N]`（int32[3] / ptr[2]）。
+                    // ctype_from_ast 已经把维度收进 dims，这里只解析类型。
+                    std::optional<CTypeRef> ct =
+                        ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
+                    if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
                     // extern var：无值，或值是一个 extern_var("c_name") 调用。
                     std::string var_symbol = pyname;
                     bool is_var = !aa.value;
@@ -712,6 +682,8 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                         }
                     }
                     if (is_var) {
+                        CKind array_elem = CKind::None;
+                        std::string array_stname;
                         if (ct->kind == CKind::Callback)
                             pydecl::fail(aa.line, "callback type is not supported for extern var");
                         // 0.562：array[T, N] —— 数组类型的 extern 变量，暴露成符号地址（ptr）。
@@ -723,12 +695,13 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                                 addr_of = true;
                             }
                         }
-                        if (!addr_of && !ct->dims.empty())
-                            pydecl::fail(aa.line,
-                                         std::format("array-typed extern var '{}' is not "
-                                                     "supported (declare it as array[ptr, N] "
-                                                     "to expose the symbol address)",
-                                                     pyname));
+                        // 0.564：定长数组变量 `T[N]` —— 数组名在 C 里退化成 &arr[0]，
+                        // 所以暴露符号地址，元素宽度取 T。
+                        if (!ct->dims.empty()) {
+                            addr_of = true;
+                            array_elem = ct->kind;
+                            array_stname = ct->stname;
+                        }
                         if (ct->kind == CKind::Struct)
                             pydecl::fail(aa.line,
                                          std::format("struct/union variable '{}' must be declared "
@@ -742,7 +715,11 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                         cv.struct_name = ct->stname;
                         cv.elem = ct->elem;
                         cv.addr_of = addr_of;
-                        if (addr_of) cv.kind = CKind::Ptr;
+                        if (addr_of) {
+                            cv.kind = CKind::Ptr;
+                            if (array_elem != CKind::None) cv.elem = array_elem;
+                            if (!array_stname.empty()) cv.struct_name = array_stname;
+                        }
                         decl.vars.push_back(std::move(cv));
                         break;
                     }

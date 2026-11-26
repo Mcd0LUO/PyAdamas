@@ -25,7 +25,7 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
                 // 与降低阶段的 cvar_type 同口径（原来只有那边设了 celem）。
                 TypePtr t = ckind_type(v.kind);
                 if (v.kind == CKind::Ptr && v.elem != CKind::None && t) {
-                    TypePtr nt = std::make_shared<Type>(*t);
+                    TypePtr nt = v.addr_of ? t_int() : std::make_shared<Type>(*t);
                     nt->celem = v.elem;
                     return nt;
                 }

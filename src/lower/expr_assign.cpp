@@ -168,8 +168,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             VReg obj = expr(*s.value);
             VReg idx = expr(*s.slice);
             TypePtr ot = tc_.type_of(s.value.get());
-            if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
-                !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {
+            if (is_cptr(ot)) {
                 VReg base = guard_not_none(obj, "pointer to dereference");
                 idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
                 TypePtr et = cptr_elem_type(ot->celem);

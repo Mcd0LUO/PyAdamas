@@ -412,8 +412,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (ot->st) return mk_optional(mk_struct_ptr(ot->st));
                 }
                 // ptr[T] 解引用：Optional[int] 上带元素种类时支持 p[i]。
-                if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
-                    !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {
+                if (is_cptr(ot)) {
                     if (!is_unknown(it) && !is_int_like(it))
                         err(s.line, s.col, "pointer index must be an integer");
                     return cptr_elem_type(ot->celem);

@@ -917,8 +917,13 @@ struct Cdecl {
                 continue;
             }
             if (array) {
-                // 0.562：数组变量 -> array[ptr, N]（暴露符号地址，C 数组名退化语义）。
-                // 长度只是文档信息，访问靠调用方按元素类型自己索引。
+                // 0.564：数组变量生成 `T[N]`（C 的 int vals[3] 同序）。
+                // 元素指针统一写 ptr（char* 之类在 .cpya 里是 ptr 而不是 str，
+                // str 表示 PyAdamas 侧字符串对象，做数组元素会被误当成 8 字节槽）。
+                std::string ewhy;
+                auto elem = cpya_type(t, false, ewhy);
+                std::string elem_txt = elem ? *elem : std::string("ptr");
+                if (elem_txt == "str") elem_txt = "ptr";
                 int64_t n = 0;
                 for (size_t q = j; q < ve; ++q) {
                     if (!(d[q].k == Tok::Punc && d[q].s == "[")) continue;
@@ -928,8 +933,7 @@ struct Cdecl {
                     break;
                 }
                 if (n <= 0) n = 1;
-                vars.push_back(std::format("{}: array[ptr, {}]", name,
-                                           static_cast<long long>(n)));
+                vars.push_back(std::format("{}: {}[{}]", name, elem_txt, static_cast<long long>(n)));
                 emitted_names.insert(name);
                 continue;
             }
