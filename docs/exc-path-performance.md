@@ -49,6 +49,28 @@ phase1（找 handler）与 phase2（清理）会遍历同一串帧。若把「IP
 - 收益不确定（未见 profile 显示 personality 是大头，但它是 libgcc 匿名帧之外的必然成本）；
 - 风险：缓存键必须含「帧的 CFA/SP」，增量标记/信号等边角要小心。
 
+### A 的可行性（读了 `src/lower/exc.cpp` 之后，**未实现**）
+
+**可以做，但不是小改**。三个具体障碍：
+
+1. **没有「当前 try 区域」的跟踪**。`lower_try` 把区域登记进 `st_->fn->eh_regions`（`exc.cpp:984`），
+   但 `lower_raise` 完全不知道自己处在哪个 try 体内——`eh_regions` 里只有 `lp_block` / `end_block`。
+   要加一个 Lowerer 侧的栈，在 try 体降级前后 push/pop。
+2. **landing pad 的入口协议绑定了展开包装**。LP 头是 `EhLandingPad` + `pa_eh_land`，从 `%rax`
+   取的是 `_Unwind_Exception` 包装；直接跳过去的话没有包装。所以需要一个**第二条入口**
+   （`land_direct`）：跳过 `EhLand`，从约定槽位取异常对象，再汇入现有的 handler 分发链。
+3. **`pa_eh_depth` 记账**。LP 里那句 `EhLeave` 是为了退表驱动展开区；直接跳路径没进过展开，
+   但 `EhEnter`（`EhBegin`）已经记过一次，所以仍然要配对退出——这条要是漏了，后面别的 try
+   会误判成「在表驱动区里」（`exc.cpp:1000` 附近有注释记录过这个坑）。
+
+必须排除的形态（否则语义会变）：嵌套 try（内层 raise 要先进内层 LP）、try 里有 `finally`、
+try 里有 `with`（都要跑清理）、`except SomeClass`（匹配要运行期比较）、`as e` 绑定、
+`raise ... from ...`、在 finally/handler 体内 raise、可挂起函数（生成器/协程）。
+
+**最小安全子集**：`raise` 直接位于 `try:` 体、该 try 只有一个裸 `except:`（或 `except Exception`）、
+中间没有 finally/with、不在挂起函数里。估算 80–150 行（`exc.cpp` + Lowerer 状态 + `land_direct`），
+外加一组「直接跳」与「正常展开」输出必须逐字节一致的对拍用例。
+
 ### B 的实测结论（2026-11-28，已实现后回退）
 
 32 项 `(CFA, IP) → (landing pad, filter, kind)` 静态缓存，phase2 直接命中：
