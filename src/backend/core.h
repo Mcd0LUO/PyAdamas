@@ -333,6 +333,14 @@
     // 单次使用的整数 Bin 结果被紧邻的调用实参 / return 消费：留在 %rax，
     // 跳过「临时槽 store + load」的往返（fib 这类递归每个调用省 2 条）。
     bool can_fuse_bin_value_use(const Inst& in, const Inst& nx) const;
+    // 直接调用（CallDirect）返回的单字整数只被后面的整数 Bin 用一次：结果
+    // 留在 %rax 直接参与运算，跳过「返回值落临时槽 + Bin 再 load 回来」。
+    // 中间允许夹至多 kCallFuseSkip 条整数常量定义（ConstInt 只写自己的槽
+    // 或不发射，不碰 %rax）。只支持调用结果在 Bin 的左操作数或（交换律时
+    // 的）右操作数。b.insts[i] 是那条 CallDirect。
+    bool can_fuse_call_result_bin(const Block& b, size_t i) const;
+    // BinKind 是否满足交换律（b 已在 %rax 时可交换两个操作数就地算）。
+    static bool bin_commutative(BinKind b);
 
     // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
     // 一次内存往返 + `cmpq $0` 全部省掉。循环条件走的就是这条路。

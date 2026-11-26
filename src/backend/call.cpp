@@ -357,7 +357,11 @@ void AsmGen::gen_call_direct(const Inst& in) {
         }
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
+            else if (dst_mop(in.dst).text != mreg_operand(kRax).text) {
+                // 值已在 %rax（can_fuse_call_result_bin 把返回留在那）→ 跳过
+                // `movq %rax, %rax`；其余情况照原样把返回值落到目标。
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
+            }
             // P3-1b：unknown 返回的 tag 在 %rdx（被调 gen_return 发射；
             // 旧入口调用也发，读到的一定是有效 tag 或 UNK）。
             if (vreg_tagged(in.dst) && is_unk_ty(in.ty) && callee &&

@@ -435,6 +435,25 @@ void AsmGen::gen_bin_int(const Inst& in) {
             }
         }
 
+        // 右操作数已经在 %rax（紧邻的 CallDirect 返回值经 alias 传进来）：
+        // 交换律 Bin 把两个操作数换过来就地算，省掉「返回值落临时槽 + 装左
+        // 操作数」两条（`movq %rax,槽` + `movq sa,%rax` + `op 槽,%rax`
+        // → `op sa,%rax`）。非交换律不会出现这种形态：融合判据
+        // can_fuse_call_result_bin() 只对交换律放行，这里不做换序。
+        if (sb.text == mreg_operand(kRax).text && sa.text != mreg_operand(kRax).text &&
+            bin_commutative(in.bop)) {
+            switch (in.bop) {
+                case BinKind::Add: emit2(MOp::kAddq, sa, kRax); break;
+                case BinKind::Mul: emit2(MOp::kImulq, sa, kRax); break;
+                case BinKind::BitAnd: emit2(MOp::kAndq, sa, kRax); break;
+                case BinKind::BitOr: emit2(MOp::kOrq, sa, kRax); break;
+                case BinKind::BitXor: emit2(MOp::kXorq, sa, kRax); break;
+                default: break;  // bin_commutative() 只列了上面五种
+            }
+            move_to(d, mreg_operand(kRax));
+            return;
+        }
+
         // 左操作数已经在 %rax（前一条指令的结果通过 alias 传进来）时
         // 不要发 movq %rax,%rax —— 纯冗余指令，在整数循环里每轮一条。
         if (sa.text != mreg_operand(kRax).text) emit2(MOp::kMovq, sa, kRax);

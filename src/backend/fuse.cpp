@@ -350,4 +350,65 @@ bool AsmGen::can_fuse_bin_value_use(const Inst& in, const Inst& nx) const {
     return true;
 }
 
+// BinKind 是否满足交换律。只有交换律的 Bin 才能在「右操作数已经躺在 %rax」
+// 时把两个操作数换过来原地算（见 gen_bin_int 的 swap 分支）。
+bool AsmGen::bin_commutative(BinKind b) {
+    switch (b) {
+        case BinKind::Add:
+        case BinKind::Mul:
+        case BinKind::BitAnd:
+        case BinKind::BitOr:
+        case BinKind::BitXor:
+            return true;
+        default:
+            return false;   // sub/shl/shr/div/mod/floordiv/pow 不换序
+    }
+}
+
+// 调用结果与 Bin 之间允许夹的整数常量条数上限。
+constexpr int kCallFuseSkip = 2;
+
+// 直接调用返回的单字整数只被后面的整数 Bin 用一次：把返回值留在 %rax，
+// 让 Bin 直接拿它当操作数，省掉「返回值 store 到临时槽 → Bin load 回来」。
+//
+// 为什么安全（不碰 ABI）：
+//  * 只有 SysV/Win64 都从 %rax 返回的单字整数/布尔放行；浮点返回在 %xmm0、
+//    多字结构走隐藏 sret 指针、unknown 返回还要 %rdx 带 tag —— 全部拒绝；
+//  * 单次使用 + 不跨块 ⇒ 值的唯一读者就是那条 Bin；中间只允许过 ConstInt，
+//    它只写自己的槽（或折成立即数一条不发），两种形态都不碰 %rax；
+//  * 左操作数：gen_bin_int 本来就把 a 装进 %rax，a 已在 %rax 时该 mov 直接
+//    跳过（同一套判据，op_div 等也安全）；
+//  * 右操作数：只有交换律 Bin 放行，gen_bin_int 用 `op a, %rax` 的交换形式；
+//    非交换律（sub/div/...）一律不融合，宁可不提速也不换错顺序。
+bool AsmGen::can_fuse_call_result_bin(const Block& b, size_t i) const {
+    if (opt_ < 2) return false;
+    const Inst& in = b.insts[i];
+    if (in.op != IrOp::CallDirect || in.dst == kNoReg) return false;
+    if (!in.ty) return false;
+    // 浮点返回在 %xmm0；堆类型有 RC/GC 所有权；unknown 有 %rdx tag。
+    if (ir_is_float(in.ty) || ir_is_heap(in.ty)) return false;
+    if (in.ty->kind != TyKind::Int && in.ty->kind != TyKind::Bool) return false;
+    if (in.dst >= use_count_.size() || use_count_[in.dst] != 1) return false;
+    if (cross_block_[in.dst]) return false;
+    if (tag_.tags_enabled && is_unk_ty(ty_of(in.dst))) return false;
+    // 找消费者：跳过中间至多 kCallFuseSkip 条 ConstInt。ConstInt 只写自己的
+    // 槽（或者被折成立即数、一条都不发），两种形态都不碰 %rax，所以 %rax 里
+    // 的返回值能安全穿过它们。其它指令（LoadSlot 在 mem-to-mem 时会用 %rax
+    // 中转、任何 Bin 都会写 %rax）一律不跳，宁可不融合。
+    size_t j = i + 1;
+    for (int skipped = 0; j < b.insts.size() && skipped < kCallFuseSkip; ++skipped) {
+        if (b.insts[j].op != IrOp::ConstInt) break;
+        ++j;
+    }
+    if (j >= b.insts.size()) return false;
+    const Inst& nx = b.insts[j];
+    if (nx.op != IrOp::Bin || nx.dst == kNoReg) return false;
+    if (!nx.ty) return false;
+    if (ir_is_float(nx.ty) || ir_is_heap(nx.ty)) return false;
+    if (nx.ty->kind != TyKind::Int && nx.ty->kind != TyKind::Bool) return false;
+    if (nx.a == in.dst) return true;
+    if (nx.b == in.dst) return bin_commutative(nx.bop);
+    return false;
+}
+
 }  // namespace pyadamas
