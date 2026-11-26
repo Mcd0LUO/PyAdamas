@@ -28,6 +28,11 @@ bool annotation_mentions_big(const Expr* e, int depth = 0) {
             });
         return annotation_mentions_big(s->slice.get(), depth);
     }
+    // Callable[[big], int] 这类注解：ListExpr 里的元素也要递归（0.640）。
+    if (auto* l = dynamic_cast<const ListExpr*>(e))
+        return std::ranges::any_of(l->elts, [&](const auto& elt) {
+            return annotation_mentions_big(elt.get(), depth + 1);
+        });
     if (auto* b = dynamic_cast<const BinOp*>(e); b && b->op == Tok::VBAR)
         return annotation_mentions_big(b->left.get(), depth) ||
                annotation_mentions_big(b->right.get(), depth);
@@ -133,6 +138,15 @@ Arguments Parser::parse_arguments() {
                 if (!check(Tok::RPAREN)) throw err("'**' parameter must be last");
                 break;
             } else if (check(Tok::SLASH)) {
+                // `/` 的位置约束（0.640）：必须已有一个位置参数、之前没出现过、
+                // 且必须在 `*` 之前。CPython 对 def f(/) / def f(a, /, b, /) /
+                // def f(*, a, /) 都报 SyntaxError，原来全部放行。
+                if (!a.kwonly.empty() || a.vararg)
+                    throw err_at("'/' must be ahead of '*'", cur().line, cur().col);
+                if (!a.posonly.empty()) throw err_at("'/' may appear only once", cur().line,
+                                                    cur().col);
+                if (a.args.empty()) throw err_at("'/' must follow at least one parameter",
+                                                 cur().line, cur().col);
                 advance();
                 for (auto& p : a.args) a.posonly.push_back(std::move(p));
                 a.args.clear();
@@ -180,7 +194,15 @@ StmtPtr Parser::parse_classdef(std::vector<ExprPtr> decorators) {
             expect(Tok::RPAREN, "')' after class bases");
         }
         expect(Tok::COLON, "':' after class header");
+        // 类体是独立作用域（0.640）：不能 break/continue 到外层循环，也不能在
+        // 同步类体里 await（类体语句在函数帧内降级，但语义上不是循环体）。
+        int saved_loop_c = loop_depth_;
+        int saved_async_c = async_depth_;
+        loop_depth_ = 0;
+        async_depth_ = 0;
         node->body = parse_suite();
+        async_depth_ = saved_async_c;
+        loop_depth_ = saved_loop_c;
         return node;
     }
 
@@ -190,9 +212,17 @@ ExprPtr Parser::parse_lambda() {
         auto n = node_at<Lambda>(ln, cl);
         if (!check(Tok::COLON)) n->args = parse_lambda_params();
         expect(Tok::COLON, "':' in lambda");
-        // lambda 体是一个函数体：里面可以有 yield（生成器 lambda）
+        // lambda 体是一个函数体：里面可以有 yield（生成器 lambda）。
+        // 与 def 同口径（0.640）：lambda 是同步函数，体内不能 await、
+        // 也不能 break/continue 到外层循环。
         ++func_depth_;
+        int saved_loop = loop_depth_;
+        int saved_async = async_depth_;
+        loop_depth_ = 0;
+        async_depth_ = 0;
         n->body = parse_namedexpr();
+        async_depth_ = saved_async;
+        loop_depth_ = saved_loop;
         --func_depth_;
         return n;
     }
@@ -215,20 +245,35 @@ Arguments Parser::parse_lambda_params() {
                 Arg ka;
                 ka.name = expect(Tok::NAME, "parameter name").text;
                 a.kwarg = std::make_unique<Arg>(std::move(ka));
+                match(Tok::COMMA);  // lambda **kw,: kw —— 尾逗号合法
                 break;
             } else if (check(Tok::SLASH)) {
+                // `/` 的位置约束（0.640）：必须已有一个位置参数、之前没出现过、
+                // 且必须在 `*` 之前。CPython 对 def f(/) / def f(a, /, b, /) /
+                // def f(*, a, /) 都报 SyntaxError，原来全部放行。
+                if (kwonly || a.vararg)
+                    throw err_at("'/' must be ahead of '*'", cur().line, cur().col);
+                if (!a.posonly.empty()) throw err_at("'/' may appear only once", cur().line,
+                                                    cur().col);
+                if (a.args.empty()) throw err_at("'/' must follow at least one parameter",
+                                                 cur().line, cur().col);
                 advance();
                 for (auto& p : a.args) a.posonly.push_back(std::move(p));
                 a.args.clear();
             } else {
                 Arg arg;
                 arg.name = expect(Tok::NAME, "parameter name").text;
-                if (check(Tok::EQUAL)) {
-                    advance();
-                    a.defaults.push_back(parse_namedexpr());
+                if (kwonly) {
+                    // keyword-only 的默认值必须进 kw_defaults（与 parse_arguments 同口径）：
+                    // 塞进 a.defaults 会被按位置从末尾对齐，`lambda a, *, b=2` 里 b 的 2
+                    // 会被当成 a 的默认值，b 反而变成必填（0.640）。
+                    if (match(Tok::EQUAL)) a.kw_defaults.push_back(parse_namedexpr());
+                    else a.kw_defaults.push_back(nullptr);
+                    a.kwonly.push_back(std::move(arg));
+                } else {
+                    if (match(Tok::EQUAL)) a.defaults.push_back(parse_namedexpr());
+                    a.args.push_back(std::move(arg));
                 }
-                if (kwonly) a.kwonly.push_back(std::move(arg));
-                else a.args.push_back(std::move(arg));
             }
             if (!match(Tok::COMMA)) break;
             // 尾逗号：lambda a, b, /, : ... 是合法的；'/' 后面的逗号
