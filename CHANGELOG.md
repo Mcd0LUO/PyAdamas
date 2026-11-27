@@ -6,6 +6,44 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.693] - 2026-11-27
+
+> fix(runtime)：**找到并修掉 32 字节头的真正根因** —— `vt[-3]` 这个「另一套写法」的元数据偏移。
+>
+> ## 根因（七轮排查的答案）
+>
+> 类元数据从 8 字扩到 10 字后，所有 `vt - 8` 都改成了 `vt - 10`，但 `rt_class.c:387`
+>写的是 **`int64_t off = vt[-3];`**（反向下标，等价于 `vt - 3`）——
+>**grep `vt - 8` 永远找不到它**，而它正是 `attr_slot()` 读 `dict_off` 的那一行。
+>
+> 后果：`dict_off` 读到了邻接的垃圾值 → `attr_dict()` 返回野指针 →
+>`pa_attr_get` 段错误（gdb 实测：崩溃点在 `pa_attr_get+67`，`rdi` 是被截断的指针）。
+>这正是 `155_exc_value` 在 `getattr(p, "z", -1)` 处崩、而简单类程序正常的原因。
+>
+> 修法：`vt[-3]` → `vt[-5]`（10 字元数据里 dict_off 是第 6 字 = `vt-5`）。
+>
+> ## 顺带完成的阶段②组 A
+>
+> 1. `.Lvtmeta` 8 → **10 字**（尾部 2 字预留给 dtor/gcrel）；
+> 2. `.Lvtmetaext` 也扩到 10 字（MRO 表里两种 meta 布局必须一致）；
+> 3. 全部 9 处 `vt - 8` → `vt - 10` + **`vt[-3]` → `vt[-5]`**；
+> 4. **实例的 dtor/gcrel 移入元数据 `meta[8]/meta[9]`**：codegen 发射 `.LdtorN/.LgcrelN`，
+>   `gen_obj_new` 不再传两个函数指针，运行期 `pa_rc_dtor_instance/release_instance` 按
+>   `payload[0] → vt → meta[8]/[9]` 取用；
+> 5. `kModuleAbiVersion` 1 → **2**（元数据布局变了，旧缓存必须失效）。
+>
+> ## 验收
+>
+> 套件 **602** + 2 strict、difftest **545-0**、opt_levels 40/40、check_size 全过；
+>oopbench（虚调用 + dunder str 路径）输出正确，说明 `meta[8]/[9]` 的 dtor 确实生效。
+>
+> ## 下一步（32 字节结构体本身）
+>
+> 现在头里只剩 `next/prev/rc/dtor/release/size/kind/marked` 中的 `dtor/release` 待删。
+>压缩到 32 字节的改动已写出并编译通过（struct 32B + `rc:u32` + `size:u32` + `kind:u8` +
+>`marked:u8` + `young_idx:u32` + 3 处字面量头改 4 quad），但首次运行立即段错误，
+>**待定位**（崩在 `__pa_main` 入口，怀疑字面量头的 size/kind 或 `pa_register_literals` 的偏移假设）。
+>改动已 stash 保存，未污染主干。
 ## [0.692] - 2026-11-27
 
 > docs：**更正 0.691 的归档结论**——32B 的根因**未定位**，MRO 假设也被否证。
