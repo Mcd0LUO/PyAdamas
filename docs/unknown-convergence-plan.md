@@ -228,3 +228,36 @@ B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数
 看了 lexer.py 第一行（src: str）就推翻了。
 **这条路今晚重复了三次（0.706 原子操作、0.709 false sharing、0.711 pad 下标）。**
 规矩应该是：先看目标源码 → 用最小复现证明成因 → 再设计改动。
+
+## 16. 分辨结果：不是统计假象，是真 unknown
+
+在 infer.cpp 的 check() 里加了一行 `[type-stats] round-boundary` 标记（仅 TYPE_STATS 开启时打印），
+重跑 interp2：
+
+    [type-stats] cat=local_unknown count=8 examples=tokenize.kw,...   <- lexer 单元
+    [type-stats] round-boundary
+    [type-stats] cat=local_unknown count=7 examples=stmt.nd,...       <- parser 单元
+    [type-stats] round-boundary
+    [type-stats] cat=local_unknown count=6 examples=eval.y,...       <- ev 单元
+    [type-stats] round-boundary
+    [type-stats] round-boundary                                      <- 主单元/收尾
+
+**每个单元只出现一次统计、且紧跟一个边界** → 三个文件各自**只跑了一轮**，没有重查轮。
+所以 21 处是**最终态的真 unknown**，不是中间态假象。（假设 b 也被排除。）
+
+## 17. 下一步：用 bisect 定位 lexer 的 6 处
+
+最小复现 A/B 都推断正常，但真实 lexer.py 的 6 个局部变量确实 unknown，说明**差异在别处**。
+做法（下轮第一件事，20 分钟内可出结果）：
+
+1. 复制 lexer.py 到 /tmp，删掉 `class Sym` 之外的部分，只留 `tokenize` + 依赖，
+   用 `PYADAMAS_TYPE_STATS` 看 stats 是否仍在；
+2. 若仍在，逐段删减 `tokenize`（二分：先删 while 前半、再删后半），直到 stats 消失，
+   最后剩下的那段就是触发器；
+3. 常见嫌疑：
+   - `KW: list[str] = [...]` 这种**模块级带注解的全局**在 `for k in KW` 里是否被识别；
+   - `SP = chr(32)` 的 `chr` 返回类型未建模 → `SP` unknown → 但按理不该污染 `kw`；
+   - `Tok(T_KW if kw else T_NAME, sid)` 里条件表达式与类构造的交互；
+   - `indents[len(indents)-1]` 这种**用 len() 作下标**的表达式。
+
+**注意**：本轮之后不要再猜根因。bisect 出具体那一段之前，不写任何修复代码。

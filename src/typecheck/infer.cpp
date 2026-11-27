@@ -41,6 +41,7 @@ TypePtr snapshot(const TypePtr& ty) {
 
 void TypeChecker::check(Module& m) {
     check_once(m);
+    if (type_stats_on_) std::fprintf(stderr, "[type-stats] round-boundary" "\n");
     size_t rounds_left = func_defs_.size() + 16;
     while (collect_result_hints()) {
         if (rounds_left-- == 0) {
