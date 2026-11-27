@@ -176,7 +176,7 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
             }
             /* P4 块3（lang_gaps 门控开）：异常值过 unknown 的 repr →
                CPython 口径 Name('arg', ...)。门控关逐字旧样（印机器字）。 */
-            if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ &&
+            if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ_EXCVALUE &&
                 ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC) {
                 PyAdamasExcValue* ev = (PyAdamasExcValue*)(uintptr_t)v;
                 ar_cstr(b, ev->type);
@@ -648,7 +648,7 @@ PyAdamasStr* pa_str_any(int64_t v) {
         if (pa_lang_gaps_rt && pa_unknown_is_heap(v)) {
             PyAdamasRc* h2 = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
                                                     (uint64_t)PYADAMAS_RC_HDR);
-            if (h2->kind == PYADAMAS_RC_OBJ &&
+            if (h2->kind == PYADAMAS_RC_OBJ_EXCVALUE &&
                 ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC)
                 return pa_exc_value_str((PyAdamasExcValue*)(uintptr_t)v);
         }

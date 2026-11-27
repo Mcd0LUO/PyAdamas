@@ -44,7 +44,7 @@ struct PyAdamasPopen {
     int64_t hproc; /* 进程句柄（HANDLE），回收后置 0 */
 };
 
-static void proc_destroy(void* p) {
+void proc_destroy(void* p) {
     PyAdamasProc* q = (PyAdamasProc*)p;
     if (q->out) pa_rc_dec(q->out);
     if (q->err) pa_rc_dec(q->err);
@@ -422,7 +422,7 @@ PyAdamasProc* pa_subprocess_run(PyAdamasList* argv, int64_t capture, int64_t tex
     }
 
     PyAdamasProc* proc =
-        (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ_PROC);
     /* 下面两次 str_new 都可能触发主收集；proc 只在本帧 C 局部变量里。 */
     pa_gc_pin(proc);
     proc->returncode = rc;
@@ -448,7 +448,7 @@ PyAdamasStr* pa_subprocess_stderr(PyAdamasProc* p) {
 
 /* ── Popen ───────────────────────────────────────────────────── */
 
-static void popen_destroy(void* p) {
+void popen_destroy(void* p) {
     PyAdamasPopen* q = (PyAdamasPopen*)p;
     if (q->in_fd >= 0) _close((int)q->in_fd);
     if (q->out_fd >= 0) _close((int)q->out_fd);
@@ -610,7 +610,7 @@ PyAdamasPopen* pa_popen_new(PyAdamasList* argv, int64_t shell, PyAdamasStr* cwd,
     CloseHandle(pi.hThread);
 
     PyAdamasPopen* p =
-        (PyAdamasPopen*)rc_alloc((int64_t)sizeof(PyAdamasPopen), popen_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasPopen*)rc_alloc((int64_t)sizeof(PyAdamasPopen), popen_destroy, NULL, PYADAMAS_RC_OBJ_POPEN);
     p->magic = PYADAMAS_POPEN_MAGIC;
     p->pid = (int64_t)pi.dwProcessId;
     p->status = 0;
@@ -849,7 +849,7 @@ struct PyAdamasProc {
     PyAdamasStr* err; /* owned */
 };
 
-static void proc_destroy(void* p) {
+void proc_destroy(void* p) {
     PyAdamasProc* q = (PyAdamasProc*)p;
     if (q->out) pa_rc_dec(q->out);
     if (q->err) pa_rc_dec(q->err);
@@ -1043,7 +1043,7 @@ PyAdamasProc* pa_subprocess_run(PyAdamasList* argv, int64_t capture, int64_t tex
     }
 
     PyAdamasProc* proc =
-        (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ_PROC);
     /* 下面两次 str_new 都可能触发主收集；proc 只在本帧 C 局部变量里。 */
     pa_gc_pin(proc);
     proc->returncode = rc;
@@ -1089,7 +1089,7 @@ struct PyAdamasPopen {
     PyAdamasFile* err_obj;
 };
 
-static void popen_destroy(void* p) {
+void popen_destroy(void* p) {
     PyAdamasPopen* q = (PyAdamasPopen*)p;
     if (q->in_fd >= 0) close((int)q->in_fd);
     if (q->out_fd >= 0) close((int)q->out_fd);
@@ -1191,7 +1191,7 @@ PyAdamasPopen* pa_popen_new(PyAdamasList* argv, int64_t shell, PyAdamasStr* cwd,
     if (devnull >= 0) close(devnull);
 
     PyAdamasPopen* p =
-        (PyAdamasPopen*)rc_alloc((int64_t)sizeof(PyAdamasPopen), popen_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasPopen*)rc_alloc((int64_t)sizeof(PyAdamasPopen), popen_destroy, NULL, PYADAMAS_RC_OBJ_POPEN);
     p->magic = PYADAMAS_POPEN_MAGIC;
     p->pid = (int64_t)pid;
     p->status = 0;

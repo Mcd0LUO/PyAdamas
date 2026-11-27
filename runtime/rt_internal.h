@@ -421,10 +421,35 @@ enum {
     /* b1：从 OBJ 拆出的运行期类型。所有 OBJ 子 kind 从 OBJ_FIRST 起**连续**编号，
        b2 每加一个就把 OBJ_LAST +1；区间判定见 pa_rc_kind_is_obj_payload。 */
     PYADAMAS_RC_OBJ_GEN = 13,
+    PYADAMAS_RC_OBJ_DATETIME,  /* datetime */
+    PYADAMAS_RC_OBJ_TIMEDELTA,  /* timedelta */
+    PYADAMAS_RC_OBJ_PATH,  /* path */
+    PYADAMAS_RC_OBJ_DEQUE,  /* deque */
+    PYADAMAS_RC_OBJ_FILE,  /* file */
+    PYADAMAS_RC_OBJ_AWAIT,  /* await */
+    PYADAMAS_RC_OBJ_TIMEOUT,  /* timeout */
+    PYADAMAS_RC_OBJ_CLASS,  /* class */
+    PYADAMAS_RC_OBJ_COMPLEX,  /* complex */
+    PYADAMAS_RC_OBJ_EXCVALUE,  /* excvalue */
+    PYADAMAS_RC_OBJ_TB,  /* tb */
+    PYADAMAS_RC_OBJ_RANDOM,  /* random */
+    PYADAMAS_RC_OBJ_MATCH,  /* match */
+    PYADAMAS_RC_OBJ_REGEX,  /* regex */
+    PYADAMAS_RC_OBJ_PROC,  /* proc */
+    PYADAMAS_RC_OBJ_POPEN,  /* popen */
+    PYADAMAS_RC_OBJ_EVENT,  /* event */
+    PYADAMAS_RC_OBJ_LOCK,  /* lock */
+    PYADAMAS_RC_OBJ_QUEUE,  /* queue */
+    PYADAMAS_RC_OBJ_TASKGROUP,  /* taskgroup */
+    PYADAMAS_RC_OBJ_TEMPLATE,  /* template */
+    PYADAMAS_RC_OBJ_INTERP,  /* interp */
+    PYADAMAS_RC_OBJ_VT,  /* vt */
+    PYADAMAS_RC_OBJ_CHAN,  /* chan */
+    PYADAMAS_RC_OBJ_SEM,   /* sem */
 };
 
 #define PYADAMAS_RC_OBJ_FIRST ((int64_t)PYADAMAS_RC_OBJ_GEN)
-#define PYADAMAS_RC_OBJ_LAST  ((int64_t)PYADAMAS_RC_OBJ_GEN)
+#define PYADAMAS_RC_OBJ_LAST  ((int64_t)PYADAMAS_RC_OBJ_SEM)
 
 typedef struct PyAdamasRc {
     struct PyAdamasRc* next;
@@ -626,6 +651,33 @@ void* pa_buffer_data(void* p);
 /* GC 清扫路径：只释放 data，不触碰 RC 头。 */
 void pa_buffer_release_data(void* p);
 void buffer_destroy(void* p);  /* 阶段①：BUFFER 的 kind 表需要 */
+/* b2：24 个 OBJ 子类型的 dtor/release（原为 static，已导出） */
+void dt_destroy(void*);
+void td_destroy(void*);
+void path_destroy(void*);
+void dq_destroy(void*);
+void file_destroy(void*);
+void await_destroy(void*);
+void await_gc_release(void*);
+void timeout_destroy(void*);
+void class_destroy(void*);
+void class_gc_release(void*);
+void exc_value_destroy(void*);
+void exc_value_gc_release(void*);
+void tb_destroy(void*);
+void match_dtor(void*);
+void regex_dtor(void*);
+void proc_destroy(void*);
+void popen_destroy(void*);
+void event_destroy(void*);
+void lock_destroy(void*);
+void queue_destroy(void*);
+void taskgroup_destroy(void*);
+void template_destroy(void*);
+void interp_destroy(void*);
+void vt_destroy(void*);
+void chan_destroy(void*);
+void sem_destroy(void*);
 int64_t pa_buffer_len(void* p);
 int64_t pa_buffer_elem_kind(void* p);
 int64_t pa_buffer_get_i64(void* p, int64_t i);

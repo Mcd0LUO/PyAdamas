@@ -23,7 +23,7 @@ typedef struct {
     int64_t fmt;       // 格式说明 str
 } PyAdamasInterp;
 
-static void template_destroy(void* p) {
+void template_destroy(void* p) {
     PyAdamasTemplate* t = (PyAdamasTemplate*)p;
     if (t->strings) pa_rc_dec((void*)(uintptr_t)t->strings);
     if (t->interps) pa_rc_dec((void*)(uintptr_t)t->interps);
@@ -31,7 +31,7 @@ static void template_destroy(void* p) {
     t->interps = 0;
 }
 
-static void interp_destroy(void* p) {
+void interp_destroy(void* p) {
     PyAdamasInterp* i = (PyAdamasInterp*)p;
     if (i->expr) pa_rc_dec((void*)(uintptr_t)i->expr);
     if (i->conv) pa_rc_dec((void*)(uintptr_t)i->conv);
@@ -41,7 +41,7 @@ static void interp_destroy(void* p) {
 
 int64_t pa_template_new(int64_t strings, int64_t interps) {
     PyAdamasTemplate* t = (PyAdamasTemplate*)rc_alloc(
-        (int64_t)sizeof(PyAdamasTemplate), template_destroy, NULL, PYADAMAS_RC_OBJ);
+        (int64_t)sizeof(PyAdamasTemplate), template_destroy, NULL, PYADAMAS_RC_OBJ_TEMPLATE);
     t->strings = strings;
     t->interps = interps;
     pa_rc_inc((void*)(uintptr_t)strings);
@@ -51,7 +51,7 @@ int64_t pa_template_new(int64_t strings, int64_t interps) {
 
 int64_t pa_interp_new(int64_t value, int64_t expr, int64_t conv, int64_t fmt) {
     PyAdamasInterp* i = (PyAdamasInterp*)rc_alloc(
-        (int64_t)sizeof(PyAdamasInterp), interp_destroy, NULL, PYADAMAS_RC_OBJ);
+        (int64_t)sizeof(PyAdamasInterp), interp_destroy, NULL, PYADAMAS_RC_OBJ_INTERP);
     i->value = value;
     i->expr = expr;
     i->conv = conv;

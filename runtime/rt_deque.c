@@ -13,7 +13,7 @@ struct PyAdamasDeque {
     int64_t maxlen;    /* 0 表示不限制 */
 };
 
-static void dq_destroy(void* p) {
+void dq_destroy(void* p) {
     PyAdamasDeque* d = (PyAdamasDeque*)p;
     if (d->elem_kind != 0 && d->data) {
         for (int64_t i = 0; i < d->len; ++i)
@@ -44,7 +44,7 @@ static void dq_grow(PyAdamasDeque* d) {
 PyAdamasDeque* pa_deque_new(int64_t maxlen) {
     if (maxlen < 0) pa_raise_c("ValueError", "maxlen must be non-negative");
     PyAdamasDeque* d =
-        (PyAdamasDeque*)rc_alloc((int64_t)sizeof(PyAdamasDeque), dq_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasDeque*)rc_alloc((int64_t)sizeof(PyAdamasDeque), dq_destroy, NULL, PYADAMAS_RC_OBJ_DEQUE);
     d->magic = PYADAMAS_DQ_MAGIC;
     d->cap = 8;
     d->data = (int64_t*)malloc(sizeof(int64_t) * (size_t)d->cap);

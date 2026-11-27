@@ -44,7 +44,7 @@ int is_await_obj(void* p) {
     if (!p) return 0;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)sizeof(PyAdamasAwait)) return 0;
+    if (h->kind != PYADAMAS_RC_OBJ_AWAIT || h->size < (int64_t)sizeof(PyAdamasAwait)) return 0;
     return *(int64_t*)p == PYADAMAS_AWAIT_MAGIC;
 }
 
@@ -113,7 +113,7 @@ void free_attached_exception(void* payload, int64_t size) {
 
 PyAdamasAwait* await_new(int64_t kind) {
     PyAdamasAwait* w = (PyAdamasAwait*)rc_alloc((int64_t)sizeof(PyAdamasAwait), await_destroy,
-                                        await_gc_release, PYADAMAS_RC_OBJ);
+                                        await_gc_release, PYADAMAS_RC_OBJ_AWAIT);
     w->magic = PYADAMAS_AWAIT_MAGIC;
     w->kind = kind;
     // 默认结果按引用管理；asyncio.Queue[float] 的 Future 会改成 0。
@@ -310,12 +310,12 @@ static void timeout_detach(PyAdamasTimeout* to) {
     pa_rc_dec(t); /* timeout 自己的引用；dtor 负责 dec driver_gen */
 }
 
-static void timeout_destroy(void* p) { timeout_detach((PyAdamasTimeout*)p); }
+void timeout_destroy(void* p) { timeout_detach((PyAdamasTimeout*)p); }
 
 void* pa_timeout_new(double secs) {
     loop_ensure();
     PyAdamasTimeout* to = (PyAdamasTimeout*)rc_alloc((int64_t)sizeof(PyAdamasTimeout),
-                                             timeout_destroy, NULL, PYADAMAS_RC_OBJ);
+                                             timeout_destroy, NULL, PYADAMAS_RC_OBJ_TIMEOUT);
     to->secs = secs;
     return to;
 }

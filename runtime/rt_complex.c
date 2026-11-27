@@ -5,7 +5,7 @@
 
 PyAdamasComplex* pa_complex_new(double re, double im) {
     PyAdamasComplex* c = (PyAdamasComplex*)rc_alloc((int64_t)sizeof(PyAdamasComplex), NULL, NULL,
-                                            PYADAMAS_RC_OBJ);
+                                            PYADAMAS_RC_OBJ_COMPLEX);
     c->magic = PYADAMAS_COMPLEX_MAGIC;
     c->re = re;
     c->im = im;

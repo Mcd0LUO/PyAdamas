@@ -142,7 +142,7 @@ static void mt_time_seed(PyAdamasRandom* r) {
 
 PyAdamasRandom* pa_random_new(int64_t seed) {
     PyAdamasRandom* r = (PyAdamasRandom*)rc_alloc((int64_t)sizeof(PyAdamasRandom), NULL, NULL,
-                                          PYADAMAS_RC_OBJ);
+                                          PYADAMAS_RC_OBJ_RANDOM);
     pa_random_seed(r, seed);
     return r;
 }

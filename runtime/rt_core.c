@@ -28,6 +28,31 @@ const PaRcOps pa_rc_ops[64] = {
     /* JSONBOOL */ {NULL, NULL},
     /* BUFFER   */ {buffer_destroy, NULL},
     /* GEN      */ {gen_destroy, pa_gen_release_indirect},
+    /* OBJ_DATETIME */ {dt_destroy, NULL},
+    /* OBJ_TIMEDELTA */ {td_destroy, NULL},
+    /* OBJ_PATH */ {path_destroy, NULL},
+    /* OBJ_DEQUE */ {dq_destroy, NULL},
+    /* OBJ_FILE */ {file_destroy, NULL},
+    /* OBJ_AWAIT */ {await_destroy, await_gc_release},
+    /* OBJ_TIMEOUT */ {timeout_destroy, NULL},
+    /* OBJ_CLASS */ {class_destroy, class_gc_release},
+    /* OBJ_COMPLEX */ {NULL, NULL},
+    /* OBJ_EXCVALUE */ {exc_value_destroy, exc_value_gc_release},
+    /* OBJ_TB */ {tb_destroy, NULL},
+    /* OBJ_RANDOM */ {NULL, NULL},
+    /* OBJ_MATCH */ {match_dtor, NULL},
+    /* OBJ_REGEX */ {regex_dtor, NULL},
+    /* OBJ_PROC */ {proc_destroy, NULL},
+    /* OBJ_POPEN */ {popen_destroy, NULL},
+    /* OBJ_EVENT */ {event_destroy, NULL},
+    /* OBJ_LOCK */ {lock_destroy, NULL},
+    /* OBJ_QUEUE */ {queue_destroy, NULL},
+    /* OBJ_TASKGROUP */ {taskgroup_destroy, NULL},
+    /* OBJ_TEMPLATE */ {template_destroy, NULL},
+    /* OBJ_INTERP */ {interp_destroy, NULL},
+    /* OBJ_VT */ {vt_destroy, NULL},
+    /* OBJ_CHAN */ {chan_destroy, NULL},
+    /* OBJ_SEM */ {sem_destroy, NULL},
 };  /* 其余下标默认 NULL（静态区零初始化） */
 
 /* ══════════════════════════════════════════════════════════════════
@@ -2108,7 +2133,7 @@ void pa_print_any(int64_t v) {
             return;
         }
         /* P4 块3（lang_gaps 门控开）：print(异常值) 印消息（CPython 口径）。 */
-        if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ &&
+        if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ_EXCVALUE &&
             ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC) {
             PyAdamasStr* s = pa_exc_value_str((PyAdamasExcValue*)(uintptr_t)v);
             pa_print_str(s);
@@ -2994,6 +3019,31 @@ void gc_scan_object(PyAdamasRc* h) {
             break;
         case PYADAMAS_RC_CLOSURE:
         case PYADAMAS_RC_OBJ_GEN:
+        case PYADAMAS_RC_OBJ_DATETIME:
+        case PYADAMAS_RC_OBJ_TIMEDELTA:
+        case PYADAMAS_RC_OBJ_PATH:
+        case PYADAMAS_RC_OBJ_DEQUE:
+        case PYADAMAS_RC_OBJ_FILE:
+        case PYADAMAS_RC_OBJ_AWAIT:
+        case PYADAMAS_RC_OBJ_TIMEOUT:
+        case PYADAMAS_RC_OBJ_CLASS:
+        case PYADAMAS_RC_OBJ_COMPLEX:
+        case PYADAMAS_RC_OBJ_EXCVALUE:
+        case PYADAMAS_RC_OBJ_TB:
+        case PYADAMAS_RC_OBJ_RANDOM:
+        case PYADAMAS_RC_OBJ_MATCH:
+        case PYADAMAS_RC_OBJ_REGEX:
+        case PYADAMAS_RC_OBJ_PROC:
+        case PYADAMAS_RC_OBJ_POPEN:
+        case PYADAMAS_RC_OBJ_EVENT:
+        case PYADAMAS_RC_OBJ_LOCK:
+        case PYADAMAS_RC_OBJ_QUEUE:
+        case PYADAMAS_RC_OBJ_TASKGROUP:
+        case PYADAMAS_RC_OBJ_TEMPLATE:
+        case PYADAMAS_RC_OBJ_INTERP:
+        case PYADAMAS_RC_OBJ_VT:
+        case PYADAMAS_RC_OBJ_CHAN:
+        case PYADAMAS_RC_OBJ_SEM:
         case PYADAMAS_RC_OBJ:
         case PYADAMAS_RC_INSTANCE: {
             // 闭包负载 = [code, n_caps, cell…]，cell 都是堆上的 list；

@@ -380,15 +380,15 @@ typedef struct {
     int64_t kind;           /* 元素类别：0 裸值（float 位模式）/ 1 引用 */
 } PyAdamasQueue;
 
-static void event_destroy(void* p) {
+void event_destroy(void* p) {
     PyAdamasEvent* e = (PyAdamasEvent*)p;
     if (e->waiters) pa_rc_dec(e->waiters);
 }
-static void lock_destroy(void* p) {
+void lock_destroy(void* p) {
     PyAdamasLock* l = (PyAdamasLock*)p;
     if (l->waiters) pa_rc_dec(l->waiters);
 }
-static void queue_destroy(void* p) {
+void queue_destroy(void* p) {
     PyAdamasQueue* q = (PyAdamasQueue*)p;
     if (q->items) pa_rc_dec(q->items);
     if (q->getters) pa_rc_dec(q->getters);
@@ -400,7 +400,7 @@ static void queue_destroy(void* p) {
 void* pa_event_new(void) {
     loop_ensure();
     PyAdamasEvent* e = (PyAdamasEvent*)rc_alloc((int64_t)sizeof(PyAdamasEvent), event_destroy, NULL,
-                                        PYADAMAS_RC_OBJ);
+                                        PYADAMAS_RC_OBJ_EVENT);
     pa_gc_pin(e);  /* waiters 的分配可能触发主收集 */
     e->waiters = pa_list_new(4, 1);
     pa_gc_unpin(e);
@@ -438,7 +438,7 @@ void* pa_event_wait(void* ep) {
 void* pa_lock_new(void) {
     loop_ensure();
     PyAdamasLock* l = (PyAdamasLock*)rc_alloc((int64_t)sizeof(PyAdamasLock), lock_destroy, NULL,
-                                      PYADAMAS_RC_OBJ);
+                                      PYADAMAS_RC_OBJ_LOCK);
     pa_gc_pin(l);  /* waiters 的分配可能触发主收集 */
     l->waiters = pa_list_new(4, 1);
     pa_gc_unpin(l);
@@ -480,7 +480,7 @@ int64_t pa_lock_locked(void* lp) {
 void* pa_queue_new(int64_t maxsize, int64_t kind) {
     loop_ensure();
     PyAdamasQueue* q = (PyAdamasQueue*)rc_alloc((int64_t)sizeof(PyAdamasQueue), queue_destroy, NULL,
-                                        PYADAMAS_RC_OBJ);
+                                        PYADAMAS_RC_OBJ_QUEUE);
     q->kind = kind ? 1 : 0;
     int64_t lk = q->kind ? 2 : 0;
     /* 下面连建 5 个列表，每个都是主收集触发点；q 只在本帧 C 局部变量里。 */
@@ -629,7 +629,7 @@ typedef struct {
     PyAdamasList* tasks; /* Task*（owned） */
 } PyAdamasTaskGroup;
 
-static void taskgroup_destroy(void* p) {
+void taskgroup_destroy(void* p) {
     PyAdamasTaskGroup* g = (PyAdamasTaskGroup*)p;
     if (g->tasks) pa_rc_dec(g->tasks);
 }
@@ -637,7 +637,7 @@ static void taskgroup_destroy(void* p) {
 void* pa_taskgroup_new(void) {
     loop_ensure();
     PyAdamasTaskGroup* g = (PyAdamasTaskGroup*)rc_alloc((int64_t)sizeof(PyAdamasTaskGroup),
-                                                taskgroup_destroy, NULL, PYADAMAS_RC_OBJ);
+                                                taskgroup_destroy, NULL, PYADAMAS_RC_OBJ_TASKGROUP);
     pa_gc_pin(g);  /* tasks 的分配可能触发主收集 */
     g->tasks = pa_list_new(4, 1);
     pa_gc_unpin(g);
@@ -686,15 +686,14 @@ typedef struct {
     PyAdamasList* waiters; /* Future* */
 } PyAdamasSem;
 
-static void sem_destroy(void* p) {
+void sem_destroy(void* p) {
     PyAdamasSem* s = (PyAdamasSem*)p;
     if (s->waiters) pa_rc_dec(s->waiters);
 }
 
 void* pa_sem_new(int64_t value) {
     loop_ensure();
-    PyAdamasSem* s = (PyAdamasSem*)rc_alloc((int64_t)sizeof(PyAdamasSem), sem_destroy, NULL,
-                                    PYADAMAS_RC_OBJ);
+    PyAdamasSem* s = (PyAdamasSem*)rc_alloc((int64_t)sizeof(PyAdamasSem), sem_destroy, NULL, PYADAMAS_RC_OBJ_SEM);
     s->value = value > 0 ? value : 0;
     pa_gc_pin(s);  /* waiters 的分配可能触发主收集 */
     s->waiters = pa_list_new(4, 1);

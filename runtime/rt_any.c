@@ -932,6 +932,30 @@ static int64_t any_type_from_heap(int64_t v) {
         case PYADAMAS_RC_DICT: return PA_TYPE_DICT;
         case PYADAMAS_RC_CPYFLOAT: return PA_TYPE_FLOAT;
         case PYADAMAS_RC_BIGINT: return PA_TYPE_BIG;
+        case PYADAMAS_RC_OBJ_DATETIME: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_TIMEDELTA: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_PATH: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_DEQUE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_FILE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_AWAIT: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_TIMEOUT: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_COMPLEX: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_EXCVALUE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_TB: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_RANDOM: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_MATCH: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_REGEX: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_PROC: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_POPEN: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_EVENT: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_LOCK: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_QUEUE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_TASKGROUP: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_TEMPLATE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_INTERP: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_VT: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_CHAN: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ_SEM: return PA_TYPE_OBJECT;
         case PYADAMAS_RC_INSTANCE: return PA_TYPE_OBJECT;
         /* 动态 JSON 的 null/bool 盒：isinstance(v, type(None)) / isinstance(v, bool)
            能精确判出来（P2 类型码口径）。 */
@@ -939,7 +963,7 @@ static int64_t any_type_from_heap(int64_t v) {
         case PYADAMAS_RC_JSONBOOL: return PA_TYPE_BOOL;
         case PYADAMAS_RC_OBJ_GEN:
             return PA_TYPE_OBJECT;
-        case PYADAMAS_RC_OBJ: {
+        case PYADAMAS_RC_OBJ_CLASS: {
             /* 类对象藏在 OBJ 里（头有 magic/cid/ctor/vtable）；异常值等
                其它 OBJ 负载不是类对象，按 OBJECT（异常类的 isinstance
                由 pa_is_exc 的静态名字路径处理）。 */

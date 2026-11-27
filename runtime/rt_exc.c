@@ -830,7 +830,7 @@ void pa_raise_c(const char* type, const char* msg) {
 
 /* ── 异常值对象 ───────────────────────────────────────────────── */
 
-static void exc_value_destroy(void* p) {
+void exc_value_destroy(void* p) {
     PyAdamasExcValue* v = (PyAdamasExcValue*)p;
     free(v->type);
     free(v->message);
@@ -840,7 +840,7 @@ static void exc_value_destroy(void* p) {
     pa_trace_free(v->trace_extra);
 }
 
-static void exc_value_gc_release(void* p) {
+void exc_value_gc_release(void* p) {
     PyAdamasExcValue* v = (PyAdamasExcValue*)p;
     if (v->args) pa_gc_unref_child(v->args);
     if (v->cause) pa_gc_unref_child(v->cause);
@@ -849,7 +849,7 @@ static void exc_value_gc_release(void* p) {
 static PyAdamasExcValue* exc_value_alloc(const char* type, const char* msg) {
     PyAdamasExcValue* v = (PyAdamasExcValue*)rc_alloc((int64_t)sizeof(PyAdamasExcValue),
                                               exc_value_destroy, exc_value_gc_release,
-                                              PYADAMAS_RC_OBJ);
+                                              PYADAMAS_RC_OBJ_EXCVALUE);
     v->magic = PYADAMAS_EXCVAL_MAGIC;
     v->type = NULL;
     v->message = NULL;

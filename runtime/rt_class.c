@@ -155,7 +155,7 @@ static PyAdamasClass* as_class(void* p) {
     return c->magic == PYADAMAS_CLASS_MAGIC ? c : NULL;
 }
 
-static void class_destroy(void* p) {
+void class_destroy(void* p) {
     PyAdamasClass* c = (PyAdamasClass*)p;
     if (c->name) pa_rc_dec(c->name);
 }
@@ -165,7 +165,7 @@ static void class_destroy(void* p) {
    单例由注册表持永久引用），没有 release 回调的话 name 串永远到不了
    rc==0 → LeakSanitizer Direct leak。普通用户类单例在模块退出时经 RC
    先释放（走 class_destroy），这条回调对它们是纯加法。 */
-static void class_gc_release(void* p) {
+void class_gc_release(void* p) {
     PyAdamasClass* c = (PyAdamasClass*)p;
     if (c->name) pa_gc_unref_child(c->name);
 }
@@ -173,7 +173,7 @@ static void class_gc_release(void* p) {
 void* pa_class_new(int64_t cid, int64_t ctor, int64_t* vtable, PyAdamasStr* name) {
     PyAdamasClass* c = (PyAdamasClass*)rc_alloc((int64_t)sizeof(PyAdamasClass),
                                                 class_destroy, class_gc_release,
-                                                PYADAMAS_RC_OBJ);
+                                                PYADAMAS_RC_OBJ_CLASS);
     c->magic = PYADAMAS_CLASS_MAGIC;
     c->cid = cid;
     c->ctor = ctor;
@@ -324,7 +324,7 @@ int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
         want[n] = '\0';
         return exc_is_a(base, want) ? 1 : 0;
     }
-    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)sizeof(PyAdamasExcValue)) return 0;
+    if (h->kind != PYADAMAS_RC_OBJ_EXCVALUE || h->size < (int64_t)sizeof(PyAdamasExcValue)) return 0;
     PyAdamasExcValue* v = (PyAdamasExcValue*)obj;
     if (v->magic != PYADAMAS_EXCVAL_MAGIC) return 0;
     char want[128];
@@ -360,7 +360,7 @@ int64_t pa_str_eq_unknown(void* obj, PyAdamasStr* s) {
 int64_t pa_complex_eq_unknown(void* obj, PyAdamasComplex* c) {
     if (!obj || !c) return 0;
     PyAdamasRc* h = (PyAdamasRc*)obj - 1;
-    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ_COMPLEX ||
         h->size < (int64_t)sizeof(PyAdamasComplex))
         return 0;
     PyAdamasComplex* x = (PyAdamasComplex*)obj;
@@ -667,7 +667,7 @@ void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value) {
 int64_t pa_is_complex(void* obj) {
     if (!obj) return 0;
     PyAdamasRc* h = (PyAdamasRc*)obj - 1;
-    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ_COMPLEX ||
         h->size < (int64_t)sizeof(PyAdamasComplex))
         return 0;
     return ((PyAdamasComplex*)obj)->magic == PYADAMAS_COMPLEX_MAGIC ? 1 : 0;

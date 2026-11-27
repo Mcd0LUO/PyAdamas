@@ -378,7 +378,7 @@ static void vt_load_globals(PaVt* vt) {
 
 /* ── 调度器 ───────────────────────────────────────────────────────── */
 
-static void vt_destroy(void* p);
+void vt_destroy(void* p);
 
 static void vt_ensure(void) {
     if (!vt_roots_registered) {
@@ -399,8 +399,7 @@ static void vt_ensure(void) {
     if (!vt_rq) vt_rq = pa_list_new(8, 1);
     if (!vt_current) {
         /* root vthread：主流程本身，用 OS 主栈，没有 mmap 栈。 */
-        PaVt* root = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL,
-                                     PYADAMAS_RC_OBJ);
+        PaVt* root = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL, PYADAMAS_RC_OBJ_VT);
         root->magic = PA_VT_MAGIC;
         root->state = VT_RUNNING;
         root->scheduler_ref = 1;
@@ -510,7 +509,7 @@ static void vt_sched_loop(void) {
 
 static void vt_sched_ensure(void) {
     if (vt_sched) return;
-    PaVt* s = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL, PYADAMAS_RC_OBJ);
+    PaVt* s = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL, PYADAMAS_RC_OBJ_VT);
     s->magic = PA_VT_MAGIC;
     s->state = VT_RUNNING;
     s->scheduler_ref = 1;
@@ -622,7 +621,7 @@ void pa_vt_exc_landing(void* unwound) {
 
 void* pa_vt_spawn(int64_t fn) {
     vt_ensure();
-    PaVt* vt = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL, PYADAMAS_RC_OBJ);
+    PaVt* vt = (PaVt*)rc_alloc((int64_t)sizeof(PaVt), vt_destroy, NULL, PYADAMAS_RC_OBJ_VT);
     vt->magic = PA_VT_MAGIC;
     vt->state = VT_RUNNABLE;
     vt->id = ++vt_next_id;
@@ -641,7 +640,7 @@ void* pa_vt_spawn(int64_t fn) {
 static PaVt* vt_check(int64_t h, const char* what) {
     if (!pa_unknown_is_heap(h)) pa_raise_c("TypeError", what);
     PyAdamasRc* hdr = (PyAdamasRc*)(uintptr_t)h - 1;
-    if (hdr->kind != PYADAMAS_RC_OBJ || ((PaVt*)(uintptr_t)h)->magic != PA_VT_MAGIC)
+    if (hdr->kind != PYADAMAS_RC_OBJ_VT || ((PaVt*)(uintptr_t)h)->magic != PA_VT_MAGIC)
         pa_raise_c("TypeError", what);
     return (PaVt*)(uintptr_t)h;
 }
@@ -686,7 +685,7 @@ void pa_vt_sleep(int64_t ms) {
 
 /* ── channel ──────────────────────────────────────────────────────── */
 
-static void chan_destroy(void* p) {
+void chan_destroy(void* p) {
     PaChan* c = (PaChan*)p;
     /* 通道被丢弃时还阻塞在上面的 vthread 永远等不到对端（退出时按
        放弃处理）。先把寄存的发送值释放掉，避免重复释放。 */
@@ -701,7 +700,7 @@ static void chan_destroy(void* p) {
 static PaChan* chan_check(void* cp, const char* what) {
     if (!cp || !pa_unknown_is_heap((int64_t)cp)) pa_raise_c("TypeError", what);
     PyAdamasRc* hdr = (PyAdamasRc*)cp - 1;
-    if (hdr->kind != PYADAMAS_RC_OBJ || ((PaChan*)cp)->magic != PA_CHAN_MAGIC)
+    if (hdr->kind != PYADAMAS_RC_OBJ_CHAN || ((PaChan*)cp)->magic != PA_CHAN_MAGIC)
         pa_raise_c("TypeError", what);
     return (PaChan*)cp;
 }
@@ -711,7 +710,7 @@ void* pa_chan_new(int64_t kind, int64_t cap) {
     if (cap < 0) pa_raise_c("ValueError", "channel capacity must be non-negative");
     vt_ensure();
     PaChan* c = (PaChan*)rc_alloc((int64_t)sizeof(PaChan), chan_destroy, NULL,
-                                  PYADAMAS_RC_OBJ);
+                                  PYADAMAS_RC_OBJ_CHAN);
     c->magic = PA_CHAN_MAGIC;
     c->elem_kind = kind;
     c->cap = cap;
@@ -917,7 +916,7 @@ void pa_vt_shutdown(void) {
     pa_rc_dec(root);
 }
 
-static void vt_destroy(void* p) {
+void vt_destroy(void* p) {
     PaVt* vt = (PaVt*)p;
     if (vt->exc) {
         if (!vt->joined) {

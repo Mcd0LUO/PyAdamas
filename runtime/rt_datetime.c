@@ -21,7 +21,7 @@ struct PyAdamasPath {
     PyAdamasStr* path; /* owned */
 };
 
-static void dt_destroy(void* p) {
+void dt_destroy(void* p) {
     (void)p; /* 没有指针字段 */
 }
 
@@ -36,7 +36,7 @@ static PyAdamasDateTime* dt_make(int64_t y, int64_t mo, int64_t d, int64_t h, in
     if (mi < 0 || mi > 59) pa_raise_c("ValueError", "minute must be in 0..59");
     if (s < 0 || s > 59) pa_raise_c("ValueError", "second must be in 0..59");
     PyAdamasDateTime* dt =
-        (PyAdamasDateTime*)rc_alloc((int64_t)sizeof(PyAdamasDateTime), dt_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasDateTime*)rc_alloc((int64_t)sizeof(PyAdamasDateTime), dt_destroy, NULL, PYADAMAS_RC_OBJ_DATETIME);
     dt->magic = PYADAMAS_DT_MAGIC;
     dt->year = y;
     dt->month = mo;
@@ -179,7 +179,7 @@ struct PyAdamasTimeDelta {
     int64_t days, seconds, microseconds;
 };
 
-static void td_destroy(void* p) {
+void td_destroy(void* p) {
     (void)p; /* 没有指针字段 */
 }
 
@@ -203,7 +203,7 @@ static void td_normalize(int64_t* d, int64_t* s, int64_t* us) {
 
 PyAdamasTimeDelta* pa_timedelta_new(int64_t days, int64_t seconds, int64_t microseconds) {
     PyAdamasTimeDelta* td = (PyAdamasTimeDelta*)rc_alloc(
-        (int64_t)sizeof(PyAdamasTimeDelta), td_destroy, NULL, PYADAMAS_RC_OBJ);
+        (int64_t)sizeof(PyAdamasTimeDelta), td_destroy, NULL, PYADAMAS_RC_OBJ_TIMEDELTA);
     td->magic = PYADAMAS_TD_MAGIC;
     td->days = days;
     td->seconds = seconds;
@@ -415,7 +415,7 @@ int64_t pa_datetime_cmp(PyAdamasDateTime* a, PyAdamasDateTime* b) {
 
 /* ── pathlib ───────────────────────────────────────────────── */
 
-static void path_destroy(void* p) {
+void path_destroy(void* p) {
     PyAdamasPath* pp = (PyAdamasPath*)p;
     if (pp->path) pa_rc_dec(pp->path);
 }
@@ -430,7 +430,7 @@ static void path_destroy(void* p) {
  * 用法约定：str_alloc_raw / str_seal 之后直接 return pa_path_adopt(...)。 */
 static PyAdamasPath* pa_path_adopt(PyAdamasStr* s) {
     pa_gc_pin(s);
-    PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ);
+    PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ_PATH);
     p->magic = PYADAMAS_PATH_MAGIC;
     p->path = s;
     pa_gc_unpin(s);
@@ -443,7 +443,7 @@ PyAdamasPath* pa_path_new(PyAdamasStr* s) {
        任何根上，会被清扫，随后 p->path 就是悬空指针。入口先 pin 参数：
        它临时补一个引用（不改变所有权），分配完成并 rc_inc 后再撤销。 */
     pa_gc_pin(s);
-    PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ);
+    PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ_PATH);
     p->magic = PYADAMAS_PATH_MAGIC;
     p->path = s;
     if (s) pa_rc_inc(s);

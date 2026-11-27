@@ -75,7 +75,7 @@ static int64_t file_fd_streaming(int64_t fd) {
 #endif
 }
 
-static void file_destroy(void* p) {
+void file_destroy(void* p) {
     PyAdamasFile* f = (PyAdamasFile*)p;
     if (f->fp) {
         fclose(f->fp);
@@ -199,7 +199,7 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
     }
 
     PyAdamasFile* f =
-        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ_FILE);
     memset(f, 0, sizeof *f);
     /* 下面三次 str_new（mode/encoding/errors）都会走 rc_alloc，f 此时只在
        本帧 C 局部变量里，先 pin 住，否则主收集落在这里会把它清扫掉。 */
@@ -897,7 +897,7 @@ int64_t pa_file_closed(PyAdamasFile* f) {
 int64_t pa_is_file(void* v) {
     if (!pa_unknown_is_heap((int64_t)(uintptr_t)v)) return 0;
     PyAdamasRc* h = (PyAdamasRc*)v - 1;
-    return h->kind == PYADAMAS_RC_OBJ && h->size >= (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
+    return h->kind == PYADAMAS_RC_OBJ_FILE && h->size >= (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
 }
 
 PyAdamasStr* pa_file_name(PyAdamasFile* f) {
@@ -991,7 +991,7 @@ PyAdamasFile* pa_sys_stream(int64_t which) {
     if (cached) return cached;
     FILE* fp = which == 0 ? stdin : which == 1 ? stdout : stderr;
     PyAdamasFile* f =
-        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
+        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ_FILE);
     /* 下面的 name/mode 两次 str_new 都可能触发主收集：f 只在 C 局部变量里，
        而且它的 rc 还没被改成 IMMORTAL。 */
     pa_gc_pin(f);

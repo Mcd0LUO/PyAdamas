@@ -374,14 +374,14 @@ typedef struct PyAdamasTb {
     PyAdamasTraceFrame* frames;  /* owned malloc 链，外→内 */
 } PyAdamasTb;
 
-static void tb_destroy(void* p) {
+void tb_destroy(void* p) {
     PyAdamasTb* tb = (PyAdamasTb*)p;
     pa_trace_free(tb->frames);
 }
 
 static PyAdamasTb* tb_new(PyAdamasTraceFrame* frames) {
     PyAdamasTb* tb = (PyAdamasTb*)rc_alloc((int64_t)sizeof(PyAdamasTb),
-                                           tb_destroy, NULL, PYADAMAS_RC_OBJ);
+                                           tb_destroy, NULL, PYADAMAS_RC_OBJ_TB);
     tb->magic = PYADAMAS_TB_MAGIC;
     tb->frames = frames;
     return tb;

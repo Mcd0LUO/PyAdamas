@@ -1838,13 +1838,13 @@ typedef struct PyAdamasRegex {
     PyAdamasStr* pat;  // 原始模式串，供 Pattern.pattern 用
 } PyAdamasRegex;
 
-static void regex_dtor(void* p) {
+void regex_dtor(void* p) {
     PyAdamasRegex* r = (PyAdamasRegex*)p;
     prog_free(&r->prog);
     if (r->pat) pa_rc_dec(r->pat);
 }
 
-static void match_dtor(void* p) {
+void match_dtor(void* p) {
     PyAdamasMatch* m = (PyAdamasMatch*)p;
     if (m->text) pa_rc_dec(m->text);
     free(m->caps);
@@ -1870,7 +1870,7 @@ static void names_copy(ReName** dst, int* dstn, const ReName* src, int n) {
 
 static PyAdamasMatch* match_new(PyAdamasStr* text, int64_t ngroups, const int64_t* caps,
                             const ReName* names, int nnames) {
-    PyAdamasMatch* m = (PyAdamasMatch*)rc_alloc(sizeof(PyAdamasMatch), match_dtor, NULL, PYADAMAS_RC_OBJ);
+    PyAdamasMatch* m = (PyAdamasMatch*)rc_alloc(sizeof(PyAdamasMatch), match_dtor, NULL, PYADAMAS_RC_OBJ_MATCH);
     m->text = text;
     pa_rc_inc(text);
     m->ngroups = ngroups;
@@ -1900,7 +1900,7 @@ static int64_t group_end(PyAdamasMatch* m, int64_t n) {
 }
 
 int64_t pa_re_compile(PyAdamasStr* pat, int64_t flags) {
-    PyAdamasRegex* r = (PyAdamasRegex*)rc_alloc(sizeof(PyAdamasRegex), regex_dtor, NULL, PYADAMAS_RC_OBJ);
+    PyAdamasRegex* r = (PyAdamasRegex*)rc_alloc(sizeof(PyAdamasRegex), regex_dtor, NULL, PYADAMAS_RC_OBJ_REGEX);
     r->pat = NULL;
     const char* err = NULL;
     if (!prog_build(&r->prog, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
