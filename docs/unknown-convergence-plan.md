@@ -261,3 +261,18 @@ B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数
    - `indents[len(indents)-1]` 这种**用 len() 作下标**的表达式。
 
 **注意**：本轮之后不要再猜根因。bisect 出具体那一段之前，不写任何修复代码。
+
+## 18. bisect 进展（0.718）
+
+已排除的构造（都做了最小复现 + TYPE_STATS 验证）：
+
+- chr(32) 这类模块级常量与 str 比较：m4 通过，零 stats；
+- indents: list[int] = [0] + indents[len(indents)-1] + append/pop + spaces += 1：
+  m5 通过（输出 3 正确），零 stats；
+- 把 lexer.py 的 tokenize 整段搬到独立文件 + stub 依赖：构建零 stats（但合成代码逻辑死循环，
+  运行无法验证），**未能复现 unknown**。
+
+结论：就地无法用合成 repro 复现，说明触发条件与真实模块环境有关
+（可能来自同文件其他函数/类的推断结果、或模块级语句顺序）。
+下一步改做**真实文件的减法 bisect**：复制 lexer.py，删掉 tokenize 之外的部分，
+再逐步删 tokenize 内部语句，直到 stats 消失。不要再用合成 repro。
