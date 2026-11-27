@@ -208,3 +208,55 @@ PYADAMAS_GC_STATS/RC_STATS / ASan detect_leaks 钉子（13_gc/88_defaultdict/192
 - **A 全 Go 式**（去 RC + tracing + 每 P 分配 + M:N）：推翻 P3/RC/Python 析构语义，撞全 119 static 大山。B 不碰这些。
 - **C 单后台 mark worker（M=1）**：其实就是 B 的阶段 2 的简化叙述；B 把它纳入完整混合屏障框架，先阶段 1 验证正确性再上线程。
 - B 的本质：**RC 管非标记期的确定性回收（快、零原子），GC 混合屏障管标记期的并发循环回收**——两套所有权在时间上分域，而非 A 的全局替换。
+---
+
+## 8. 现状实测：增量 ≠ 并发（2026-11-27，0.700 之后）
+
+> 用户观察：「我们的 GC 好像没有并发」。**确认属实**。
+>
+> ### 8.1 实测暂停分布（gcbench，默认配置，53 次收集）
+>
+> ```
+> 2.259 ms     ← 主 GC（同步 drain）
+> 1.228 ms     ← 次大
+> 0.007 ms     ← 其余 51 次全部 ≤ 7 微秒
+> ```
+>
+> 也就是：**绝大多数收集是亚毫秒，但最大暂停 2.3ms 来自同步标记**（`gc_drain()` 一次标完）。
+>
+> ### 8.2 三层状态的准确说法
+>
+> | 机制 | 现状 | 是否并发 |
+> |---|---|---|
+> | 清扫分片（`GC_SWEEP_BUDGET`） | 已实现，分配点推进 | ❌ 与 mutator 同线程，只是**分片**不是**并发** |
+> | 标记分片（`PYADAMAS_GC_INCR_MARK=1`） | 已实现并验收（0.700） | ❌ 同线程，**增量**不是**并发**；且吞吐 −32%~−52% |
+> | 后台标记线程（本文件 §3.2 阶段 2） | **未实现** | ✅ 这才是并发 |
+>
+> 关键区分：**分片（incremental）= 把一个长停顿切成一串小停顿，仍然占用 mutator 的 CPU；
+>并发（concurrent）= 标记跑在另一个核上，mutator 不付这笔 CPU。** 我们只有前者。
+>
+> ### 8.3 阶段 1 的成果正好是阶段 2 的前提
+>
+> 0.700 验证了「标记期不释放任何对象」这条不变量（Yuasa 删除屏障 + DEFER 保活）。
+>**这条不变量是后台线程可行的全部理由**：标记线程读对象时不会撞到已释放内存。
+>没有它，后台线程就是 13_gc 那个 UAF。
+>
+> ### 8.4 最小可行实现（一次可验证的切片）
+>
+> 1. `runtime/CMakeLists.txt` + 顶层：`find_package(Threads REQUIRED)` → `Threads::Threads`；
+> 2. `gc_work` 栈的 push/pop 加一把互斥锁（mutator 的屏障 push 与标记线程的 pop 并发）；
+>    **扫描时不持锁**（`gc_scan_object` 内的 push 自己加锁），避免自锁；
+> 3. 标记线程：`while (pop != NULL) gc_scan_object(h);` 栈空 → 置 `gc_mark_done=1` 退出；
+> 4. `gc_incr_step` 在分配点改成：`gc_mark_done && work 空` → 进清扫；`gc_mark_done && work 非空` → 重启线程；
+> 5. `gc_phase` / `gc_incr_state` / `gc_mark_done` 用 `_Atomic int`；标记器读指针用 `atomic_load`（对齐 8 字节，
+>    x86 上编译成普通 load）；
+> 6. **标记终止 STW** 保留在 mutator：最后一次 drain 残余工作 + 清扫 + `gc_incr_finish`（现有代码不动）；
+> 7. 开关：`PYADAMAS_GC_THREAD=1`，默认关；关时零指令差异（沿用 `gc_incr_mark_fast` 同款门控）。
+>
+> ### 8.5 风险与验收
+>
+> - 风险 1：`gc_scan_object` 里有非线程安全的全局（`gc_cons_phase` / `gc_cons_note`）→ 标记线程单独跑时需确认只在 STW 段用；
+> - 风险 2：池/freelist 在清扫期与 mutator 分配并发 → 本切片**不动清扫**（仍在 mutator），规避；
+> - 风险 3：TSan 不可用时的数据竞争静默性 → 用 ASan + 全量套件 + 26 热基准 + 反复 100 轮压力跑；
+> - 验收：`PYADAMAS_GC_BARRIER=1 PYADAMAS_GC_THREAD=1` 下套件 602 + ASan detect_leaks=1 全绿，
+>   gcbench 最大暂停从 2.259ms 降到 < 0.3ms（根扫描 + 终止 STW），吞吐回退 < 5%。
