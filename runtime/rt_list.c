@@ -588,6 +588,9 @@ PyAdamasList* pa_list_reversed(PyAdamasList* src) {
 /* 0.303：insert 与 set 同族 —— 维护种类（heap 是新值静态种类），且插入
    会整体右移元素，kind2 位图无法逐位跟随，保守丢弃回退注册表。 */
 void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
+    /* 0.699：与 pa_list_append 同口径的插入屏障 —— 增量标记期插入的堆元素
+       必须标灰，否则可能被清扫误收（静默 UAF）。开关关闭时是一次可预测分支。 */
+    pa_gc_insert_barrier(v);
     if (i < 0) i += l->len;
     if (i < 0) i = 0;
     if (i > l->len) i = l->len;

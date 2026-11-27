@@ -66,6 +66,8 @@ PyAdamasDeque* pa_deque_from_list(PyAdamasList* items, int64_t maxlen) {
 
 /* 追加：满了先丢最旧的（和 CPython 的 maxlen 语义一致）。 */
 void pa_deque_append(PyAdamasDeque* d, int64_t v) {
+    /* 0.699：插入屏障（同 pa_list_append）。 */
+    pa_gc_insert_barrier(v);
     if (d->maxlen > 0 && d->len == d->maxlen) {
         int64_t old = dq_at(d, 0);
         d->head = (d->head + 1) & (d->cap - 1);
@@ -78,6 +80,8 @@ void pa_deque_append(PyAdamasDeque* d, int64_t v) {
 }
 
 void pa_deque_appendleft(PyAdamasDeque* d, int64_t v) {
+    /* 0.699：插入屏障。 */
+    pa_gc_insert_barrier(v);
     if (d->maxlen > 0 && d->len == d->maxlen) {
         int64_t old = dq_at(d, d->len - 1);
         --d->len;
