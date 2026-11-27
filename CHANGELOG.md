@@ -6,6 +6,28 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.713] - 2026-11-27
+
+> plan：unknown 收敛的第一批实测基线 + 目标，写进 docs/unknown-convergence-plan.md。
+>
+> 用 PYADAMAS_TYPE_STATS=1 实测三个程序，得到与文档旧口径不同的结论：
+>
+>| 程序 | unknown |
+>|---|---|
+>| container 基准 | container_elem 7 + local_unknown 8 + call_* 9 |
+>| gcbench 基准 | container_elem 2 |
+>| interp2（多模块真实程序）| local_unknown 21，**零 import 类、零 container_elem** |
+>
+> 关键更正：**跨模块不是当前主要 unknown 来源**——interp2 是多模块程序，
+>type-stats 里没有任何 import 相关类别，说明 ModuleInfo 接口机制在工作。
+>当前主源是形参类型洞（形参无注解 -> 局部变量全部 unknown）与容器元素。
+>
+> 第一批目标已定位到具体 21 个局部变量（lexer/parser/ev 三个文件），
+>并确认仓库里已有「用函数体实际用法回填形参类型洞」的机制（func.cpp:272），
+>下一步是扩展它而不是造新推断。
+>
+> 验收口径统一为 PYADAMAS_TYPE_STATS 的前后对比，不看墙钟、不做猜测。
+
 ## [0.712] - 2026-11-27
 
 > docs(gc)：阶段 2（后台标记线程）的全部实测结论写进设计稿 §9。
