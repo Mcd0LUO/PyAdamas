@@ -6,6 +6,39 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.686] - 2026-11-27
+
+> refactor(runtime)：**释放路径的 dtor/release 表化，第一步**（RC 头 64→32 的准备，纯运行期、零 codegen 改动）。
+>
+> 背景：`membench` 显示 RC 头占小对象 27–53%（2 元素 list 27%、2 字段对象 40%、短串 **53%**），
+>按 `docs/mem-rc-header.md` 的结论必须「去 dtor/release 指针 + 重排」两步一起做才有收益。
+>
+> 本步只做「表化」，且**范围连续三次收窄**——每次核对都发现我给的数字不对：
+>
+> | 我以为 | 实际（grep 核实） |
+> |---|---|
+> | 三个例外都能纯运行期解决 | INSTANCE 侧表**没有登记时机**（`pa_obj_new` 拿不到类身份，类身份是分配后才写进 payload 的） |
+> | OBJ 拆「12 个类型、17 处检查」 | **30 个分配点、25 个不同 (dtor,release) 对、54 处引用** |
+> | 表化可以不动 codegen | 三个例外全长在 codegen 数据上（`.Lvtmeta` 恰好 8 字、gen 帧头硬编码偏移、字面量按字段顺序发 quad） |
+>
+> 最终落地的 A1-a：只表化 **11 个 uniform kind**（STR/LIST/DICT/CLOSURE/RANGE/STRUCT/CPYFLOAT/
+>BIGINT/JSONNULL/JSONBOOL/BUFFER），OBJ/INSTANCE 继续走头内指针（`pa_rc_dtor_indirect` 转发）。
+>
+> | 文件 | 改动 |
+> |---|---|
+> | `rt_internal.h` | `PaRcOps{dtor,release}` 表声明 + inline helper |
+> | `rt_core.c` | 表定义 + 两个 thunk + `pa_rc_dec_slow`/`rc_leaf_free`/5 处 GC release 查表 |
+> | `rt_buffer.c` | `buffer_destroy` 由 static 导出 |
+>
+> 释放路径实测（instructions:u，10 轮取最小，绑核 25）：container **+0.000%**、coroutine +0.60%、
+>gcbench +1.09%、oopbench **+1.85%**（INSTANCE 释放多一层 thunk 间接调用）——全部 <2%。
+>RSS 不变（本步不省内存）。
+>
+> 验收：套件 **602** + 2 strict（0 失败）、全量 difftest **545-0**、opt_levels **40/40**、
+>**全量 ASan 602 rc=0 无报错**、`checkall --full` 全 PASS（bench 36/36 逐字节、perf-baseline 0 fail）。
+>
+> 下一步（A1-b）：OBJ 拆 25 个精确 kind（54 处引用逐个复核）+ GEN 用 resume 地址做键的有界侧表 +
+>`rt_diag` 名字表；INSTANCE 类元数据与 4 组 codegen 改动打包进阶段 ②（之后才能压到 32 字节，RSS −13.4%）。
 ## [0.685] - 2026-11-27
 
 > fix(driver)：**磁盘缓存加上界淘汰**（此前只有「加」没有「减」，失效条目永久堆积）。
