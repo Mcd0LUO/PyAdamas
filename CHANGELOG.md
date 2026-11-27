@@ -6,6 +6,44 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.698] - 2026-11-27
+
+> fix(backend)：**`list.append` 内联快路径补上增量标记期的写屏障守卫**。
+>
+> ## 先说一个我自己的错误
+>
+> 我按「`pa_list_append` 占 gcbench 15.4%」去写内联快路径，写完才发现**这个优化 0.282/0.303 就做过了**
+>（`gen_append_inline`，在 `call.cpp:674` 拦截 `RtFn::ListAppend`），我的实现在 `call_rt.cpp` 里
+>**永远不会被调用**——白白写了一份重复代码，已全部回退。
+>
+> 教训还是那条：**动一个热路径之前先把相关文件读一遍**。我 grep 了 `RtFn::ListAppend` 的发射点，
+>但只看了 `lower/` 和 `call_rt.cpp`，没看 `call.cpp` 的分派顺序。
+>
+> ## 真正补上的东西（正确性）
+>
+> 现有的内联快路径条件是：`len < cap`、`heap_bits == NULL`、`elem_kind` 与静态 heap 类别一致，
+>然后直接 `data[len++] = v`。**但它没有检查增量标记是否在进行**，而 `pa_list_append` 的
+>第一条就是 `pa_gc_insert_barrier(v)`。
+>
+> 默认配置下无害（`PYADAMAS_GC_INCR_MARK` 是实验开关，默认关，屏障本身是空操作），
+>但一旦打开增量标记：标记期通过内联路径写入的堆元素**不会被标灰**，可能被清扫误收 —— 静默 UAF。
+>审计文档 A12 提过「两个实验开关耦合」的问题，这就是其中一处。
+>
+> 修法：加 `cmpl $0, pa_gc_incr_mark_fast(%rip); jne slow`（开关关闭时恒不跳）。
+>
+> 实测代价：gcbench instructions **+0.04%**（936.49M → 936.89M），时间无变化
+>（churn 69–72ms / cycles 61–65ms / after-drop 25ms）。
+>
+> 验收：套件 **602**、difftest **545-0**、opt_levels **40/40**。
+>
+> ## 顺带澄清 `pa_list_append` 那 15.4% 的来源
+>
+> 现有的内联路径覆盖「容量够 + 无位图 + 类别一致」，**gcbench 里剩下的那部分**是：
+> - 列表增长（`len == cap` 时扩容）；
+> - `heap == 2`（unknown 元素）且没走 prep 调和的形态，`elem_kind >= 2` 落回运行时；
+> - 内联路径提前返回后仍然要做的函数调用本身。
+>
+> 所以「把 append 内联掉」不是剩余空间——**已经做了**；剩余的是扩容与 kind 升级，那是实打实的活。
 ## [0.697] - 2026-11-27
 
 > perf(runtime)：**两次尝试，一次负结果、一次保留**（记录 A/B 数据）。

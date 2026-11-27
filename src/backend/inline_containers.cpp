@@ -103,6 +103,12 @@ void AsmGen::gen_append_inline(const Inst& in) {
     emit_jmp(MOp::kJge, slow);
     emit_imm(MOp::kCmpq, 0, op_mem(lr, 32));
     emit_jmp(MOp::kJne, slow);
+    /* 0.698：增量标记期必须走写屏障（pa_list_append 里的 pa_gc_insert_barrier）。
+       内联路径原先没有这道守卫 —— 默认关的实验开关下无影响，但一旦打开
+       PYADAMAS_GC_INCR_MARK，标记期 append 的堆元素不会被标灰，可能被误收。
+       代价是一条 cmp + 可预测分支（开关关闭时恒不跳）。 */
+    line("cmpl $0, pa_gc_incr_mark_fast(%rip)");
+    emit_jmp(MOp::kJne, slow);
     if (heap == 0 || heap == 1) {
         // kind 必须与静态 heap 完全一致 —— 一条比较同时排除 kind2（位图）、
         // kind3（未定型）与冲突种类（0.303 种类维护）。与 0.282 守卫同指令
