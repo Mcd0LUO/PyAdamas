@@ -109,6 +109,11 @@ test_extra_env() {
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: vect'; then
         extra="$extra PYADAMAS_VECT=1"
     fi
+    # 方案 A 第二步（raise 直接跳 LP，默认关）：语义对拍用例必须开这个门控，
+    # 否则跑的是老路径，直接跳分支一次都覆盖不到。
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: exc-direct'; then
+        extra="$extra PYADAMAS_EXC_DIRECT=1"
+    fi
     printf '%s' "$extra"
 }
 

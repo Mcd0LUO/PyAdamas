@@ -354,8 +354,15 @@ static _Noreturn void pa_eh_throw_or_exit(PyAdamasException* e) {
     exit(1); /* panic_c 的头文件声明不是 noreturn，补一条不可达兜底 */
 }
 
-/* 与 rt_exc.c 的 pa_raise 逐句对应，只把 exc_longjmp 换成抛展开。 */
-_Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
+/* 与 rt_exc.c 的 pa_raise 逐句对应，只把 exc_longjmp 换成抛展开。
+ *
+ * 0.682（方案 A 第二步）：拆成「构造异常对象 + 设全局」和「抛」两步。
+ * 生成代码在**同一帧**的零开销 try 里 raise 时，先调 prep 把异常装进
+ * 约定槽位（同时 pending_exc 已就位，与抛之前逐项一致），然后直接跳该
+ * try 的 land_direct —— 不经过 _Unwind，也就没有展开包装。
+ * 跨帧（不同函数）的 raise 仍走 pa_eh_raise 的展开路径。 */
+PyAdamasException* pa_eh_raise_prep(PyAdamasStr* type, PyAdamasStr* msg,
+                                    PyAdamasException** out_slot) {
     pa_exc_drop_save();
     /* 与 pa_eh_raise_value_from 对齐：drop_save 只还 save 节点，被接管的
        current_exc 仍要释放，否则 except 体里 raise Type(msg) 泄漏捕获异常。 */
@@ -384,7 +391,16 @@ _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     pa_exc_trace_alloc(e);
     pending_exc = e;
     pa_trace_capture(e, PA_CAP_NEW);
-    pa_eh_throw_or_exit(e);
+    /* 直接跳路径的约定槽位：异常对象同时挂在这里，land_direct 从槽位取。
+       槽位是只读借用槽，所有权仍归 pending_exc（GC 根），不会重复释放。 */
+    *out_slot = e;
+    return e;
+}
+
+/* 抛出去：prep 之后走 _Unwind（跨帧路径）。 */
+_Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
+    PyAdamasException* slot = NULL;
+    pa_eh_throw_or_exit(pa_eh_raise_prep(type, msg, &slot));
 }
 
 /* raise <异常值> / raise ... from ...：与 rt_exc.c 的 pa_raise_value_from 对应。

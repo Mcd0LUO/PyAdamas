@@ -5,67 +5,14 @@ namespace pyadamas {
 
 namespace {
 
-// 方案 A 第一步（门控，默认关）：LP 第二条入口 land_direct 的开关。
-// 本步要求默认生成代码逐字节不变，所以骨架只在 PYADAMAS_EXC_DIRECT_PREP=1
-// 时发射（没有跳转过来的死代码）；step 2（raise 直接跳 LP）会翻成默认开。
-bool exc_direct_prep_enabled() {
-    static const bool on = std::getenv("PYADAMAS_EXC_DIRECT_PREP") != nullptr;
+// 方案 A 第二步（门控，默认关）：raise 在同一帧的零开销 try 里时，直接跳
+// 该 try 的 land_direct（绕开 _Unwind）。判据在 opt 层（内联之后）用，
+// 降级层只负责按形状建第二条入口；默认关时生成代码逐字节不变。
+bool exc_direct_enabled() {
+    static const bool on = std::getenv("PYADAMAS_EXC_DIRECT") != nullptr;
     return on;
 }
 
-// 深度优先遍历一个函数体里的语句树，pre 在进入子语句之前对每个语句调用。
-// 不进入嵌套 FunctionDef 的函数体（那是另一个函数）；但进入 ClassDef 的类体
-// ——类体语句是在当前函数帧里降级的，它的 try/with/return 都算在本函数头上。
-void walk_stmt_tree(std::vector<StmtPtr>& body, const std::function<void(Stmt&)>& pre) {
-    for (auto& sp : body) {
-        if (!sp) continue;
-        Stmt& s = *sp;
-        pre(s);
-        switch (s.kind) {
-            case StmtKind::FunctionDef:
-                break;
-            case StmtKind::Try: {
-                auto& t = static_cast<Try&>(s);
-                walk_stmt_tree(t.body, pre);
-                for (auto& h : t.handlers) walk_stmt_tree(h.body, pre);
-                walk_stmt_tree(t.orelse, pre);
-                walk_stmt_tree(t.finalbody, pre);
-                break;
-            }
-            case StmtKind::With:
-                walk_stmt_tree(static_cast<With&>(s).body, pre);
-                break;
-            case StmtKind::If: {
-                auto& i = static_cast<If&>(s);
-                for (auto& b : i.branches) walk_stmt_tree(b.body, pre);
-                walk_stmt_tree(i.orelse, pre);
-                break;
-            }
-            case StmtKind::While: {
-                auto& w = static_cast<While&>(s);
-                walk_stmt_tree(w.body, pre);
-                walk_stmt_tree(w.orelse, pre);
-                break;
-            }
-            case StmtKind::For: {
-                auto& f = static_cast<For&>(s);
-                walk_stmt_tree(f.body, pre);
-                walk_stmt_tree(f.orelse, pre);
-                break;
-            }
-            case StmtKind::Match: {
-                auto& m = static_cast<Match&>(s);
-                for (auto& c : m.cases) walk_stmt_tree(c.body, pre);
-                break;
-            }
-            case StmtKind::ClassDef:
-                walk_stmt_tree(static_cast<ClassDef&>(s).body, pre);
-                break;
-            default:
-                break;
-        }
-    }
-}
 
 }  // namespace
 
@@ -946,6 +893,14 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     // 需要逐个执行它们的 __exit__，任一个返回 True 就抑制异常（不重抛）。
     // 这些项在 try 体降级结束后会被 pop，所以必须先拷贝出来。
     // （with 清理项由 lower_with_item 在生成期间直接登记，见下）
+    // 方案 A 第二步：只有「单个 handler、无 finally」的零开销 try 才建第二条
+    // 入口。handler 类型不限制 —— 直接跳过去仍然走**同一条分发链**，
+    // pa_exc_matches 的运行期匹配与正常落地逐句相同；不匹配时抛出的重抛
+    // 也复用既有的 EhRethrow（重启 phase 1），语义不变。
+    const bool direct_ok = exc_direct_enabled() && t.handlers.size() == 1 && !has_fin;
+    // 直接跳路径的约定槽位：异常对象由 pa_eh_raise_prep 写入（只读借用槽，
+    // 所有权归 pending_exc 全局根，这里不负责释放）。
+    const int exc_slot = direct_ok ? new_borrow_slot(t_unknown()) : -1;
     // 方案 A 第一步：登记「当前正在降级的 try 区域」（只记账，无消费者）。
     // lp_block/end_block/land_direct_block 在 body 降级期间还拿不到 ——
     // 相关块必须建在 body 指令之后（.LEHE 要落在 body 之后），见下面回填。
@@ -1004,14 +959,14 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         emit(std::move(lp));
     }
     call_void(RtFn::EhLand, {});
-    // 方案 A 第一步（门控）：给 LP 加第二条入口 land_direct —— 跳过
-    // EhLandingPad 与 pa_eh_land，从约定槽位取异常对象（先不接），再汇入
-    // 与正常落地相同的 handler 分发链。本步没有任何跳转过来（lower_raise
-    // 不动），是死代码；默认不发射（保证生成代码逐字节不变），
-    // PYADAMAS_EXC_DIRECT_PREP=1 时发射，供验证拆分不影响行为。
+    // 方案 A 第二步（门控）：给 LP 加第二条入口 land_direct —— 跳过
+    // EhLandingPad 与 pa_eh_land，从约定槽位取异常对象（pa_eh_raise_prep
+    // 在 raise 侧写入），再汇入与正常落地相同的 handler 分发链。
+    // 只有 direct_ok（单 handler 裸 except / except Exception、无 finally）
+    // 的保护区才建；没有 raise 被改写时它是死块，O2 的 prune_unreachable 会删。
     int chain = land;  // 分发链起点块：默认链就在 land 块里（与改动前一致）
     int land_direct = -1;
-    if (exc_direct_prep_enabled()) {
+    if (direct_ok) {
         // 分发链单开一块（正常落地与直接入口共用）；死块 land_direct 紧随
         // 其后，O2 的 prune_unreachable 会把它删掉（没有入边）。
         chain = new_block("try.dispatch");
@@ -1020,18 +975,30 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         jl.op = IrOp::Jump;
         jl.target = chain;
         emit(std::move(jl));
-        // 直接入口的异常对象走约定槽位（raise 侧 step 2 才写入，这里只预留
-        // 一个只读借用槽并读取，结果不使用）。
-        const int exc_slot = new_borrow_slot(t_unknown());
         switch_to(land_direct);
+        // 直接入口从约定槽位取异常对象（raise 侧写入）；load 结果暂不使用，
+        // 保留给后续需要实例的形态（富异常等，当前子集不覆盖）。
         (void)load_slot(exc_slot, t_unknown());
-        call_void(RtFn::EhLeave, {});
-        call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
+        // **不要**在这里 EhLeave / RcCleanup：dispatch 块（chain）开头会做，
+        // 直接入口与正常落地共用同一份 —— 这里再来一遍会把 pa_eh_depth
+        // 多减一次（嵌套 try 时外层的记账被吃掉，之后 C 运行时异常误走
+        // setjmp 路径直接未捕获退出；实测 t_depth.py 的 IndexError）。
         Inst jd;
         jd.op = IrOp::Jump;
         jd.target = chain;
         emit(std::move(jd));
         switch_to(chain);
+    }
+    // 方案 A 第二步：把第二条入口的块 id / 约定槽号 / 形状安全性记进 EH 区域
+    // （opt/exc_direct 用；块 id 比块下标稳定，内联等 pass 重建块表后仍能解析）。
+    {
+        IRFunction::EhRegion& er = st_->fn->eh_regions.back();
+        er.direct_ok = direct_ok;
+        er.direct_slot = exc_slot;
+        er.direct_block = direct_ok
+                              ? st_->fn->ensure_block_id(
+                                    st_->fn->blocks[static_cast<size_t>(land_direct)])
+                              : 0;
     }
     // 回填 ZcRegion 并出栈：往下就是 handler 体（不在 try 保护区里，
     // raise 在 handler 里不能被当成「在 try 体内」）。

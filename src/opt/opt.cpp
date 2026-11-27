@@ -269,6 +269,13 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
             });
     }
 
+    // 方案 A 第二步：同一帧零开销 try 里的 raise 直接跳 land_direct。
+    // 必须排在内联之后（跨函数 raise 内联后才知道自己在保护区里），
+    // 且排在 LICM/ifconv 之前 —— 本 pass 用「块布局下标区间」判保护区，
+    // 依赖此刻 fn.blocks 的顺序就是布局顺序（后续 pass 可能重排/合并块）。
+    for (auto& fptr : m.funcs)
+        opt_stats_run("exc_direct", *fptr, [&] { exc_direct_function(*fptr); });
+
     // 内联/直接化后的 CFG 再做循环不变量外提。
     for (auto& fptr : m.funcs)
         opt_stats_run("licm", *fptr, [&] { licm_function(*fptr, m.globals.size()); });
