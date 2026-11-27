@@ -937,6 +937,8 @@ static int64_t any_type_from_heap(int64_t v) {
            能精确判出来（P2 类型码口径）。 */
         case PYADAMAS_RC_JSONNULL: return PA_TYPE_NONE;
         case PYADAMAS_RC_JSONBOOL: return PA_TYPE_BOOL;
+        case PYADAMAS_RC_OBJ_GEN:
+            return PA_TYPE_OBJECT;
         case PYADAMAS_RC_OBJ: {
             /* 类对象藏在 OBJ 里（头有 magic/cid/ctor/vtable）；异常值等
                其它 OBJ 负载不是类对象，按 OBJECT（异常类的 isinstance

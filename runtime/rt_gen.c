@@ -1,6 +1,9 @@
 // rt_gen.c —— 生成器帧与 next/send/close
 #include "rt_internal.h"
 
+/* b1：release 侧表登记函数（定义在文件末尾，pa_gen_new 先用）。 */
+static void gen_rel_register(void* resume, void (*release)(void*));
+
 /* ── 生成器 ───────────────────────────────────────────────────── */
 
 /* PEP 479：StopIteration 不该从生成器/协程帧里逃到调用方（for 循环会
@@ -76,7 +79,7 @@ void gen_destroy(void* g) {
 void* pa_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind) {
     if (n_slots < 0) panic_c("negative generator slot count");
     int64_t size = (PYADAMAS_GEN_HEADER + n_slots) * 8;
-    void* g = rc_alloc(size, gen_destroy, (void (*)(void*))(uintptr_t)release, PYADAMAS_RC_OBJ);
+    void* g = rc_alloc(size, gen_destroy, (void (*)(void*))(uintptr_t)release, PYADAMAS_RC_OBJ_GEN);
     int64_t* p = (int64_t*)g;
     p[0] = 0;      /* state */
     p[1] = 0;      /* status */
@@ -88,6 +91,7 @@ void* pa_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind)
     p[7] = 0;      /* waiter */
     p[8] = 0;      /* 待注入异常（PyAdamasException*，malloc） */
     p[9] = 0;      /* 当前等待的 awaitable（借用观察指针） */
+    gen_rel_register((void*)(uintptr_t)resume, (void (*)(void*))(uintptr_t)release);
     return g;
 }
 
@@ -199,7 +203,7 @@ int64_t pa_gen_send(void* g, int64_t sent) {
 int64_t pa_gen_send_opt(void* g, int64_t sent, int64_t* ok) {
     if (!g) pa_raise_c("TypeError", "'yield from' expects an iterable");
     PyAdamasRc* h = (PyAdamasRc*)g - 1;
-    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ_GEN ||
         h->size < (int64_t)PYADAMAS_GEN_HEADER * 8 || *(int64_t*)g == PYADAMAS_AWAIT_MAGIC)
         pa_raise_c("TypeError", "'yield from' expects a generator");
     int done = 0;
@@ -219,7 +223,7 @@ int64_t pa_gen_send_opt(void* g, int64_t sent, int64_t* ok) {
 static int64_t* gen_frame_or_raise(void* g, const char* what) {
     if (!g) pa_raise_c("TypeError", what);
     PyAdamasRc* h = (PyAdamasRc*)g - 1;
-    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ_GEN ||
         h->size < (int64_t)PYADAMAS_GEN_HEADER * 8 || *(int64_t*)g == PYADAMAS_AWAIT_MAGIC)
         pa_raise_c("TypeError", what);
     return (int64_t*)g;
@@ -348,3 +352,44 @@ void pa_gen_finalize(void* g) {
     p[2] = 0;
 }
 
+
+/* ── b1：GEN release 侧表（静态 4096，线性探测，满则 panic；不 malloc）──
+   设计：release 指针按生成器函数（resume 地址）唯一 —— 同一代码地址永远是同一个
+   .Lgengcrel。pa_gen_new 登记，释放时 pa_gen_release_indirect 从 payload p[4]（resume）
+   反查；表大小 4096，远超「生成器函数数」（实测见报告）。 */
+#define GEN_REL_TBL_CAP 4096
+struct PaGenRelSlot { void* resume; void (*release)(void*); };
+static struct PaGenRelSlot gen_rel_tbl[GEN_REL_TBL_CAP];
+static int64_t gen_rel_count;
+static void gen_rel_register(void* resume, void (*release)(void*)) {
+    if (!resume || !release) return;
+    uint64_t idx = ((uintptr_t)resume >> 4) & (GEN_REL_TBL_CAP - 1);
+    for (int64_t probe = 0; probe < GEN_REL_TBL_CAP; ++probe) {
+        struct PaGenRelSlot* e = &gen_rel_tbl[idx];
+        if (e->resume == NULL) { e->resume = resume; e->release = release; ++gen_rel_count; return; }
+        if (e->resume == resume) return;  /* 同一函数：release 必相同，幂等 */
+        idx = (idx + 1) & (GEN_REL_TBL_CAP - 1);
+    }
+    panic_c("generator release table full (4096)");
+}
+static void (*gen_rel_find(void* resume))(void*) {
+    if (!resume) return NULL;
+    uint64_t idx = ((uintptr_t)resume >> 4) & (GEN_REL_TBL_CAP - 1);
+    for (int64_t probe = 0; probe < GEN_REL_TBL_CAP; ++probe) {
+        if (gen_rel_tbl[idx].resume == NULL) return NULL;
+        if (gen_rel_tbl[idx].resume == resume) return gen_rel_tbl[idx].release;
+        idx = (idx + 1) & (GEN_REL_TBL_CAP - 1);
+    }
+    return NULL;
+}
+void pa_gen_release_indirect(void* p) {
+    int64_t* g = (int64_t*)p;
+    void (*rel)(void*) = gen_rel_find((void*)(uintptr_t)g[4]);
+    if (!rel) panic_c("generator release: resume not registered");
+    rel(p);
+}
+void pa_gen_release_report(void) {
+    const char* e = getenv("PYADAMAS_GEN_TBL_STATS");
+    if (e && *e && e[0] != '0')
+        fprintf(stderr, "[gen-tbl] entries=%lld cap=%d\n", (long long)gen_rel_count, GEN_REL_TBL_CAP);
+}

@@ -28,7 +28,7 @@ int frame_is_coro(void* p) {
     if (!p) return 0;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
+    if (h->kind != PYADAMAS_RC_OBJ_GEN || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
     return ((int64_t*)p)[6] == PYADAMAS_CORO_MAGIC;
 }
 
@@ -36,7 +36,7 @@ int frame_is_agen(void* p) {
     if (!p) return 0;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
+    if (h->kind != PYADAMAS_RC_OBJ_GEN || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
     return ((int64_t*)p)[6] == PYADAMAS_AGEN_MAGIC;
 }
 
