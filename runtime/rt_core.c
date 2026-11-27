@@ -2830,6 +2830,11 @@ static size_t gc_work_buf_cap;
    工作栈 push/pop 用自旋锁：push 只发生在屏障 flush 与扫描内部（批量），
    不是每次写入；扫描时不持锁（gc_scan_object 内部的 push 自己加锁）。 */
 static int gc_bg_on;
+static int gc_bgstat_on;
+static int64_t gc_bg_spawns, gc_bg_terms;
+static void gc_bgstat_report(void);
+static void gc_bg_spawn(void);
+static double gc_bg_spawn_ms, gc_bg_term_ms;
 static atomic_flag gc_wq_flag = ATOMIC_FLAG_INIT;
 static atomic_int gc_bg_done;
 static atomic_int gc_bg_stop;
@@ -3194,6 +3199,8 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
        同步标记（现状）。只读 "1"，"0"/未设都关，flag-off 零变化。 */
     { const char* im = getenv("PYADAMAS_GC_INCR_MARK"); if (im && im[0] == '1') gc_incr_mark_on = 1; }
     { const char* th = getenv("PYADAMAS_GC_THREAD"); if (th && th[0] == '1' && gc_incr_mark_on) gc_bg_on = 1; }
+    { const char* bs = getenv("PYADAMAS_GC_BGSTATS"); if (bs && bs[0] == '1') gc_bgstat_on = 1; }
+    if (gc_bgstat_on) atexit(gc_bgstat_report);
     pa_gc_incr_mark_fast = gc_incr_mark_on;
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;
@@ -3306,9 +3313,11 @@ static void gc_incr_finish(void) {
     gc_defer_flush();   /* 0.705: deferred secondary buffers */
     /* 0.703：确保后台标记线程已退出，再释放工作栈。 */
     if (gc_bg_on) {
+        double _t0 = gc_bgstat_on ? gc_now_ms() : 0.0;
         atomic_store_explicit(&gc_bg_stop, 1, memory_order_release);
         while (!atomic_load_explicit(&gc_bg_done, memory_order_acquire)) { }
         atomic_store_explicit(&gc_bg_stop, 0, memory_order_release);
+        if (gc_bgstat_on) { gc_bg_term_ms += gc_now_ms() - _t0; gc_bg_terms++; }
     }
     // **重算 old_bytes，不要在旧值上累加。**
     //
@@ -3474,11 +3483,18 @@ static void* gc_bg_marker(void* arg) {
     return NULL;
 }
 
+static void gc_bgstat_report(void) {
+    fprintf(stderr, "[bgstats] spawns=%lld spawn_ms=%.2f | term_waits=%lld term_ms=%.2f\n",
+            (long long)gc_bg_spawns, gc_bg_spawn_ms, (long long)gc_bg_terms, gc_bg_term_ms);
+}
+
 static void gc_bg_spawn(void) {
     pthread_t t;
     atomic_store_explicit(&gc_bg_done, 0, memory_order_release);
+    double _t0 = gc_bgstat_on ? gc_now_ms() : 0.0;
     if (pthread_create(&t, NULL, gc_bg_marker, NULL) != 0) { gc_bg_on = 0; return; }
     pthread_detach(t);
+    if (gc_bgstat_on) { gc_bg_spawn_ms += gc_now_ms() - _t0; gc_bg_spawns++; }
 }
 
 static void gc_incr_step(void) {
