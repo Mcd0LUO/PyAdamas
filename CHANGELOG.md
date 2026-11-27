@@ -6,6 +6,39 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.690] - 2026-11-27
+
+> chore(tools)：补一个**手工清理缓存**的入口 `tools/clean_cache.sh`（0.685 的自动淘汰之外的兜底）。
+>
+> 背景：modcache 分两块——模块级 `<module>-v0-<hash>/`（`.o`/`.s`/`manifest`/`mod.pya`）与
+>程序级 `progcache/<key>.bin`。0.685 加了自动有界淘汰（512 条/512 MiB，flock 保护），
+>但**低于上限的陈旧条目不会被清**，且 `progcache` 在早期版本里累积过 56634 个 `.bin`。
+>
+> 用法：
+>
+> ```bash
+> bash tools/clean_cache.sh              # progcache 保留最近 200、entry 保留最近 100
+> bash tools/clean_cache.sh --all        # 全清（下次构建全部重编）
+> bash tools/clean_cache.sh --prog-only  # 只清 progcache
+> KEEP_PROG=500 KEEP_ENTRY=200 bash tools/clean_cache.sh
+> ```
+>
+> ## 同轮记录：RC 头 32 字节阶段② 组 A **两次未通过验收，已回退**
+>
+> 组 A（INSTANCE 类元数据：`.Lvtmeta` 8→10 quad、9 处 `vt-8`→`vt-10`、`gen_obj_new` 少 2 参数、
+>运行期读 `payload[0]→vt→meta[8]/[9]`）两次都构建通过、**套件 594 ok / 8 例 OUTPUT DIFF**，
+>`difftest 545-0`（`-O0`/`-O2` 同错，差分比不出来），已按止损回退，主干始终干净。
+>
+> 第二次的关键新证据：diff 形态是 `1,15c1` / `1,36c1`——**期望 N 行、actual 只剩 1 行**，
+>说明程序在**第一处类实例路径就崩**，不是 dunder 槽读错后的格式差异。
+>加 `.Lvtmetaext` 10 字修复后行为不变 ⇒ 根因不在 MRO 的 mirror 布局。
+>
+> 当前最可疑：`pa_rc_dtor_of` / `pa_rc_release_of` 的调用点里，有些传的是 **`h`（RC 头指针）**
+>而非 payload——旧实现读头内字段两种传法都对，新实现读 `payload[0]` 就会错位。
+>**待验证**：把三个调用点（`rc_leaf_untracked:967`、`gc_free_body`、`pa_rc_dec_slow`）的实参形态列出来即可判定。
+>
+> 若证实「销毁期 `payload[0]` 不可靠」，则 32B 方案的前提不成立，需在三条路里取舍：
+>保留头内字段（48B，−6.7%，按结论不值得）、销毁前复制（无收益）、或 40B（−10%，但要审 16B 对齐）。
 ## [0.689] - 2026-11-27
 
 > docs：**RC 头 32 字节阶段②的执行规格与预审计**（本轮无代码改动，只有结论存档）。
