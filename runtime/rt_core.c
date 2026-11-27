@@ -2841,6 +2841,44 @@ static inline void gc_wq_acquire(void) {
 static inline void gc_wq_release(void) {
     atomic_flag_clear_explicit(&gc_wq_flag, memory_order_release);
 }
+/* **0.706：标记线程的私有工作栈。**
+   线程每扫一个对象都要 push（gcbench 约 60 万次），走共享栈就要 60 万次原子 RMW
+   （~20ns/次 ≈ 12ms）。改成线程 push 到自己私有的 LIFO 数组（纯 store），
+   只有当私有栈空时才去搬共享栈里 mutator 屏障 flush 进来的对象 ——
+   原子操作从「每对象一次」降到「每批一次」。 */
+#define GC_TL_CAP 4096
+static __thread PyAdamasRc* gc_tl_stack[GC_TL_CAP];
+static __thread size_t gc_tl_len;
+static __thread int gc_in_bg_marker;
+
+static inline void gc_push_work(PyAdamasRc* h) {
+    if (gc_in_bg_marker && gc_tl_len < GC_TL_CAP) {
+        gc_tl_stack[gc_tl_len++] = h;
+        return;
+    }
+    if (gc_in_bg_marker) {
+        /* 私有栈满：整批搬进共享栈（批量，不是逐对象）。 */
+        gc_wq_acquire();
+        for (size_t i = 0; i < gc_tl_len && gc_work_len < gc_work_buf_cap; ++i)
+            gc_work[gc_work_len++] = gc_tl_stack[i];
+        gc_tl_len = 0;
+        if (gc_work_len < gc_work_buf_cap) {
+            gc_work[gc_work_len++] = h;
+            gc_wq_release();
+            return;
+        }
+        gc_wq_release();
+    } else {
+        gc_wq_acquire();
+        if (gc_work_len < gc_work_buf_cap) {
+            gc_work[gc_work_len++] = h;
+            gc_wq_release();
+            return;
+        }
+        gc_wq_release();
+    }
+    /* 两个栈都满：挂进待释放链不算对象，先直接标记失败场景下丢弃（容量按集合规模给足）。 */
+}
 static PyAdamasRc** gc_set;
 static size_t gc_set_len;
 static PyAdamasRc** gc_set_buf;
@@ -2925,13 +2963,7 @@ void gc_mark(uintptr_t v) {
     if (!h || (h->marked & PYADAMAS_RC_MARK)) return;
     h->marked |= PYADAMAS_RC_MARK;
     if (gc_cons_phase) gc_cons_note(h);
-    if (gc_bg_on) {
-        gc_wq_acquire();
-        gc_work[gc_work_len++] = h;
-        gc_wq_release();
-    } else {
-        gc_work[gc_work_len++] = h;
-    }
+    if (gc_bg_on) gc_push_work(h); else gc_work[gc_work_len++] = h;
 }
 
 /* 静态类型已知的堆指针：直接读头部，不查表。字面量（永生）和不在本轮
@@ -2944,13 +2976,7 @@ static void gc_mark_direct(uintptr_t v) {
     if (h->marked & PYADAMAS_RC_MARK) return;
     h->marked |= PYADAMAS_RC_MARK;
     if (gc_cons_phase) gc_cons_note(h);
-    if (gc_bg_on) {
-        gc_wq_acquire();
-        gc_work[gc_work_len++] = h;
-        gc_wq_release();
-    } else {
-        gc_work[gc_work_len++] = h;
-    }
+    if (gc_bg_on) gc_push_work(h); else gc_work[gc_work_len++] = h;
 }
 
 PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
@@ -3419,16 +3445,31 @@ void pa_gc_write_barrier(int64_t v) { gc_write_barrier(v); }
 /* 0.703: background marker thread body. */
 static void* gc_bg_marker(void* arg) {
     (void)arg;
+    gc_in_bg_marker = 1;
+    gc_tl_len = 0;
     for (;;) {
         if (atomic_load_explicit(&gc_bg_stop, memory_order_acquire)) break;
         PyAdamasRc* h = NULL;
-        gc_wq_acquire();
-        if (gc_work_len) h = gc_work[--gc_work_len];
-        gc_wq_release();
+        if (gc_tl_len) {
+            h = gc_tl_stack[--gc_tl_len];   /* 私有栈优先，无原子操作 */
+        } else {
+            gc_wq_acquire();
+            if (gc_work_len) h = gc_work[--gc_work_len];
+            gc_wq_release();
+        }
         if (!h) break;
         gc_scan_object(h);
         if (gc_stats_on) ++gc_incr_objs;
     }
+    /* 退出前把私有栈里的残余搬回共享栈，让 mutator 的 termination 能看见。 */
+    if (gc_tl_len) {
+        gc_wq_acquire();
+        for (size_t i = 0; i < gc_tl_len && gc_work_len < gc_work_buf_cap; ++i)
+            gc_work[gc_work_len++] = gc_tl_stack[i];
+        gc_tl_len = 0;
+        gc_wq_release();
+    }
+    gc_in_bg_marker = 0;
     atomic_store_explicit(&gc_bg_done, 1, memory_order_release);
     return NULL;
 }
