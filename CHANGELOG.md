@@ -6,6 +6,22 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.720] - 2026-11-27
+
+> **unknown 修法尝试：直接补丁不成立，已回退**（问题定位完成，方案需升级为定值分析）。
+>
+> 在 stmt_if 的 restore_types() 里放过「if 之前是 unknown」的变量：
+>
+> - interp2 local_unknown **21 → 0**（目标达成）；
+> - 但 interp2 **运行期崩溃**（IndexError），套件 **600/602**（116_hmac、555_hmac_accept 输出不一致）。
+>
+> 根因：这等于假设「条件赋值的变量在 if 之后一定有值」；else 路径未赋值时会读未初始化槽。
+>
+> 正确修法是**定值分析（definite assignment）**：Symbol 加 maybe_undefined 标记，
+> 合并时按路径置位，**在使用点**退化成 unknown 而不是在合并点。
+> 详细步骤写进 docs/unknown-convergence-plan.md 第 21 节。
+>
+> 已回退，闸门恢复 602 全绿。
 ## [0.719] - 2026-11-27
 
 > **unknown 根因锁定**：变量第一次出现若在 if 分支体内，类型变成 unknown。
