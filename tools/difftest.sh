@@ -53,6 +53,10 @@ run_one() {
     if sed -n '1,8p' "$f" | grep -q '^# pyadamas: lang-gaps'; then
         extra="PYADAMAS_LANG_GAPS=1"
     fi
+    # 方案 A 第二步（raise 直接跳 LP，默认关）：语义对拍用例显式开。
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: exc-direct'; then
+        extra="$extra PYADAMAS_EXC_DIRECT=1"
+    fi
     env $extra timeout -s KILL "$tmo" "$PY" build -O0 -o "$d/o0" "$f" >/dev/null 2>"$d/b0"
     b0=$?
     env $extra timeout -s KILL "$tmo" "$PY" build -O2 -o "$d/o2" "$f" >/dev/null 2>"$d/b2"

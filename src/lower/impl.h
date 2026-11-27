@@ -30,6 +30,11 @@ namespace pyadamas {
 // 只认字面量常量。默认参数、assert 消息这些地方够用；
 // 更复杂的常量表达式留给后续的常量折叠。
 
+// 语句树深度优先遍历（lower/stmt_walk.cpp）：pre 在进入子语句之前对每个
+// 语句调用。不进入嵌套 FunctionDef；进入 ClassDef 类体（类体在当前函数帧
+// 里降级，它的 try/with/return 都算在本函数头上）。
+void walk_stmt_tree(std::vector<StmtPtr>& body, const std::function<void(Stmt&)>& pre);
+
 // 零开销 try 区域（方案 A 第一步：只记账，不改变任何语义）。
 // 降级 try 体期间压栈，供后续「raise 直接跳 LP」判断「当前 raise 是否
 // 在同一函数的保护区里、目标 LP 是谁」；本轮没有消费者（lower_raise 不动）。

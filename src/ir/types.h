@@ -294,6 +294,13 @@ struct IRFunction {
         uint32_t begin_block = 0;
         uint32_t end_block = 0;
         uint32_t lp_block = 0;
+        // 方案 A 第二步（raise 直接跳 LP）：land_direct 块 id（0 = 没建）、
+        // 异常对象约定槽号（-1 = 没预留）、以及降级期判定的「形状安全」
+        // （单 handler 且是裸 except / except Exception、无 finally）。
+        // opt/exc_direct 只改写 direct_ok 保护区里的 raise。
+        uint32_t direct_block = 0;
+        int direct_slot = -1;
+        bool direct_ok = false;
     };
     std::vector<EhRegion> eh_regions;
 

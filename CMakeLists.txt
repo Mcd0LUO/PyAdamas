@@ -105,6 +105,7 @@ set(PYADAMAS_SOURCES
   src/lower/builtin/builtin_text.cpp
   src/lower/builtin/builtin_misc.cpp
   src/lower/aggregate.cpp
+  src/lower/stmt_walk.cpp
   src/lower/method/method.cpp
   src/lower/method/method_native.cpp
   src/lower/method/method_containers.cpp
@@ -126,6 +127,7 @@ set(PYADAMAS_SOURCES
     src/backend/live_interval_build.cpp
   src/opt/fold.cpp
   src/opt/ifconv.cpp
+  src/opt/exc_direct.cpp
   src/opt/inline.cpp
   src/opt/loop.cpp
 src/opt/intloop.cpp
