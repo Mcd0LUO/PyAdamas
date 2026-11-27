@@ -303,6 +303,7 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
 
 void write_manifest(const Program& p, const ModuleUnit& u) {
     std::error_code ec;
+    const bool entry_existed = std::filesystem::exists(u.manifest_path);
     std::filesystem::create_directories(u.cache_dir, ec);
     std::ostringstream out;
     out << "pyadamasmanifest 3\n";
@@ -333,7 +334,10 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
                                : "";
         out << "dep " << d << " " << hash << "\n";
     }
-    write_atomic(u.manifest_path, out.str());
+    // 有界淘汰（0.684）：条目落盘后记账；超限时按 mtime 从旧到新回收。
+    // best-effort：任何失败静默，不影响本次编译结果。
+    if (write_atomic(u.manifest_path, out.str()))
+        cache_evict_after_store(cache_root(), u.cache_dir, entry_existed);
 }
 
 // 解析一个 import：显式模块映射优先，未命中回落现有路径搜索。

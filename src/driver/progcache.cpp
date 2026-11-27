@@ -10,6 +10,7 @@
 #include <system_error>
 
 #include "driver/build.h"
+#include "driver/build_cache.h"  // cache_evict_after_store（有界淘汰）
 #include "typecheck/types.h"  // pyadamas::hex64 / fnv1a64
 
 namespace pyadamas {
@@ -153,8 +154,12 @@ void progcache_store(const std::string& key, const std::string& out) {
     std::error_code ec;
     fs::create_directories(cache_dir(), ec);
     const std::string dst = cache_dir() + "/" + key + ".bin";
-    if (copy_file(out, dst) && debug_on())
-        std::fprintf(stderr, "[progcache] store %s\n", key.c_str());
+    const bool existed = fs::is_regular_file(dst, ec);
+    if (copy_file(out, dst)) {
+        // 有界淘汰（0.684）：程序缓存同样只有「加」没有「减」。
+        cache_evict_after_store(cache_dir(), dst, existed);
+        if (debug_on()) std::fprintf(stderr, "[progcache] store %s\n", key.c_str());
+    }
 }
 
 }  // namespace pyadamas
