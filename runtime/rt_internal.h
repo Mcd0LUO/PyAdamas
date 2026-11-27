@@ -1090,6 +1090,8 @@ PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e);
 PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v);
 void pa_raise_value(PyAdamasExcValue* v);
 void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause);
+/* 0.683：只构造/设全局/捕获 traceback，不抛；longjmp 路径与零开销直接跳路径共用。 */
+PyAdamasException* pa_raise_value_from_prep(PyAdamasExcValue* v, PyAdamasExcValue* cause);
 PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v);
 void pa_exc_register(PyAdamasStr* child, PyAdamasStr* parent);
 PyAdamasList* pa_exc_value_args(PyAdamasExcValue* v);
@@ -1115,6 +1117,8 @@ void pa_reraise(void);
 void pa_exc_reraise(void);
 PyAdamasExcValue* pa_exc_take_value(void);
 void pa_raise_instance(void* inst, PyAdamasStr* type); /* 抛富异常实例（noreturn） */
+/* 0.683：富异常实例的 prep（不抛），零开销直接跳路径用。 */
+PyAdamasException* pa_raise_instance_prep(void* inst, PyAdamasStr* type);
 void* pa_exc_accept_instance(void);                      /* except 取富实例，无则 0 */
 void pa_exc_reraise_value_if(PyAdamasExcValue* v);
 _Noreturn void pa_raise_c(const char* type, const char* msg);

@@ -669,6 +669,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DateNew:
         case RtFn::BigPowMod:    /* (big*, big*, big*) */
         case RtFn::EhRaisePrep:  /* 方案 A 第二步：(type, msg, slot_addr) */
+        case RtFn::EhRaisePrepValue:    /* (v, cause|0, slot_addr) */
+        case RtFn::EhRaisePrepInstance: /* (inst, type, slot_addr) */
         case RtFn::ListAppend:   /* (list*, v, heap) */
         case RtFn::BufferSetI64: /* 0.536：(buffer*, i64 i, v) */
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */

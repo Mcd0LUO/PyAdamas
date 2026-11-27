@@ -243,6 +243,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::Reraise: return "pa_reraise";
         case RtFn::EhRaise: return "pa_eh_raise";
         case RtFn::EhRaisePrep: return "pa_eh_raise_prep";
+        case RtFn::EhRaisePrepValue: return "pa_eh_raise_prep_value";
+        case RtFn::EhRaisePrepInstance: return "pa_eh_raise_prep_instance";
         case RtFn::EhRaiseValueFrom: return "pa_eh_raise_value_from";
         case RtFn::EhReraise: return "pa_eh_reraise";
         case RtFn::EhRethrow: return "pa_eh_rethrow";
