@@ -6,6 +6,47 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.689] - 2026-11-27
+
+> docs：**RC 头 32 字节阶段②的执行规格与预审计**（本轮无代码改动，只有结论存档）。
+>
+> 阶段①（0.686–0.688）已完成：11 个 uniform kind 表化、OBJ_GEN + 生成器 `resume` 侧表、OBJ 拆 25 个精确 kind。
+>阶段② 是唯一动 codegen 的一步，**四组已砍到三组**。
+>
+> ## 砍掉的那组：GEN 帧头 10→11
+>
+> 原本要改 `ops.cpp` 的 `8*(10+idx)`、`0/40/64(%r15)` 三处硬编码偏移——**这是最大的一组 codegen 改动**。
+>但 b1 的 `resume` 侧表已经能反查 per-function release，`gen_destroy` 又从 kind 表拿，
+>所以 32 字节头删掉 dtor/release 后，GEN 释放路径**不需要**帧头再存指针。**该组永久取消。**
+>
+> ## 剩余三组
+>
+> | 组 | 内容 | 动 codegen |
+> |---|---|---|
+> | A | INSTANCE 类元数据：`.Lvtmeta` 8 → 10 quad（尾部 +`.LdtorN`/`.LgcrelN`）、9 处 `vt-8`→`vt-10`（`rt_class.c` ×8 + `rt_lang.c:202`）、`gen_obj_new` 少 2 参数、`pa_rc_dtor_of/release_of` 的 INSTANCE 分支读 `payload[0]→vt→meta[8]/[9]` | ✅（`codegen.cpp` + `call.cpp`） |
+> | B | 32B 布局：`next/prev/rc` 8B×3 + `size:u32\|kind:u8\|flags:u8\|young_idx:u32\|spare`；`rc:u32`（IMMORTAL=0x80000000、inc 溢出 panic）、`size:u32`（>UINT32_MAX panic）、`young_idx` 独立字段 | ❌ |
+> | C | 3 处字面量预置头（`codegen.cpp:157` str / `:196` big / `:392` 闭包）改 32B | ✅ |
+>
+> ## 组 B 预审计（已 grep 确认，下次不用重做）
+>
+> | 项 | 数量 | 结论 |
+> |---|---|---|
+> | `->marked` 总读写点 | **54 处** | 全部在 `rt_core.c`（GC 自身），无其它文件持有 |
+> | `->marked` 写点 | **20 处，全在 `rt_core.c`** | 拆成 `flags:u8` 后逐个改位操作；下标写入只有 2 处 |
+> | 下标提取/写入 | **2 处**（`rt_core.c:381` 写 `young_len<<8\|YOUNG`、`:386` 读 `>>8`） | 改独立 `young_idx:u32` |
+> | flag 位 | 6 个（YOUNG/DEFER/UNTRACKED/LEAF/CONS/MARK） | 全部迁到 `flags` 字节 |
+> | 语义假设 | `gc_phase_dec` 4 分支 / sweep 三处 release / mark/restore | 均只读 flag、不依赖下标 → **拆分后语义不变** |
+>
+> ## 对齐结论（回答「40 字节回退」）
+>
+> **32 字节是 16 的倍数** → payload 起始仍 16B 对齐，与现在（64B）一致；
+>**40 字节会落到 8B 对齐**，而 AVX2 后端有 `vmovdqa`（`vect_avx2.cpp:309/312/328`）。
+>结论：**不做 40B 回退**——要么 32B 成功，要么留在 64B（阶段①收益已拿到）。
+>
+> ## 闸门注意事项
+>
+> 32B 头 + 字面量改 4 quad 后，**生成 asm 会整体变化**，`bench-12x3 逐字节一致` 的基线需要同步更新；
+>但**不许静默改基线**——必须说明「预期值已变、原因是头布局」，并给出改前/改后 asm 差异规模。
 ## [0.688] - 2026-11-27
 
 > refactor(runtime)：**OBJ 拆成 25 个精确 kind**（RC 头压缩阶段① b2，19 个文件 +221/−72）。
