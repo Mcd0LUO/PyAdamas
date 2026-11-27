@@ -6,6 +6,39 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.683] - 2026-11-27
+
+> fix(runtime)：**`list_buf_grow` 的增长前提加兜底**（运行期审计 A10-1）。
+>
+> 该函数三处 `memcpy` 都按**旧** `l->cap` 拷贝，正确性依赖「`ncap > l->cap`」——
+>所有调用点（append / copy_range / inplace_repeat / insert）确实都满足，但这条前提
+>**没有任何断言或兜底**。将来若出现「传更小的 ncap」的调用点，就是一次堆溢出。
+>
+> 加一行 `if (ncap < l->cap) ncap = l->cap;`：夹紧后三个分支都安全
+>（等长时 memcpy / realloc 无副作用）。
+>
+> 套件 **602**、difftest **545-0**。
+>
+> ## 同轮的运行期审计结论（A10 / A11，**未改动任何代码**）
+>
+> 审计覆盖 `rt_core.c` 的 RC/临时值栈/GC 集合装配与清扫、`rt_list.c` 的池化增长与所有变异入口，
+>以及 `rt_str.c` 的 SSO / 码点索引 / 构造契约，并跑了 **25 个 ASan 压力程序**（列表增长与收缩、
+>dict 墓碑、字符串拼接与切片、循环引用、嵌套级联销毁、共享缓冲、迭代中修改、切片边界、
+>200KB 大串、二进制串往返、GC 压力下的临时串……）：
+>
+> **没有发现内存错误，25/25 与 CPython 逐字节一致。**
+>
+> 另记录四条「非缺陷但值得固化」的观察（留在审计文档里）：
+>
+> 1. 内联 list 回收有两处形态不同的实现（`pa_rc_dec_slow` 与 `pa_rc_dec_heap_batch`，后者必须显式
+>    `h->rc = 0`，注释记录过 0.274 的二次 free 事故）——同一语义两份代码，是最容易被后人改错的地方，
+>    建议抽成单一 `list_recycle_inline(h)`；
+> 2. `gc_collect` 必须把 IMMORTAL 对象显式标活（「只被 C 静态变量持有」的对象不在任何根里），
+>    这是**隐式契约**：新增任何 C 侧长期持有的堆对象都必须走 IMMORTAL 或 `pa_gc_add_roots`，
+>    否则 minor GC 会误回收（注释记录过 `sys.stdout` 被误 free）；建议写进 `rt_internal.h` 的不变量清单；
+> 3. `pub = -1` 哨兵 + 「必须 seal」是纸面契约，只有 `PYADAMAS_STR_DEBUG=1` 才会拦；漏 seal 的串在
+>    生产构建里会让 `len(s)` 返回 **-1**（静默错值）。建议把「带 DEBUG 旗跑一遍 tests/run」写进闸门；
+> 4. `str_new` 每次 O(n) 扫码点数，ASCII 路径若误用它是纯性能税、无可观测差异，只能靠 profile 发现。
 ## [0.682] - 2026-11-27
 
 > feat(exc)：**方案 A 第二步落地 —— 同帧 `raise` 直接跳到 landing pad，绕开 libgcc 展开**。

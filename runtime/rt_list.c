@@ -102,6 +102,10 @@ static void list_buf_put(int64_t* p, int64_t cap) {
    抬高到 > ncap），不能按 ncap。 */
 int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap) {
     int64_t* nd;
+    // 0.683：下面的 memcpy 按**旧** l->cap 拷，前提是 ncap > l->cap（所有调用点都保证）。
+    // 这条前提原先没有任何兜底：将来出现「传更小的 ncap」就是一次堆溢出。夹紧它，
+    // 顺带让三个分支都安全（夹紧后 ncap == l->cap 时 memcpy/realloc 都是等长，无副作用）。
+    if (ncap < l->cap) ncap = l->cap;
     if (ncap * (int64_t)sizeof(int64_t) <= LIST_BUF_MAX) {
         int64_t gcap = ncap;
         nd = list_buf_get(&gcap);
