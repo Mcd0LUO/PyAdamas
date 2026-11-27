@@ -326,6 +326,7 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             }
         }
         auto it = sc->vars.find(name);
+        if (it != sc->vars.end()) it->second.maybe_undefined = false;  // 0.721：赋值即已定值
         if (it == sc->vars.end()) {
             // 模块级 None 占位：函数体读它时，实际值取决于调用时机
             // （mimetypes 的 init() 就是通过 global 重新赋值），只能当 unknown

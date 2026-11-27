@@ -86,6 +86,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                         if (sym->ty->cls) sym->ty->cls->value_used = true;
                         return mk_class_obj(sym->ty);
                     }
+                    if (sym->maybe_undefined) return t_unknown();
                     return sym->ty;
                 }
                 if (lookup_module_alias(n.id)) {

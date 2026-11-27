@@ -21,6 +21,7 @@ struct Diag {
 
 struct Symbol {
     TypePtr ty;
+    // 把「同一分支内赋值后立刻使用」的常见写法也污染）。
     int line = 1;
     bool annotated = false;  // 由标注确定，不允许再改类型
     bool is_global = false;
@@ -35,6 +36,8 @@ struct Symbol {
     // 类型逐元素转换，而读取点仍按原类型解释（实测把 int 位模式当 double
     // 读）。置位后 declare 不再用后续赋值给槽定型。
     bool dynamic = false;
+    // 0.721: definite-assignment marker (LAST so aggregate init unchanged).
+    bool maybe_undefined = false;
 };
 
 // from 内置模块 import 的函数：保留原始签名，调用点据此走模块专用规则。

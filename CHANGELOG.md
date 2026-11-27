@@ -6,6 +6,26 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.721] - 2026-11-27
+
+> wip(runtime/typecheck)：定值分析（definite assignment）的基础设施已就位，
+> if 合并的接线未完成（本轮时间用尽），当前**行为完全不变**、闸门全绿。
+>
+> 已合入（均为 inert，标记从未被置位）：
+>
+> 1. `Symbol` 末尾加 `bool maybe_undefined = false;`
+>    （放最后是为了不破坏 `Symbol{ty, line, annotated, is_global}` 的聚合初始化）；
+> 2. 读取点（expr.cpp 的 Name 分支）在标记置位时返回 unknown：
+>    `if (sym->maybe_undefined) return t_unknown(); return sym->ty;`
+> 3. `declare()` 对已有符号赋值时清除标记（赋值即已定值）。
+>
+> 未完成：`stmt_if` 的分支合并仍需记录「每个分支新出现的名字」并在写回时
+>对「只在部分路径赋值」的名字置位。尝试的补丁因脚本拼接问题未落地，已回退。
+>
+> 闸门：套件 **602** 全绿（标记不置位 ⇒ 行为零变化）。
+>
+> 下一轮：在 stmt_forms.cpp:453 stmt_if 里补三段（记录分支新名字、else 前取基线、
+>写回时置位），然后用 /tmp/v_c.py（if 内首次赋值）与 interp2 验收。
 ## [0.720] - 2026-11-27
 
 > **unknown 修法尝试：直接补丁不成立，已回退**（问题定位完成，方案需升级为定值分析）。
