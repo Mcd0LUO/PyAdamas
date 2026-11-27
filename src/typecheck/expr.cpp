@@ -520,8 +520,15 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::IfExp: {
                 auto& f = static_cast<IfExp&>(e);
                 expr(*f.test);
+                // 条件窄化（与 stmt_if 同一套 narrow_all/restore_narrowing）：
+                // `x.m() if x is not None else 0` 的 then 分支里 x 非 None。
+                // 两侧分别求值后恢复，互不影响。
+                auto nt = narrow_all(*f.test, true);
                 auto a = expr(*f.body);
+                for (auto it = nt.rbegin(); it != nt.rend(); ++it) restore_narrowing(*it);
+                auto nf = narrow_all(*f.test, false);
                 auto b = expr(*f.orelse);
+                for (auto it = nf.rbegin(); it != nf.rend(); ++it) restore_narrowing(*it);
                 return join(a, b);
             }
             case ExprKind::Starred:

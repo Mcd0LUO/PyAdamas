@@ -23,3 +23,5 @@ def straight(x: Optional[C]) -> int:
     return x.m()
 
 print(loop_zero(None, 0), loop_zero(C(), 2), straight(C()))
+# --- expect ---
+# 0 8 8

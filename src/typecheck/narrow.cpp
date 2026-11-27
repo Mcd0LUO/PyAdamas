@@ -54,6 +54,68 @@ std::vector<TypeChecker::Narrowing> TypeChecker::narrow_all(Expr& cond, bool tru
     return out;
 }
 
+// 内置类型的 isinstance 窄化（`isinstance(o, int/str/float/list/...)`）。
+//
+// 以前只认用户类（narrow_isinstance 需要 ClassInfo），内置类型的 isinstance
+// **完全不窄化**：`if isinstance(o, int): return` 之后的 o 仍是 `int | str`。
+// 0.529 的 P0-D 于是让降级层按「唯一命中方法」的启发式挑成员来兜底
+// （tests/run/isinstance_neg_branch.py 就是这类形状），那条启发式对真·多类
+// 联合是静默错值（0.679 审计 r13/r15）。补上按 TyKind 的收窄之后，降级层
+// 可以只对「非 None 成员恰好一个」的形态静态选型。
+namespace {
+bool builtin_kind_matches(const TypePtr& m, const TypePtr& want) {
+    if (!m || !want) return false;
+    switch (want->kind) {
+        // CPython：bool 是 int 的子类；定宽整数也是 int。
+        case TyKind::Int:
+            return m->kind == TyKind::Int || m->kind == TyKind::Bool || is_fixed_int(m);
+        case TyKind::Bool: return m->kind == TyKind::Bool;
+        case TyKind::Float: return m->kind == TyKind::Float;
+        case TyKind::Str: return m->kind == TyKind::Str;
+        case TyKind::Bytes: return m->kind == TyKind::Bytes;
+        case TyKind::Complex: return m->kind == TyKind::Complex;
+        case TyKind::List: return m->kind == TyKind::List;
+        case TyKind::Dict: return m->kind == TyKind::Dict;
+        case TyKind::Tuple: return m->kind == TyKind::Tuple;
+        case TyKind::Set: return m->kind == TyKind::Set;
+        default: return false;
+    }
+}
+}  // namespace
+
+// 真值分支留下 kind 兼容的成员（并去掉 None）；假值分支去掉它们。
+// 判不准（没有命中 / 去掉就空）返回 nullptr，保持原类型。
+static TypePtr narrow_isinstance_builtin(const TypePtr& t, const TypePtr& want, bool truthy) {
+    if (!t || !want) return nullptr;
+    std::vector<TypePtr> members;
+    bool optional = false;
+    if (t->kind == TyKind::Optional) {
+        optional = true;
+        if (t->sub.empty() || !t->sub[0]) return nullptr;
+        union_flatten(t->sub[0], members);
+    } else if (is_union_ty(t)) {
+        union_flatten(t, members);
+    } else {
+        members.push_back(t);
+    }
+    if (members.empty()) return nullptr;
+    std::vector<TypePtr> keep;
+    int hits = 0;
+    for (auto& m : members) {
+        const bool hit = builtin_kind_matches(m, want);
+        if (hit) ++hits;
+        if (truthy ? hit : !hit) keep.push_back(m);
+    }
+    if (hits == 0) return nullptr;              // 联合里没有这种内置类型：不动
+    if (!truthy && keep.empty()) return nullptr;  // 去掉就空：不动（保守）
+    TypePtr acc = nullptr;
+    for (auto& m : keep) acc = acc ? mk_union(acc, m) : m;
+    if (!acc) return nullptr;
+    // 真值分支一定非 None；假值分支在 Optional 上保留 Optional 包装。
+    if (truthy || !optional) return acc;
+    return mk_optional(acc);
+}
+
 // isinstance 窄化：真值分支取 cls（联合里必须至少有一个与之兼容的类成员），
 // 假值分支把「cls 或其子类」的成员去掉。判不准返回 nullptr（保持原类型）。
 TypePtr TypeChecker::narrow_isinstance(const TypePtr& t, const ClassInfo* cls, bool truthy) {
@@ -169,9 +231,10 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
                 }
             }
         }
-        // isinstance(x, C)：真值分支把联合收窄成 C，假值分支把 C 去掉。
-        // 只认「用户类对象 + 名字/walrus 目标」；内置类型、元组形式、属性
-        // 目标一律不窄化（保守：判不准就不动，避免误杀）。
+        // isinstance(x, T)：真值分支把联合收窄成 T，假值分支把 T 去掉。
+        // T 可以是用户类（narrow_isinstance）或内置类型（按 TyKind 收窄，
+        // `isinstance(o, int)` 之后 o: int|str → int / str）。元组形式与属性
+        // 目标仍不窄化（保守：判不准就不动，避免误杀）。
         if (cond.kind == ExprKind::Call) {
             auto& call = static_cast<Call&>(cond);
             auto* cfn = dynamic_cast<Name*>(call.func.get());
@@ -183,9 +246,15 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
                 if (ct && ct->kind == TyKind::ClassObj && !ct->sub.empty() && ct->sub[0] &&
                     ct->sub[0]->kind == TyKind::Class)
                     cls = ct->sub[0]->cls;
+                // 内置类型名（int/str/float/...）是 TypeObj：按 kind 窄化联合。
+                TypePtr want_builtin;
+                if (!cls && ct && ct->kind == TyKind::TypeObj && !ct->sub.empty())
+                    want_builtin = ct->sub[0];
                 Symbol* sym = tgt ? lookup(tgt->id) : nullptr;
-                if (cls && sym && sym->ty) {
-                    TypePtr narrowed = narrow_isinstance(sym->ty, cls, truthy);
+                if (sym && sym->ty && (cls || want_builtin)) {
+                    TypePtr narrowed = cls ? narrow_isinstance(sym->ty, cls, truthy)
+                                           : narrow_isinstance_builtin(sym->ty, want_builtin,
+                                                                       truthy);
                     if (narrowed && !type_eq(narrowed, sym->ty)) {
                         Narrowing n{};
                         n.sym = sym;

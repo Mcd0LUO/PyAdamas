@@ -513,20 +513,33 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     TypePtr recv_ty = strip_optional(raw);
     bool opt = recv_ty != raw;
     VReg recv = expr(*at.value);
-    // 联合接收者（0.529 P0-D）：类型检查已按成员表放行（`if isinstance(o, int):
-    // return` 之后的 o 是 str），但降级只看到声明的 `int | str`。选「唯一能接住
-    // 这个方法」的成员派发；槽的表示不变（unknown 里指针类就是裸指针），
-    // 所以没有改槽宽带来的表示风险。
+    // 联合接收者（0.529 P0-D；0.680 收紧）：类型检查已按成员表放行
+    // （`if isinstance(o, int): return` 之后的 o 是 str），但降级只看到声明的
+    // `int | str`。**降级层只有在「非 None 成员恰好一个」时才静态选型** ——
+    // 那正是 Optional[T]/None 的形态（运行期 guard_not_none 兜底，表示一致）。
+    //
+    // 真·多类联合（≥2 个非 None 成员）一律不选、保持联合类型，最后由本函数
+    // 末尾报「method not supported by the code generator yet」：
+    //   * 只有部分成员有该方法 → 选中有方法的那个会给另一类的实例直调它的
+    //     实现（0.679 前静默错值：读错字段偏移、越界读）；
+    //   * 即使所有成员都有该方法，静态选第一个仍然错——各成员的实现按各自
+    //     布局/返回类型编译（实测 r11/r12：返回类型不同时打出垃圾值，字段
+    //     偏移不同时读到错字段）。多类联合要支持得靠运行期按 tag 分派。
+    //
+    // 旧判据 `hits == 1`：多类联合里选唯一命中者（r13/r15 静默错值）；0.678
+    // 类型检查侧已收紧，这里漏改，0.680 补齐。
     if (recv_ty && recv_ty->kind == TyKind::Unknown && !recv_ty->sub.empty()) {
         TypePtr pick;
         int hits = 0;
+        int classes = 0;   // 非 None 的成员数
         for (auto& m : recv_ty->sub) {
-            if (!m) continue;
+            if (!m || m->kind == TyKind::None) continue;
+            ++classes;
             const bool ok = m->kind == TyKind::Class ? (m->cls && m->cls->method(at.attr))
                                                     : TypeChecker::type_has_method(m, at.attr);
             if (ok) { pick = m; ++hits; }
         }
-        if (hits == 1 && pick) recv_ty = pick;
+        if (classes == 1 && hits == 1) recv_ty = pick;
     }
 
     // 用户类的方法调用：从对象的 vtable 里取函数地址。槽号在编译期
