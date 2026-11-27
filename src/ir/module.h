@@ -79,7 +79,7 @@ struct ModuleInfo {
 inline constexpr const char* kCompilerVersion = PYADAMAS_VERSION;
 
 inline constexpr uint16_t kModuleFormatVersion = 20;  // A8-4：is_enum + enum_members（A8-3：class_attrs 段）
-inline constexpr uint16_t kModuleAbiVersion = 1;
+inline constexpr uint16_t kModuleAbiVersion = 2;  // 0.693：类元数据 8→10 字（rc 头压缩）
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
 

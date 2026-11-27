@@ -41,7 +41,7 @@ static const int64_t* inst_vtable(void* obj) {
 int64_t pa_isinstance(void* obj, int64_t class_id) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 8;
+    const int64_t* meta = vt - 10;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -60,7 +60,7 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
 void* pa_instance_dunder_fn(void* obj, int64_t which) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt || which < 0 || which > 5) return NULL;  /* 3=__del__ 4=__str__ 5=__repr__ */
-    const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 8)[6];
+    const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 10)[6];
     if (!tab) return NULL;
     int64_t slot = tab[which];
     if (slot < 0) return NULL;
@@ -86,7 +86,7 @@ PyAdamasStr* pa_instance_str(void* obj, int64_t prefer_repr) {
    限定名最后一段（与 pa_class_repr 的 __name__ 口径一致）。 */
 PyAdamasStr* pa_instance_default_str(void* obj) {
     const int64_t* vt = inst_vtable(obj);
-    const char* cn = vt ? (const char*)(uintptr_t)(vt - 8)[4] : NULL;
+    const char* cn = vt ? (const char*)(uintptr_t)(vt - 10)[4] : NULL;
     const char* nm = (cn && *cn) ? cn : "object";
     if (cn) {
         const char* dot = strrchr(cn, '.');
@@ -104,7 +104,7 @@ PyAdamasStr* pa_instance_default_str(void* obj) {
 int64_t pa_obj_class_id(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return -1;
-    return (vt - 8)[1];   /* 元数据第 1 个字是类编号 */
+    return (vt - 10)[1];   /* 元数据第 1 个字是类编号 */
 }
 
 
@@ -115,7 +115,7 @@ int64_t pa_is_instance_of(void* obj, int64_t cid) {
     if (!cid) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* mro = (const int64_t*)(uintptr_t)(vt - 8)[0];
+    const int64_t* mro = (const int64_t*)(uintptr_t)(vt - 10)[0];
     if (!mro) return 0;
     int64_t n = mro[0];
     for (int64_t i = 1; i <= n; ++i) {
@@ -129,7 +129,7 @@ int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     if (!qualname) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 8;
+    const int64_t* meta = vt - 10;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -264,7 +264,7 @@ void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
         pa_raise_c("AttributeError", "'super' object has no attribute");
         return NULL;
     }
-    const int64_t* meta = vt - 8;
+    const int64_t* meta = vt - 10;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     int64_t n = mro ? mro[0] : 0;
     int found = 0;
@@ -309,7 +309,7 @@ int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
     if (h->kind == PYADAMAS_RC_INSTANCE) {
         const int64_t* vt = *(const int64_t**)obj;
         if (!vt) return 0;
-        const int64_t* meta = vt - 8;
+        const int64_t* meta = vt - 10;
         const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
         if (!mro || mro[0] < 1) return 0;
         const int64_t* m = (const int64_t*)(uintptr_t)mro[1];
@@ -383,8 +383,8 @@ static void** attr_slot(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return NULL;
     // 元数据第 6 字（dict_off）：0.531 起是 **8** 字元数据块（vt[-8..-1]，第 8 字是类 id），
-    // 所以 dict_off 在 vt[-3]。
-    int64_t off = vt[-3];
+    // 所以 dict_off 在 vt[-5]。
+    int64_t off = vt[-5];
     if (off <= 0) return NULL;
     return (void**)((char*)obj + off);
 }

@@ -199,7 +199,7 @@ static void* lang_method_fn(void* obj, const char* meth) {
         if (h->kind == PYADAMAS_RC_INSTANCE) {
             const int64_t* vt = *(const int64_t**)obj;
             if (vt) {
-                const int64_t* meta = vt - 8;
+                const int64_t* meta = vt - 10;
                 const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
                 int64_t n = mro ? mro[0] : 0;
                 for (int64_t i = 1; i <= n; ++i) {

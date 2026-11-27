@@ -291,6 +291,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     // 定义模块与导入方各算一次，天然一致。
                     emit_.out += std::format("\t.quad {}\n",
                                              static_cast<long long>(fnv1a64(e.qualname)));
+                    emit_.out += "\t.quad 0\n\t.quad 0\n";
                     raw_label2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.line_buf = "\t.asciz \"";
                     emit_.line_buf += asm_escape(e.qualname);
@@ -313,6 +314,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 emit_.out += std::format("\t.quad {}\n",
                                          static_cast<long long>(fnv1a64(
                                              m.runtime_name + "." + c.name)));
+                emit_.out += "\t.quad 0\n\t.quad 0\n";
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));
