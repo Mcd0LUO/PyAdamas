@@ -6,6 +6,42 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.694] - 2026-11-27
+
+> docs：**32 字节 RC 头的实施进度与遗留**（未完成，改动以补丁形式保存）。
+>
+> ## 已完成并合并（可独立回滚）
+>
+> 1. 找到根因：`rt_class.c:387` 的 `int64_t off = vt[-3];` —— **反向下标写法**，
+>    与其它 9 处的 `vt - 8` 是同一偏移的两种拼法；grep 前者永远找不到后者。
+>    元数据 8→10 字后它是唯一没跟上的消费点，`dict_off` 读到垃圾 → `pa_attr_get` 段错误。
+> 2. 类元数据 8→10 字 + 全部消费点更新 + **实例 dtor/gcrel 移入 `meta[8]/[9]`** + ABI 2。
+> 3. `gen_obj_new` 不再传函数指针，`pa_rc_dtor_instance/release_instance` 按元数据取用。
+>
+> 验收：套件 602、difftest 545-0、opt_levels 40/40、oopbench 虚调用与 dunder 路径正确。
+>
+> ## 32 字节结构体：已写出，未跑通（补丁在 `/tmp/32b-attempt.patch`，316 行）
+>
+> 改动内容：
+> - struct → 32 字节：`next/prev(8×2) + rc:u32 + size:u32 + kind:u8 + marked:u8 + pad:u16 + young_idx:u32`；
+> - `PYADAMAS_RC_IMMORTAL` → `0x80000000u`；`_Static_assert(==32)`；
+> - `young_add/young_del` 改用独立 `young_idx`；
+> - 3 处字面量预置头 8 quad → 4 quad（rc/size 用 `.long`）；
+> - `gen_tuple_inline` 的硬编码偏移全部改写（payload 64→32、data 112→80、marked 56→25…）；
+> - `call_rc.cpp` 的内联 inc/dec/temp 快路径：`-48` → `-16`、`movq`→`movl`、哨兵 `0x8000…`→`0x80000000`；
+> - `static_str_init` / canary 检查 / 生成器帧释放跟随。
+>
+> **状态：编译通过，但 `print(len(l))` 处仍然段错误**（`mov %eax,-0x10(%rdi)`，%rdi 非法）。
+>说明还有若干「硬编码 64 / 8 字偏移」的生成点没找全——本轮已发现并修掉 4 处
+>（字面量头、inline 元组、内联 RC 快路径、静态串），**至少还剩一处**，需继续用
+>`gdb` + 反汇编逐个定位。
+>
+> ## 遗留清单（下次接手直接从这里开始）
+>
+> 1. `rdi` 非法的那处：`__pa_main` 里 `mov %eax,-0x10(%rdi)`，先看是哪个对象（literal 还是栈值）；
+> 2. 全量 grep 生成代码里的 `-48` / `56(` / `112(` / `64(` 硬编码；
+> 3. 跑通后：全量 ASan、gcbench RSS（目标 41.7→36 MB）、`bench-12x3` 基线因布局变化需更新；
+> 4. `PA_DBG_*` 调试布局（debug 构建）也要跟随。
 ## [0.693] - 2026-11-27
 
 > fix(runtime)：**找到并修掉 32 字节头的真正根因** —— `vt[-3]` 这个「另一套写法」的元数据偏移。
