@@ -6,6 +6,23 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.719] - 2026-11-27
+
+> **unknown 根因锁定**：变量第一次出现若在 if 分支体内，类型变成 unknown。
+
+> bisect（每步配最小复现 + TYPE_STATS）：
+
+> v_c: 函数级 if i < n: j = i; i = j + 1  -> j unknown
+> v_a: while: if cond: j = i            -> j unknown
+> v_b: 循环前先 j = 0, if 内再赋值        -> 无 unknown
+> lr3: 无 if, while 体内连续赋值          -> 无 unknown
+
+> 触发条件与循环/continue/str 下标无关，就是「首次赋值在 if 分支内」。
+> 先初始化即可消除 -> 证明是 if 合并把「某条路径上未定义」并成了 unknown。
+
+> 定位到 src/typecheck/stmt_forms.cpp:453 stmt_if 的分支合并；
+> 下一步在该三行复现上打印 merged 实际值再改。这是 interp2 那 21 处的真因。
+
 ## [0.717] - 2026-11-27
 
 > > measure：排除「统计假象」与「模块级全局循环」两个解释，21 处仍是真的。
