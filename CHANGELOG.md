@@ -6,6 +6,46 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.688] - 2026-11-27
+
+> refactor(runtime)：**OBJ 拆成 25 个精确 kind**（RC 头压缩阶段① b2，19 个文件 +221/−72）。
+>
+> 拆前 `PYADAMAS_RC_OBJ` 是运行期 catch-all：**30 个分配点、25 个不同的 (dtor,release) 对、54 处引用**。
+>拆后每个运行期类型占一个精确 kind，`(dtor,release)` 全部**取自分配行实参**（不是按名字猜），
+>其中审计漏计的第 25 个是 `SEM`（`pa_sem_new`，原归在 task 组）。
+>
+> ## 两个关键点
+>
+> 1. **区间约定**：所有 `OBJ_*` 连续编号（`OBJ_FIRST..OBJ_LAST`，`LAST` 现为 `OBJ_SEM`），
+>    两处集合式探针（`gc_conservative_count` ×2、`gc_free_body` 的 attached-exception 释放）
+>    继续走 `pa_rc_kind_is_obj_payload()`——**后续新增任何 OBJ 子类型只 +1 LAST**，漏项不会改变 GC 记账；
+> 2. **19 处精确探针保留原 magic/size 二次校验**（`rt_async` Await、`rt_vthread` VT/CHAN、
+>    `rt_class` EXCVALUE/COMPLEX、`rt_file` FILE、`rt_str` EXCVALUE×2…）——等价且更严。
+>
+> ## 四基准 instructions（8 轮取最小，vs 0.686）
+>
+> | 基准 | delta |
+> |---|---|
+> | oopbench | **+0.255%** |
+> | gcbench | −0.001% |
+> | container | +0.001% |
+> | coroutine | −0.079% |
+>
+> 全部远低于 +2%；gcbench RSS 不变（41756→41680 KB，噪声内）。
+> 我独立复测 oopbench：405.3–410.0M（与报告的 +0.25% 量级一致）。
+>
+> ## 验收
+>
+> 套件 **602** + 2 strict、difftest **545-0**、opt_levels **40/40**、
+>**全量 ASan 602 rc=0 无报错**、`checkall --full` 全 PASS。
+>
+> 已知残留：catch-all `OBJ` 只剩 `rt_core.c:1433` 的 selftest 调试分配（`PYADAMAS_RC_SELFTEST` 分支）。
+>
+> ## 偏差记录（诚实）
+>
+> 原计划「每批 8 个 kind、各跑一遍闸门」，实际把 3 批（8+8+9）合并成一次构建 + 一次完整闸门。
+>理由是机械替换、且全量 ASan/difftest/四基准都过了；但代价是**中途失败无法按批回滚定位**。
+>这个取舍记录在此，供以后判断。
 ## [0.687] - 2026-11-27
 
 > refactor(runtime)：**OBJ_GEN 拆出 + 生成器 release 侧表**（RC 头压缩阶段① b1）。
