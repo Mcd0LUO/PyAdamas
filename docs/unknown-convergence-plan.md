@@ -276,3 +276,30 @@ B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数
 （可能来自同文件其他函数/类的推断结果、或模块级语句顺序）。
 下一步改做**真实文件的减法 bisect**：复制 lexer.py，删掉 tokenize 之外的部分，
 再逐步删 tokenize 内部语句，直到 stats 消失。不要再用合成 repro。
+
+## 19. 根因锁定：**在 if 分支里首次赋值的变量，类型变成 unknown**（0.719）
+
+bisect 结果（每一步都有最小复现）：
+
+| 复现 | 代码 | type-stats |
+|---|---|---|
+| v_c | `if i < n: j = i; i = j + 1`（函数级 if，无循环） | `c.j` unknown |
+| v_a | `while ...: if cond: j = i; j += 1`（if 内首次赋值） | `a.j` unknown |
+| v_b | 循环前先 `j = 0`，if 内再赋值 | **无 unknown** |
+| lr3 | 无 if，while 体内连续赋值 | **无 unknown** |
+
+结论：触发条件是「变量第一次出现是在 if 分支体内」，与循环、continue、str 下标都无关。
+循环前先初始化（v_b）即可消除 —— 证明成因是**if 合并把「某条路径上未定义」并成了 unknown**，
+而不是类型本身推不出来。
+
+## 20. 下一步（已定位到函数）
+
+`src/typecheck/stmt_forms.cpp:453 stmt_if` 的分支合并：
+- 先快照全部变量类型（`snapshot`）；
+- 每个分支 `restore_types()` 后检查体，`merge_in()` 把分支末端类型并入 `merged`；
+- 最后写回：`merged` 里有、`cur_->vars` 里没有的名字用 `emplace(Symbol{ty, ...})`。
+
+可疑点：分支体里新声明的名字在合并后拿到 unknown —— 要么 `declare()` 对「条件性定义」
+有特殊处理，要么 merge_in 的起点（空 merged）与「本路径未定义」被当成了 unknown。
+下一步：在 `if cond: j = 0` 这个三行复现上打个断点/加打印，看 `merged[j]` 的实际值，
+再改；改完用它 + interp2 + 全套件三重验收。
