@@ -6,6 +6,58 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.696] - 2026-11-27
+
+> perf(runtime)：**GC/RC 热路径的三处微优化**（方向对，但 gcbench 上的收益在噪声内）。
+>
+> ## profile 现状（这是本轮的真实产出）
+>
+> ```
+> gcbench（churn 1M + cycles 200K + after-drop 500K）
+>   17.3%  rc_alloc_core        分配主路径
+>   15.4%  pa_list_append       列表追加
+>   10.6%  rc_unlink            从 GC 堆链摘除
+>    8.1%  pa_rc_dec_slow      计数归零释放
+>    7.6%  rc_link              入 GC 堆链
+>    4.3%  gc_collect / 3.7% gc_mark
+>
+> container（dict/heap 密集）
+>   20.9%  pa_dict_set
+>   16.3%  merge_at_i64
+>   16.1%  siftup（用户代码）
+>    9.0%  dict_lookup
+>    6.5%  bin_ins_i64 / 6.3% dict_reindex
+> ```
+>
+> ## 本轮改动
+>
+> 1. **`rc_unlink` 的 `rc_index_del` 加内联守卫**：exact-RC 模式索引全程关闭，
+>    原实现每次释放都白付一次 call/ret（`rc_link` 早就这么做了，unlink 漏了）；
+> 2. **池分派按频率重排**：LIST 从第三个判断提到第一个（容器/对象是最常见分配），
+>    STR/CPYFLOAT/DICT 依次后移；
+> 3. **`alloc_size` 的 STR 8 字节取整移到 STR 分支内部**：原来无条件 `lea+and`，
+>    每条非字符串分配都白付两条指令；
+> 4. **热路径少一次全局读**：`if (gc_need_check && gc_ready && heap_head)` 三个全局
+>    每次分配都读，改成只读 `gc_need_check`（后两个只在慢分支需要，且 gc_ready/heap_head
+>    在 gc_need_check 为 0 时不可能需要）。
+>
+> ## 诚实结论
+>
+> **gcbench 的数字没有可测变化**（churn 71–73 ms、cycles 63–66 ms、after-drop 26–27 ms，
+>与改动前 72 / 64 / 27 同量级）。这三处都是「每条分配少几条指令」的微优化，
+>而 gcbench 的时间大头在 `pa_list_append` 与 `rc_link`/`rc_unlink` 的**内存访问**上，
+>不是算术。**保留是因为它们减少的是纯浪费，但不要把它们记成性能收益。**
+>
+> 验收：套件 602、difftest 545-0、perf-baseline 12 项 warn=0 fail=0、check_size。
+>
+> ## 下一轮该做的（按 profile 排序）
+>
+> 1. `pa_list_append`（15.4%）：`elem_kind` 判定 + 位图维护 + 插入屏障三条分支，
+>    对「已知全是 int 的列表」可以整段跳过——需要把 `heap` 参数在编译期已知时直接折叠；
+> 2. `rc_link`/`rc_unlink`（18.2%）：目前每次分配都要双向链插入 + 索引维护，
+>    可考虑「小对象不进链」（叶子在 exact-RC 下已经是 UNTRACKED，但容器仍进链）；
+> 3. `pa_dict_set`（20.9%）：`dict_note_heap` 与两次插入屏障对 int 键值是纯开销，
+>    可以按 `d->key_own`/`val_own` 的当前形态短路。
 ## [0.695] - 2026-11-27
 
 > feat(runtime)：**RC 头压到 32 字节** —— gcbench RSS **41.7 MB → 34.8 MB（−16.6%）**，性能零退化。

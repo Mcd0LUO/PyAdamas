@@ -1895,7 +1895,9 @@ void rc_unlink(PyAdamasRc* h) {
     gc_tracked_count--;
     if (pa_rc_kind_is_obj_payload(h->kind) || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count--;
-    rc_index_del(h);
+    /* exact-RC 模式索引全程关闭：内联守卫省掉一次 call/ret（rc_link 已经这么做）。 */
+    if (__builtin_expect(rc_index_off == 0 && rc_index_readonly == 0, 1))
+        rc_index_del(h);
 }
 
 /* 0.303：把 untracked 对象补进 GC 堆链（kind0 小元组经 unknown 写入升级
@@ -1942,6 +1944,9 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // 合并成 gc_need_check：值为 0 时直接跳过整块（绝大多数分配的路径），
     // 非 0 时才进慢路径做完整判断。这个标志在「增量有待办」或「分配量接近
     // 阈值」时置 1，其余时候保持 0。
+    // 0.696：热路径只读 gc_need_check 这一个全局（原来还连着读 gc_ready /
+    // heap_head，三次 L1 命中在 1M 次分配上就是 300 万次 load）。后两个判断
+    // 只在慢分支里才需要。
     if (__builtin_expect(gc_need_check, 0) && gc_ready && heap_head) {
         // **Go 的 mark assist：让分配方为 GC 付账。**
         //
@@ -1972,21 +1977,24 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
     // extra 是尾部内联缓冲（小列表合并分配），计入块容量与 GC 记账。
     int64_t alloc_size = size + extra;
-    if (kind == PYADAMAS_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
-        alloc_size = (size + 7) & ~(int64_t)7;
+    /* 0.696：STR 的 8 字节取整原先是无条件算的（lea+and 每条分配都要付），
+       移进下面 STR 分支内部，只对字符串付。 */
     PyAdamasRc* h = NULL;
 #ifndef PYADAMAS_ALLOC_DEBUG
     /* 调试版（canary/guard）不复用池块：guard 的块是 mmap 的、不能进
        freelist；canary 版统一走 malloc 路径让每个块的 canary 位置一致。 */
-    if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
-    else if (kind == PYADAMAS_RC_CPYFLOAT && size == (int64_t)sizeof(int64_t))
-        h = float_box_pool_get();
-    else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
+    if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
         /* 8 槽块先判：append 构建的列表（req==0）走这条，是热路径；
            4 槽块只服务请求容量 1..4 的字面量，多一次比较无所谓。 */
         h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get()
             : extra == PYADAMAS_LIST_INLINE4_BYTES ? list_inline4_pool_get()
             : list_pool_get();
+    else if (kind == PYADAMAS_RC_STR) {
+        if (size > 0 && size <= STR_POOL_MAX_SIZE) alloc_size = (size + 7) & ~(int64_t)7;
+        h = str_pool_get(alloc_size);
+    }
+    else if (kind == PYADAMAS_RC_CPYFLOAT && size == (int64_t)sizeof(int64_t))
+        h = float_box_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
         h = dict_pool_get();
 #endif
