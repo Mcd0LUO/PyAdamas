@@ -30,6 +30,17 @@ namespace pyadamas {
 // 只认字面量常量。默认参数、assert 消息这些地方够用；
 // 更复杂的常量表达式留给后续的常量折叠。
 
+// 零开销 try 区域（方案 A 第一步：只记账，不改变任何语义）。
+// 降级 try 体期间压栈，供后续「raise 直接跳 LP」判断「当前 raise 是否
+// 在同一函数的保护区里、目标 LP 是谁」；本轮没有消费者（lower_raise 不动）。
+struct ZcRegion {
+    uint32_t lp_block = 0;       // landing pad 块 id（正常入口，personality 的落点）
+    uint32_t end_block = 0;      // 保护区终点块 id（.LEHE 所在）
+    int land_direct_block = -1;  // 第二条入口块下标；-1 = 没建（默认门控关）
+    int handlers = 0;            // handler 个数
+    bool has_finally = false;    // 有 finally 体
+    bool has_with = false;       // 体内有 with（零开销形状按设计排除，恒 false）
+};
 
 class Lowerer {
 public:
@@ -39,6 +50,15 @@ public:
     void run(Module& ast);
 
     std::vector<LowerError>& errors() { return errors_; }
+
+    // 方案 A 第一步：当前正在降级的零开销 try 区域；不在 try 体里返回
+    // nullptr。只读查询，本轮没有消费者（step 2 的 direct-jump 判据用）。
+    // 注意：lp_block/end_block/land_direct_block 要等 try 体降级完、相关块
+    // 建好之后才填得上（.LEHE 必须落在 body 指令之后），body 降级期间读到
+    // 的是 0/0/-1。
+    const ZcRegion* current_try() const {
+        return zc_try_stack_.empty() ? nullptr : &zc_try_stack_.back();
+    }
 
 private:
     IRModule& mod_;
@@ -51,6 +71,8 @@ private:
 
     std::vector<std::unique_ptr<FuncCtx>> frames_;
     FuncCtx* st_ = nullptr;
+    // 方案 A 第一步：正在降级的零开销 try 区域栈（只记账）。
+    std::vector<ZcRegion> zc_try_stack_;
     // 推导式的循环变量是独立作用域，不能污染函数槽表。这里按嵌套
     // 层次保存「名字 → 槽」，查找时内层优先。
     std::vector<std::unordered_map<std::string, int>> comp_slots_;

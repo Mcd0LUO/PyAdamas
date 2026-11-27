@@ -5,6 +5,14 @@ namespace pyadamas {
 
 namespace {
 
+// 方案 A 第一步（门控，默认关）：LP 第二条入口 land_direct 的开关。
+// 本步要求默认生成代码逐字节不变，所以骨架只在 PYADAMAS_EXC_DIRECT_PREP=1
+// 时发射（没有跳转过来的死代码）；step 2（raise 直接跳 LP）会翻成默认开。
+bool exc_direct_prep_enabled() {
+    static const bool on = std::getenv("PYADAMAS_EXC_DIRECT_PREP") != nullptr;
+    return on;
+}
+
 // 深度优先遍历一个函数体里的语句树，pre 在进入子语句之前对每个语句调用。
 // 不进入嵌套 FunctionDef 的函数体（那是另一个函数）；但进入 ClassDef 的类体
 // ——类体语句是在当前函数帧里降级的，它的 try/with/return 都算在本函数头上。
@@ -938,6 +946,14 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     // 需要逐个执行它们的 __exit__，任一个返回 True 就抑制异常（不重抛）。
     // 这些项在 try 体降级结束后会被 pop，所以必须先拷贝出来。
     // （with 清理项由 lower_with_item 在生成期间直接登记，见下）
+    // 方案 A 第一步：登记「当前正在降级的 try 区域」（只记账，无消费者）。
+    // lp_block/end_block/land_direct_block 在 body 降级期间还拿不到 ——
+    // 相关块必须建在 body 指令之后（.LEHE 要落在 body 之后），见下面回填。
+    zc_try_stack_.push_back(ZcRegion{});
+    zc_try_stack_.back().handlers = static_cast<int>(t.handlers.size());
+    zc_try_stack_.back().has_finally = has_fin;
+    // has_with 恒 false：collect_zero_cost_tries 已把「体内 / handler 里带
+    // with」的 try 排除在零开销路径之外（with 用 setjmp 保护 __exit__）。
     ++st_->zc_raise_depth;
     stmts(t.body);
     --st_->zc_raise_depth;
@@ -988,6 +1004,44 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         emit(std::move(lp));
     }
     call_void(RtFn::EhLand, {});
+    // 方案 A 第一步（门控）：给 LP 加第二条入口 land_direct —— 跳过
+    // EhLandingPad 与 pa_eh_land，从约定槽位取异常对象（先不接），再汇入
+    // 与正常落地相同的 handler 分发链。本步没有任何跳转过来（lower_raise
+    // 不动），是死代码；默认不发射（保证生成代码逐字节不变），
+    // PYADAMAS_EXC_DIRECT_PREP=1 时发射，供验证拆分不影响行为。
+    int chain = land;  // 分发链起点块：默认链就在 land 块里（与改动前一致）
+    int land_direct = -1;
+    if (exc_direct_prep_enabled()) {
+        // 分发链单开一块（正常落地与直接入口共用）；死块 land_direct 紧随
+        // 其后，O2 的 prune_unreachable 会把它删掉（没有入边）。
+        chain = new_block("try.dispatch");
+        land_direct = new_block("try.land.direct");
+        Inst jl;
+        jl.op = IrOp::Jump;
+        jl.target = chain;
+        emit(std::move(jl));
+        // 直接入口的异常对象走约定槽位（raise 侧 step 2 才写入，这里只预留
+        // 一个只读借用槽并读取，结果不使用）。
+        const int exc_slot = new_borrow_slot(t_unknown());
+        switch_to(land_direct);
+        (void)load_slot(exc_slot, t_unknown());
+        call_void(RtFn::EhLeave, {});
+        call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
+        Inst jd;
+        jd.op = IrOp::Jump;
+        jd.target = chain;
+        emit(std::move(jd));
+        switch_to(chain);
+    }
+    // 回填 ZcRegion 并出栈：往下就是 handler 体（不在 try 保护区里，
+    // raise 在 handler 里不能被当成「在 try 体内」）。
+    {
+        ZcRegion& zr = zc_try_stack_.back();
+        zr.lp_block = region.lp_block;
+        zr.end_block = region.end_block;
+        zr.land_direct_block = land_direct;
+        zc_try_stack_.pop_back();
+    }
     // 异常路径同样要退出表驱动展开区：正常路径的 EhEnd 会调 pa_eh_leave，
     // 但抛出时走不到那里。不补这一步，pa_eh_depth 会一直 > 0，之后**别的**
     // 函数/模块级 try（走老路径的 setjmp）抛异常时会被误判成「在表驱动区里」，
