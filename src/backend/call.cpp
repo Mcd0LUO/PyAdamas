@@ -200,16 +200,11 @@ void AsmGen::gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
         // 动态属性槽挂在字段之后，跟着类走（派生类的偏移不同）。
         emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), arg_reg_i(0));
-        bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
         // 实参按 ABI 位置装填：SysV 是 rdi/rsi/rdx，Win64 是 rcx/rdx/r8。
         // 写死 %rsi/%rdx 会让 Win64 的 dtor 收成 gcrel、release 收到垃圾。
-        if (has_heap || c.dict_off != 0) {
-            line(std::format("leaq .Ldtor{}(%rip), {}", in.imm, arg_reg_i(1)));
-            line(std::format("leaq .Lgcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
-        } else {
-            line(std::format("xorl {}, {}", reg32(arg_reg_i(1)), reg32(arg_reg_i(1))));
-            line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
-        }
+        // 0.694：dtor/gcrel 移到类元数据（meta[8]/[9]），分配点不再传。
+        line(std::format("xorl {}, {}", reg32(arg_reg_i(1)), reg32(arg_reg_i(1))));
+        line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
         spill_fp_slots();
         line("call pa_obj_new");
         reload_fp_slots();

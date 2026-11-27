@@ -314,7 +314,17 @@ std::string AsmGen::gen(const IRModule& m) {
                 emit_.out += std::format("\t.quad {}\n",
                                          static_cast<long long>(fnv1a64(
                                              m.runtime_name + "." + c.name)));
-                emit_.out += "\t.quad 0\n\t.quad 0\n";
+                {
+                    // 0.694：元数据第 9/10 字存该类的 dtor/gcrel，供运行期按
+                    // payload[0] -> vt -> meta[8]/[9] 取用（RC 头里不再存这两个指针）。
+                    bool has_dtor = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; }) ||
+                                    c.dict_off != 0;
+                    if (has_dtor) {
+                        emit_.out += std::format("\t.quad .Ldtor{}\n\t.quad .Lgcrel{}\n", i, i);
+                    } else {
+                        emit_.out += "\t.quad 0\n\t.quad 0\n";
+                    }
+                }
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));

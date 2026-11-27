@@ -9,6 +9,20 @@ void pa_rc_dtor_indirect(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->dtor) h->dtor(p);
 }
+/* 0.694：实例的 dtor/gcrel 存在类元数据（payload[0] -> vt -> meta[8]/[9]），
+   RC 头里不再存这两个指针（为 32 字节头做准备）。 */
+void pa_rc_dtor_instance(void* p) {
+    const int64_t* vt = p ? *(const int64_t**)p : NULL;
+    if (!vt) return;
+    void (*f)(void*) = (void (*)(void*))(uintptr_t)(vt - 10)[8];
+    if (f) f(p);
+}
+void pa_rc_release_instance(void* p) {
+    const int64_t* vt = p ? *(const int64_t**)p : NULL;
+    if (!vt) return;
+    void (*f)(void*) = (void (*)(void*))(uintptr_t)(vt - 10)[9];
+    if (f) f(p);
+}
 void pa_rc_release_indirect(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->release) h->release(p);
@@ -19,7 +33,7 @@ const PaRcOps pa_rc_ops[64] = {
     /* OBJ      */ {pa_rc_dtor_indirect, pa_rc_release_indirect},
     /* CLOSURE  */ {closure_destroy, closure_gc_release},
     /* DICT     */ {dict_destroy, dict_gc_release},
-    /* INSTANCE */ {pa_rc_dtor_indirect, pa_rc_release_indirect},
+    /* INSTANCE */ {pa_rc_dtor_instance, pa_rc_release_instance},
     /* RANGE    */ {NULL, NULL},
     /* STRUCT   */ {NULL, NULL},
     /* CPYFLOAT */ {NULL, NULL},
