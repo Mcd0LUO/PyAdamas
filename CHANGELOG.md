@@ -6,6 +6,32 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.681] - 2026-11-27
+
+> feat(lower)：**方案 A 第一步**——「当前 try 区域」栈 + landing pad 第二条入口骨架（76 行）。
+>
+> 目标（见 `docs/exc-path-performance.md`）：同一函数内 `raise` 直接跳到该 try 的 landing pad，
+>绕开 libgcc 展开。表驱动抛出 100k 次 **235 ms** vs setjmp **45 ms**，79.5% 在 `_Unwind_RaiseException`。
+>
+> 本步只做准备，**零行为变化**：
+>
+> 1. `ZcRegion` + `zc_try_stack_`：try 体降级期间 push（`exc.cpp:952`），
+>    LP 块建好后回填 `lp_block`/`end_block`/`land_direct_block` 再 pop（`:1039`）。
+>    pop 在 handler 体之前，所以 handler/finally 里的 raise 不会被误判成「在 try 体内」。
+>    对外只读查询 `const ZcRegion* current_try() const`。
+> 2. LP 第二条入口 `try.land.direct`：跳过 `EhLandingPad` + `pa_eh_land`，从约定槽位取异常对象，
+>    再汇入与正常落地**共用**的 handler 分发链。没有任何跳转过来（`lower_raise` 不动）→ 死块。
+>
+> **门控**：只在 `PYADAMAS_EXC_DIRECT_PREP=1` 时发射。默认路径 `chain = land`，不建任何新块，
+>所以默认生成代码不变。
+>
+> 验收（两种门控状态都跑）：套件 **601 + 2 strict rejected**、全量 difftest **544-0**、
+>`tests/opt_levels.sh` **40/40**；同一二进制重复编译的 asm 逐字节一致。
+>
+> 已知限制（写给 step 2）：`.LEHE` 必须落在 try 体指令之后 ⇒ `land`/`dispatch`/`land_direct`
+>只能在 body 降级**之后**创建，所以 body 降级期间 `current_try()` 的块号还是 0/0/-1。
+>step 2 有两条路：把直接入口块提前到 body 之前建，或 raise 降级时登记「待回填跳转」补丁表
+>（后者布局最干净，推荐）。
 ## [0.680] - 2026-11-27
 
 > fix(runtime)：**挂起的生成器在 `except` 里遇到 GC 会丢失当前异常**（会退化成
