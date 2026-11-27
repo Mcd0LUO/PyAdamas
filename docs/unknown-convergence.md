@@ -91,3 +91,36 @@
 >- 排查全过程：[unknown-convergence-plan.md](unknown-convergence-plan.md)
 >- unknown 的运行期语义与缺口：[unknown-semantics-audit.md](unknown-semantics-audit.md)
 >- unknown 来源总账（628 文件口径）：[frontend-gaps.md](frontend-gaps.md)
+
+## 8. 补充实测：**模块内**的泛型洞填充也不生效（0.725）
+
+原以为「本模块内调用点填洞 + sig_dirty 重查」已经可用（call.cpp:229 有这套），
+实测**不生效**：
+
+```python
+def f(xs: list) -> int:        # 裸 list -> 元素是洞
+    ks: list = []
+    for x in xs:               # x 仍是 unknown
+        ks.append(x)
+    return len(ks)
+
+def main() -> int:
+    data: list[int] = [1, 2, 3]
+    return f(data)             # 实参 list[int]，洞应被填成 int
+```
+
+`PYADAMAS_TYPE_STATS=1` 结果：
+
+    cat=container_elem count=2 examples=f.out,f.ks
+    cat=local_unknown count=2 examples=f.y,f.x
+
+也就是说：**连模块内的调用点填洞都没有反映到函数体**。
+所以 §6 的第 1 步不是「机制已存在，直接用」，而是「机制存在但没生效，要先查为什么」。
+
+排查入口（下一轮）：
+1. `xs: list` 解析出的 `p.ty` 里到底是 `fresh_hole` 还是 `t_unknown()` ——
+   若两者混淆，`ty_contains_hole` 判假，`fill_holes_recursive` 不会被调用；
+2. 即使填了 `p.ty`、置了 `sig_dirty`，worklist 重查 `funcdef_impl` 时是否重新声明了形参作用域；
+3. 重查后 `cur_->vars[xs]` 是否已是 `list[int]`（加一行调试打印即可确认）。
+
+这三步都是小改动、可单点验证；先确认第 1 步，再决定要不要动跨模块接口。
