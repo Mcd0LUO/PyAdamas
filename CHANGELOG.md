@@ -6,6 +6,56 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.680] - 2026-11-27
+
+> fix(runtime)：**挂起的生成器在 `except` 里遇到 GC 会丢失当前异常**（会退化成
+>`RuntimeError: No active exception to reraise`）。
+>
+> ```python
+> def g():
+>     try:
+>         raise ValueError('boom')
+>     except ValueError:
+>         yield 1              # 挂起，异常写进帧槽（own==3，裸 malloc 的 PyAdamasException）
+>         raise                # 恢复后重抛
+> # 两次 yield 之间分配 12 万个 list 触发 minor GC：
+> #   修前：RuntimeError: No active exception to reraise
+> #   修后：1 / re-raised: boom / 2（与 CPython 一致）
+> ```
+>
+> 根因：`pa_gen_slot_release` 顶部已按不变量跳过 trial/restore 阶段的清槽
+>（「那时只是试算计数，帧的内容之后还要用」），但 `own==3`（异常对象）/ `own==4`（save 链）
+>两个分支**自己无条件 free 并清槽**，把这条不变量绕过去了。gen 帧是被跟踪对象，
+>trial pass 必然对它调 release → 真 free 掉异常对象并清零 → restore 阶段看到 0 回滚不了。
+>
+> 修法（3 行）：trial/restore 阶段对 3/4 分支直接 return，不动非 RC 对象。
+>
+> ## 同轮的联合类型收尾（来自子代理）
+>
+> 0.678 只改了**类型检查**层的联合选型；降级层 `lower/method/method.cpp` 还有一份自己的
+>`hits == 1 → 选它`，所以 `r13`（打印 7）/ `r15`（越界读 0）仍然错。判据改成
+>`classes == 1 && hits == 1`——只有「非 None 成员恰好一个」（Optional 形态，运行期有
+>`guard_not_none` 兜底）才静态选型，多类联合一律显式报错。
+>
+> 试过与类型检查同口径的 `hits == classes`：`r11/r12` 立刻退化成静默错值（打印垃圾值
+>`96993287288576`、越界打印 0），因为降级层静态选第一个成员本身就错——多类联合只能靠
+>运行期 tag 分派。这条写进了注释。
+>
+> 前置缺口一并补上：`isinstance(o, int)` 原来**完全不窄化**（内置类型名没有 ClassInfo），
+>`tests/run/isinstance_neg_branch.py` 一直靠降级层 `hits==1` 启发式兜着；收紧后必然误杀，
+>所以新增 `narrow_isinstance_builtin`（按 TyKind）。
+>
+> 顺手修了 0.679 的测试缺陷：`tests/run/assert_narrow_scope.py` **缺 `# --- expect ---` 块**
+>→ 期望输出为空、无论如何都 OUTPUT DIFF、**套件恒 rc=1**（0.679 的「600 全绿」实际不可能）。
+>已补期望并核对 pya/CPython 一致。
+>
+> 另外修掉审计 #3 的误杀：`return x.m() if x is not None else 0` 现在编译并输出 `4 / 0`。
+>
+> 闸门：套件 **601 + 2 条 strict rejected**、difftest **544-0**、check_size。
+>
+> **未修（记录）**：GC 清扫路径对 untracked 字符串是裸 `free`，绕过 `str_pool_put`/码点索引释放，
+>ASan 实测漏 618 字节（探针 `/tmp/rcprobe/str_cp_leak2.py`）。试过改成走池，泄漏只从 626 变 618，
+>说明根因不在这里，已回退注释留痕，避免用未证实的改动掩盖问题。
 ## [0.679] - 2026-11-27
 
 > fix(typecheck)：**`assert x is not None` 的窄化不再是「泄漏出块」的** —— 修掉一个段错误。

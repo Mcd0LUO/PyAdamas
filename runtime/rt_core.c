@@ -348,6 +348,9 @@ static void young_del(PyAdamasRc* h) {
      回合结束后按正常 RC 释放，避免清扫中重入释放。
    永生字面量在入口就跳过了；exact 模式下的叶子不在集合里，清扫时按
    普通引用释放。 */
+// 0.680：字符串释放要走池（清码点索引），gc_phase_dec 在它定义之前就要用。
+static void str_pool_put(PyAdamasRc* h);
+
 static void gc_phase_dec(PyAdamasRc* h, void* p) {
     if (gc_phase == GC_PHASE_TRIAL) {
         if (h->marked & PYADAMAS_RC_YOUNG) h->rc--;
@@ -388,6 +391,10 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
         return;
     }
     if (h->marked & PYADAMAS_RC_UNTRACKED) {
+        // TODO(0.680)：这里对字符串是裸 free，绕过了 str_pool_put / 码点索引释放，
+        // 实测 ASan 漏 618 字节（探针 /tmp/rcprobe/str_cp_leak2.py）。
+        // 曾试过改成 `if (kind==STR) str_pool_put(h); else FREE(h);`，泄漏只从 626
+        // 变成 618 —— 说明根因不在这一处，已回退，避免用一个未证实的改动掩盖问题。
         if (h->rc > 0 && --h->rc == 0) PA_DBG_FREE(h);
         return;
     }
@@ -3087,12 +3094,20 @@ void pa_gen_slot_release(int64_t* slot, int64_t own) {
     // 3/4 是生成器 except 块里挂起时 exc_leave 写进帧槽的非 RC 对象：
     // 3 是 PyAdamasException*（裸 malloc），4 是 PyAdamasExcSave* 链。
     // 必须走各自的释放函数，不能 pa_rc_dec（那会按 RC 头读到 malloc 块前面）。
+    // 0.680：trial/restore 阶段**只能试算，不能真释放**——帧的内容之后还要用。
+    // 上面那句 `*slot = 0` 已经按这条不变量跳过，但 3/4 分支自己无条件 exc_free
+    // 并清槽，把不变量绕过去了：生成器在 `except` 里 yield、随后任意一次 minor GC，
+    // gen 帧是被跟踪对象，trial pass 会真 free 掉那个异常对象并清零，restore 阶段
+    // 看到 0 回滚不了 → 恢复后 `raise` 变 RuntimeError（实测）。
+    const bool trial_phase = gc_phase == GC_PHASE_TRIAL || gc_phase == GC_PHASE_RESTORE;
     if (own == 3) {
+        if (trial_phase) return;
         exc_free((PyAdamasException*)(uintptr_t)v);
         *slot = 0;
         return;
     }
     if (own == 4) {
+        if (trial_phase) return;
         pa_exc_free_save_chain((PyAdamasExcSave*)(uintptr_t)v);
         *slot = 0;
         return;
