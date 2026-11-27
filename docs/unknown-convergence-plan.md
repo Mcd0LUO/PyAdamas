@@ -303,3 +303,26 @@ bisect 结果（每一步都有最小复现）：
 有特殊处理，要么 merge_in 的起点（空 merged）与「本路径未定义」被当成了 unknown。
 下一步：在 `if cond: j = 0` 这个三行复现上打个断点/加打印，看 `merged[j]` 的实际值，
 再改；改完用它 + interp2 + 全套件三重验收。
+
+## 21. 直接修法的失败尝试（0.720，已回退）
+
+定位到 `stmt_if` 的合并后，试了最直接的补丁：`restore_types()` 不把「if 之前是 unknown」的变量重置回 unknown。
+
+结果：
+- interp2 的 local_unknown **全部消失**（21 → 0）；
+- 但 interp2 **运行期崩溃**：uncaught IndexError；
+- 套件 600/602（116_hmac、555_hmac_accept 输出不一致）。
+
+原因：这等于假设「条件赋值的变量在 if 之后一定有值」。若 else 路径上未赋值，
+后续代码会按分支里的类型去读一个未初始化的槽 -> 静默错值/崩溃。
+
+**正确修法是定值分析（definite assignment）**：给 Symbol 加 `maybe_undefined` 标记；
+merge 时只在所有路径都赋值才取具体类型，否则在**使用点**退化成 unknown（而不是在合并点）。
+这样 interp2 里 `if ...: j = i` 之后 `i = j` 仍在同一分支内（该路径必然已赋值），
+类型能保住；而跨出 if 的读取仍安全。
+
+下一步实现顺序：
+1. Symbol 加标记（declare 时清零、merge 时按路径置位）；
+2. if 合并：一条路径赋值、另一条未赋值 -> 记 maybe_undefined；
+3. 读取（expr 的标识符解析）时若标记为 maybe_undefined 则返回 unknown；
+4. 验收：interp2 stats 降 + 套件 602 + difftest 545-0。
