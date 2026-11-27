@@ -431,6 +431,26 @@ typedef struct PyAdamasRc {
     int64_t marked;
 } PyAdamasRc;
 
+/* 阶段①（A1-a）：11 个 uniform kind 的 (dtor, release) 常量表。
+   OBJ / INSTANCE 的 dtor/release 仍按实例存放在头里，走下面的 helper
+   会回落到 h->dtor / h->release（本步不动那 54 处引用）。 */
+typedef struct PaRcOps {
+    void (*dtor)(void*);
+    void (*release)(void*);
+} PaRcOps;
+extern const PaRcOps pa_rc_ops[16];  /* 13 kind + 3 个 NULL 兜底行 */
+/* OBJ/INSTANCE 的表项是这两个 thunk：转读 RC 头里的实例指针（本步不动）。 */
+void pa_rc_dtor_indirect(void* p);
+void pa_rc_release_indirect(void* p);
+
+static inline void (*pa_rc_dtor_of(const PyAdamasRc* h))(void*) {
+    return pa_rc_ops[(uint64_t)h->kind & 15].dtor;
+}
+
+static inline void (*pa_rc_release_of(const PyAdamasRc* h))(void*) {
+    return pa_rc_ops[(uint64_t)h->kind & 15].release;
+}
+
 #define PYADAMAS_RC_IMMORTAL INT64_MIN
 #define PYADAMAS_RC_HDR ((int64_t)sizeof(PyAdamasRc))
 /* 内联池头/计数：导出给生成代码的元组分配快路径（0.280）。 */
@@ -592,6 +612,7 @@ void* pa_buffer_new(int64_t n, int64_t elem_kind);
 void* pa_buffer_data(void* p);
 /* GC 清扫路径：只释放 data，不触碰 RC 头。 */
 void pa_buffer_release_data(void* p);
+void buffer_destroy(void* p);  /* 阶段①：BUFFER 的 kind 表需要 */
 int64_t pa_buffer_len(void* p);
 int64_t pa_buffer_elem_kind(void* p);
 int64_t pa_buffer_get_i64(void* p, int64_t i);

@@ -2,6 +2,34 @@
 #define PA_RC_NO_INLINE   /* 本文件提供 pa_rc_inc/dec 的外部符号 */
 #include "rt_internal.h"
 
+/* 阶段①（A1-a）：11 个 uniform kind 的 (dtor, release) 常量表（下标 = kind）。
+   OBJ / INSTANCE 两项是 thunk：转读头里的实例指针，语义与本步之前逐项一致。
+   thunk 让查表变成无分支的「mask + 表基址 + load」，释放路径少几条比较。 */
+void pa_rc_dtor_indirect(void* p) {
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->dtor) h->dtor(p);
+}
+void pa_rc_release_indirect(void* p) {
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->release) h->release(p);
+}
+const PaRcOps pa_rc_ops[16] = {
+    /* STR      */ {NULL, NULL},
+    /* LIST     */ {list_destroy, list_gc_release},
+    /* OBJ      */ {pa_rc_dtor_indirect, pa_rc_release_indirect},
+    /* CLOSURE  */ {closure_destroy, closure_gc_release},
+    /* DICT     */ {dict_destroy, dict_gc_release},
+    /* INSTANCE */ {pa_rc_dtor_indirect, pa_rc_release_indirect},
+    /* RANGE    */ {NULL, NULL},
+    /* STRUCT   */ {NULL, NULL},
+    /* CPYFLOAT */ {NULL, NULL},
+    /* BIGINT   */ {NULL, NULL},
+    /* JSONNULL */ {NULL, NULL},
+    /* JSONBOOL */ {NULL, NULL},
+    /* BUFFER   */ {buffer_destroy, NULL},
+    /* 13..15  */ {NULL, NULL}, {NULL, NULL}, {NULL, NULL},
+};
+
 /* ══════════════════════════════════════════════════════════════════
    分配器调试模式：尾部 canary / guard page（PYADAMAS_CANARY / PYADAMAS_GUARD）
 
@@ -893,7 +921,7 @@ static void rc_leaf_free(PyAdamasRc* h, void* p) {
     // （rc_index_has）。放在后面会让 vtable 查不到、__del__ 静默不执行。
     if (pa_has_del_classes && h->kind == PYADAMAS_RC_INSTANCE) pa_instance_call_del(p);  /* 0.539 */
     rc_unlink(h);
-    if (h->dtor) h->dtor(p);
+    if (pa_rc_dtor_of(h)) pa_rc_dtor_of(h)(p);
     if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
     else if (h->kind == PYADAMAS_RC_CPYFLOAT) float_box_pool_put(h);
     else PA_DBG_FREE(h);
@@ -911,7 +939,7 @@ static int rc_leaf_untracked(const PyAdamasRc* h) {
     if (h->kind == PYADAMAS_RC_RANGE) return 1;
     // 值类型 struct：payload 只有标量字段，同样没有出边。
     if (h->kind == PYADAMAS_RC_STRUCT) return 1;
-    if (h->kind == PYADAMAS_RC_INSTANCE && !h->dtor && !h->release) return 1;
+    if (h->kind == PYADAMAS_RC_INSTANCE && !pa_rc_dtor_of(h) && !pa_rc_release_of(h)) return 1;
     return 0;
 }
 
@@ -2159,7 +2187,7 @@ void pa_rc_dec_slow(void* p) {
         // 释放里绝大多数是字符串，每次省一次 61 条指令的函数调用。
         if (pa_has_del_classes && h->kind == PYADAMAS_RC_INSTANCE) pa_instance_call_del(p);
         if (!(h->marked & PYADAMAS_RC_UNTRACKED)) rc_unlink(h);
-        if (h->dtor) h->dtor(p);
+        if (pa_rc_dtor_of(h)) pa_rc_dtor_of(h)(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
         else if (h->kind == PYADAMAS_RC_CPYFLOAT) float_box_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
@@ -3255,8 +3283,8 @@ static void gc_incr_step(void) {
             gc_sweeping = 1;
             for (size_t i = 0; i < gc_set_len; ++i) {
                 PyAdamasRc* h = gc_set[i];
-                if (h && !(h->marked & PYADAMAS_RC_MARK) && h->release)
-                    h->release((char*)h + PYADAMAS_RC_HDR);
+                if (h && !(h->marked & PYADAMAS_RC_MARK) && pa_rc_release_of(h))
+                    pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);
             }
             for (size_t i = 0; i < gc_set_len; ++i) {
                 PyAdamasRc* h = gc_set[i];
@@ -3542,7 +3570,7 @@ static void gc_collect(int major) {
         gc_phase = GC_PHASE_TRIAL;
         for (size_t i = 0; i < gc_set_len; ++i) {
             PyAdamasRc* h = gc_set[i];
-            if (h->release) h->release((char*)h + PYADAMAS_RC_HDR);
+            if (pa_rc_release_of(h)) pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);
         }
         if (t0) t2 = gc_now_ms();
 
@@ -3579,8 +3607,8 @@ static void gc_collect(int major) {
         gc_phase = GC_PHASE_RESTORE;
         for (size_t i = 0; i < gc_set_len; ++i) {
             PyAdamasRc* h = gc_set[i];
-            if ((h->marked & PYADAMAS_RC_MARK) && h->release)
-                h->release((char*)h + PYADAMAS_RC_HDR);
+            if ((h->marked & PYADAMAS_RC_MARK) && pa_rc_release_of(h))
+                pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);
         }
         if (t0) t4 = gc_now_ms();
     }
@@ -3599,8 +3627,8 @@ static void gc_collect(int major) {
     gc_sweeping = 1;
     for (size_t i = 0; i < gc_set_len; ++i) {
         PyAdamasRc* h = gc_set[i];
-        if (!(h->marked & PYADAMAS_RC_MARK) && h->release)
-            h->release((char*)h + PYADAMAS_RC_HDR);
+        if (!(h->marked & PYADAMAS_RC_MARK) && pa_rc_release_of(h))
+            pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);
     }
     int64_t freed = 0;
     for (size_t i = 0; i < gc_set_len; ++i) {
@@ -3738,7 +3766,7 @@ void pa_gc_shutdown(void) {
     gc_mark_sweep = 1;
     gc_phase = GC_PHASE_SWEEP;
     for (PyAdamasRc* h = heap_head; h; h = h->next) {
-        if (h->release) h->release((char*)h + PYADAMAS_RC_HDR);
+        if (pa_rc_release_of(h)) pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);
     }
     gc_phase = GC_PHASE_NONE;
     gc_mark_sweep = 0;

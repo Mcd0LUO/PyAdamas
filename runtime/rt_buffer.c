@@ -28,7 +28,7 @@ static int64_t elem_size(int64_t kind) {
     }
 }
 
-static void buffer_destroy(void* p) {
+void buffer_destroy(void* p) {
     PyAdamasBuffer* b = (PyAdamasBuffer*)p;
     if (b->data) free(b->data);
     b->data = NULL;
