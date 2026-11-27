@@ -5,6 +5,8 @@
 #include "common/target_abi.h"
 #include <algorithm>
 #include <atomic>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 #include <cctype>
 #include <chrono>
@@ -42,7 +44,7 @@
 namespace pyadamas {
 
 // 声明在 GC 辅助块之后定义（set_cache_paths 更早使用）。
-void cache_protect_entry(const std::string& path);
+void cache_hold_module_lock(const std::string& root);
 
 bool debug_alloc_runtime_enabled() {
     static const bool on = [] {
@@ -137,8 +139,8 @@ void set_cache_paths(ModuleUnit& u) {
     u.obj_path = u.cache_dir + "/mod.o";
     u.iface_path = u.cache_dir + "/mod.pya";
     u.manifest_path = u.cache_dir + "/manifest";
-    // 本进程要用的条目登记保护（见 protected_entries）：GC 只回收旧条目。
-    cache_protect_entry(u.cache_dir);
+    // 取缓存根共享锁：本进程存续期间，别的进程的淘汰不会删我们正在用的条目。
+    cache_hold_module_lock(cache_root());
 }
 // ── 有界缓存淘汰（0.684）────────────────────────────────────────────────
 // modcache / progcache 此前只有「加」没有「减」：源码哈希一变键就变，旧条目
@@ -146,6 +148,7 @@ void set_cache_paths(ModuleUnit& u) {
 // best-effort 上界回收：写入条目后更新记账文件；超出条目数/总字节上限就
 // 扫描一遍，按 mtime 从旧到新删到重新进入上限。删除失败（权限/竞态）静默
 // 忽略 —— 缓存是纯优化，任何 IO 问题都不能影响编译。
+void gc_at_exit_impl();  // atexit 的 GC 入口（定义在本文件后部）
 namespace {
 namespace fs = std::filesystem;
 constexpr uint64_t k_default_max_entries = 512;
@@ -213,15 +216,37 @@ struct GcEntry {
     fs::file_time_type mtime;
     uint64_t bytes = 0;
 };
-// 本次进程正在使用/刚写入的条目：绝不删。多单元程序在编译完各单元后才
-// 链接，若中途 GC 删掉前面单元的 mod.o，链接就会失败 —— 所以 set_cache_paths
-// 分配条目路径时就登记保护，直到进程退出。
-std::set<std::string>& protected_entries() {
-    thread_local std::set<std::string> paths;
-    return paths;
+// ── 跨进程并发安全（0.684 修）──────────────────────────────────
+// 淘汰（扫描+删除）与「编译进程使用条目」必须互斥：多进程套件里，进程 B
+// 的 GC 可能删掉进程 A 正在读/准备链接的 mod.o，导致 A 的编译失败。
+// 只按 mtime 加宽限期不够：**缓存命中**的条目可能很旧却正被 A 使用，宽限期
+// 保护不了。做法是 flock：
+//   * 每个编译进程在 set_cache_paths（第一次解析条目路径）时对
+//     <root>/.cache_lock 取共享锁 LOCK_SH，直到进程退出；
+//   * 淘汰推迟到进程退出（atexit）：先放共享锁，再非阻塞独占锁
+//     LOCK_EX|LOCK_NB；拿不到（还有编译在跑）就跳过，下次再收；
+//   * 独占锁在手时扫描+删除，删除前再 stat 一次确认 mtime 没变。
+// 因此任何时刻都不会删别的进程正在用的条目。最坏情况：长期持续有编译在跑
+// 时暂时不淘汰（缓存可短暂超过上限），静默期后的下一次退出会收回到低水位。
+struct LockState {
+    int module_fd = -1;
+    std::set<std::string> pending_roots;
+    bool atexit_registered = false;
+};
+LockState& lock_state() {
+    static LockState s;
+    return s;
 }
-bool is_protected(const fs::path& p) {
-    return protected_entries().count(p.string()) != 0;
+void register_atexit() {
+    LockState& s = lock_state();
+    if (s.atexit_registered) return;
+    s.atexit_registered = true;
+    std::atexit(gc_at_exit_impl);
+}
+int open_lock_file(const std::string& root) {
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    return ::open((root + "/.cache_lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
 }
 // 扫描 root 下的缓存条目：跳过点文件（含记账文件）、progcache 子树和临时文件。
 void scan_entries(const std::string& root, std::vector<GcEntry>& out, uint64_t& total_bytes) {
@@ -252,33 +277,72 @@ void scan_entries(const std::string& root, std::vector<GcEntry>& out, uint64_t& 
         total_bytes += bytes;
     }
 }
-// 超限时按 mtime 从旧到新删（keep 永不删）。删除目标是**低水位**
-// （上限的 7/8）而不是刚好压线：这样下一次扫描要再攒 1/8 上限的新写入才
-// 触发，把「每写一条就全扫一遍」摊销成「每上限/8 条扫一次」。
-// 每个写后状态仍在硬上限内（超限才进这里，删到低水位只多删不越界）。
-void evict_to_bounds(const std::string& root, const std::string& keep, const GcLimits& l,
-                     uint64_t& entries, uint64_t& bytes) {
+// 独占锁下的真实扫描+淘汰（低水位 = 上限的 7/8，摊销下一次扫描）。
+// 只按 mtime 从旧到新删；删除前再 stat 一次确认 mtime 没变（防御性）。
+void gc_root_now(const std::string& root, const GcLimits& l) {
     const uint64_t low_entries =
         l.max_entries == 0 ? UINT64_MAX : l.max_entries - l.max_entries / 8;
     const uint64_t low_bytes =
         l.max_bytes == 0 ? UINT64_MAX : l.max_bytes - l.max_bytes / 8;
     std::vector<GcEntry> list;
+    uint64_t bytes = 0;
     scan_entries(root, list, bytes);
-    entries = list.size();
+    uint64_t entries = list.size();
+    if ((l.max_entries == 0 || entries <= l.max_entries) &&
+        (l.max_bytes == 0 || bytes <= l.max_bytes)) {
+        // 记账可能被并发进程写偏大：顺手校正，避免以后每次退出都白扫一遍。
+        write_gc_state(root, entries, bytes);
+        return;
+    }
     std::sort(list.begin(), list.end(),
               [](const GcEntry& a, const GcEntry& b) { return a.mtime < b.mtime; });
     for (const GcEntry& e : list) {
         if (entries <= low_entries && bytes <= low_bytes) break;
-        // 记账包含受保护条目（否则 marker 会永久少算、上界失效），但不删它们。
-        if (e.path.string() == keep || is_protected(e.path)) continue;
+        std::error_code ec2;
+        const auto mt2 = fs::last_write_time(e.path, ec2);
+        if (ec2 || mt2 != e.mtime) continue;  // 扫描后被动过：这轮不删
         std::error_code ec;
         fs::remove_all(e.path, ec);
         if (ec) continue;  // 删除失败：静默忽略，下次再试
         entries -= 1;
         bytes -= std::min(bytes, e.bytes);
     }
+    write_gc_state(root, entries, bytes);
 }
 }  // namespace
+
+void cache_hold_module_lock(const std::string& root) {
+    LockState& s = lock_state();
+    if (s.module_fd >= 0) return;
+    const int fd = open_lock_file(root);
+    if (fd < 0) return;  // 打不开锁文件：退化为无锁（仍 best-effort）
+    if (::flock(fd, LOCK_SH) != 0) {
+        ::close(fd);
+        return;
+    }
+    s.module_fd = fd;
+}
+
+void gc_at_exit_impl() {
+    LockState& s = lock_state();
+    // 本进程不再使用条目：先放共享锁，再尝试非阻塞独占锁（有编译在跑就跳过）。
+    if (s.module_fd >= 0) ::flock(s.module_fd, LOCK_UN);
+    for (const std::string& root : s.pending_roots) {
+        const int fd = open_lock_file(root);
+        if (fd < 0) continue;
+        if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {  // 还有进程持共享锁
+            ::close(fd);
+            continue;
+        }
+        gc_root_now(root, gc_limits());
+        ::flock(fd, LOCK_UN);
+        ::close(fd);
+    }
+    if (s.module_fd >= 0) {
+        ::close(s.module_fd);
+        s.module_fd = -1;
+    }
+}
 
 void cache_evict_after_store(const std::string& root, const std::string& entry, bool existed) {
     const GcLimits& l = gc_limits();
@@ -295,15 +359,14 @@ void cache_evict_after_store(const std::string& root, const std::string& entry, 
         entries += 1;
         bytes += path_bytes(entry);
     }
+    write_gc_state(root, entries, bytes);
     if ((l.max_entries != 0 && entries > l.max_entries) ||
         (l.max_bytes != 0 && bytes > l.max_bytes)) {
-        evict_to_bounds(root, entry, l, entries, bytes);
+        // 真正淘汰推迟到进程退出（atexit），独占锁下做：并发编译期间绝不删
+        // 别人正在用的条目。
+        lock_state().pending_roots.insert(root);
+        register_atexit();
     }
-    write_gc_state(root, entries, bytes);
-}
-
-void cache_protect_entry(const std::string& path) {
-    protected_entries().insert(path);
 }
 
 std::optional<uint64_t> parse_u64(const std::string& s) {
