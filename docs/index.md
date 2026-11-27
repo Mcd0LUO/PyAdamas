@@ -14,6 +14,7 @@
 | [codegen.md](codegen.md) | 汇编怎么生成？栈帧和调用约定怎么定的？ | `codegen*.cpp` |
 | [stack-alignment.md](stack-alignment.md) | 栈对齐违规查到了哪两处 ABI 根因？`-mstackrealign` 为什么能撤掉？ | `src/backend/block.cpp` `src/backend/codegen.cpp` |
 | [runtime.md](runtime.md) | 编译产物运行时依赖什么？对象在内存里怎么摆？ | `runtime/rt_*.c` |
+| [unknown-convergence.md](unknown-convergence.md) | unknown 到底贵在哪？为什么「局部变量推不出来」不是主要矛盾？真正的杠杆（泛型 + 分别编译）被什么卡住？ | src/typecheck/ stdlib/heapq.py |
 | [unknown-semantics-audit.md](unknown-semantics-audit.md) | 「类型/种类未知」时运行时为什么容易退化成指针语义？今天修了哪 4 个 bug、还剩哪些缺口？ | `runtime/rt_dict.c` `runtime/rt_list.c` `runtime/rt_any.c` |
 | [semantics-audit-playbook.md](semantics-audit-playbook.md) | 语义审计怎么做：穷举对拍、先查文档、UB 期望、找全同类点位、标准流程 | `tests/` `docs/compatibility.md` |
 | [compatibility.md](compatibility.md) | 和 CPython 的差异清单，以及正确性是怎么验证的 | `tests/` |
