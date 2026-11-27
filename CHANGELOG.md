@@ -6,6 +6,38 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.684] - 2026-11-27
+
+> feat(exc)：**值 raise 也走方案 A 的直接跳**（`raise ValueError("x")` 这类最常见的写法）。
+>
+> 0.682 只覆盖 `pa_raise`（无参 raise）。值 raise 走 `pa_raise_value_from` / `pa_raise_instance`，
+>仍是老路径。本轮把这两个也拆出 prep（不抛），pass 把三类调用都改写。
+>
+> | 基准（10 万次真抛出） | 门控关 | 门控开 | `--no-zero-cost-exc` |
+> |---|---|---|---|
+> | excbench | 228 ms | **36 ms（6.3×）** | 33 ms |
+> | 值 raise（`raise ValueError("x")`） | 235 ms | **51 ms（4.6×）** | 49 ms |
+>
+> 我独立复测值 raise：off 246–250 ms / on 63–75 ms（**4×**，本机带负载），
+>`ir -O2` 里 `pa_eh_raise_prep_value` 出现 1 次、二进制 md5 不同。
+>
+> 实现要点（195 行 / 9 文件）：
+> - runtime：`pa_raise_value_from` / `pa_raise_instance` 的构造函数体**抽成共享 prep**
+>   （cause 链 / 富实例 `current_exc_inst` / traceback 口径全共享，不是拷贝）；
+> - RtFn：`EhRaisePrepValue` / `EhRaisePrepInstance`（i3, ..., slot_addr）；
+> - `opt/exc_direct.cpp`：改写 `pa_raise`、`pa_raise_value_from(cause=const 0)`、`pa_raise_instance`；
+>   **`raise ... from e` 的真实 cause 链保留老路**；
+> - 用例 `tests/run/exc_direct_shapes.py` +5 形态（`e.args` / `str(e)` / `type(e).__name__`、
+>   跨函数值 raise、富实例、`from None`、真实 `from` 走老路）。
+>
+> 闸门：套件 **602**、difftest **545-0**、opt_levels 40/40（默认与门控开各一遍）、
+>`VERIFY_IR=1` 无违规、ASan 4 例 0 报错；门控关时生成代码与改动前**逐字节一致**。
+>
+> ## 覆盖边界（写清楚，避免误以为全支持）
+>
+> 走直接跳：`raise C(...)`（用户类）、`raise C`、`raise ValueError("x")`、`raise E() from None`。
+>仍走老路：`raise ... from e`（真实 cause）、裸 `raise`、多 handler、带 `finally` 的保护区、
+>嵌套 setjmp、生成器/协程、跨帧未内联的 raise。
 ## [0.683] - 2026-11-27
 
 > fix(runtime)：**`list_buf_grow` 的增长前提加兜底**（运行期审计 A10-1）。
