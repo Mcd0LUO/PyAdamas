@@ -3324,12 +3324,33 @@ static void gc_alloc_black(PyAdamasRc* h) {
     (void)h;
 }
 
+/* **0.702：缓冲式写屏障（照 Go wbBuf 的思路）。**
+   原来每次屏障直调 gc_mark：读对象头（可能跨缓存行、冷）、查 IMMORTAL/YOUNG/
+   MARK 三个位、再推标记栈 —— 每次几条指令 + 一到两次可能未命中的 cache 访问。
+   改成先把裸指针存进缓冲，满了再批量走 gc_mark：屏障本体缩成
+   「门控 + 一次 store + 一次自增 + 比较」，把去重和入栈摊销到批量上，
+   且批量遍历缓冲是顺序访问（预取友好）。
+
+   正确性：标记栈上的对象只是「待扫描」，扫描发生在标记结束时统一进行；
+   本缓冲里的值同理 —— **只要在进入清扫之前把缓冲排空**，就不会漏标。
+   排空点：gc_incr_step 的 state1→2 转换前、gc_incr_finish 开头、以及本函数
+   满缓冲时。三者覆盖全部「标记结束」路径。 */
+#define GC_WB_CAP 4096
+static int64_t gc_wb_buf[GC_WB_CAP];
+static size_t gc_wb_len;
+
+static void gc_wb_flush(void) {
+    size_t n = gc_wb_len;
+    gc_wb_len = 0;
+    for (size_t i = 0; i < n; ++i) gc_mark((uintptr_t)gc_wb_buf[i]);
+}
+
 static void gc_write_barrier(int64_t v) {
     // 只在标记阶段生效；清扫/空闲阶段写入不需要屏障。
     if (gc_incr_state != 1) return;
     if (!v) return;
-    // 直接标记新值：标灰并入队，后续 gc_incr_step 会扫描它。
-    gc_mark((uintptr_t)v);
+    gc_wb_buf[gc_wb_len++] = v;
+    if (gc_wb_len == GC_WB_CAP) gc_wb_flush();
 }
 
 void pa_gc_write_barrier(int64_t v) { gc_write_barrier(v); }
@@ -3352,6 +3373,7 @@ static void gc_incr_step(void) {
                8816B 即此）。先 release 交出垃圾→活边（mark_sweep 口径），再
                gc_free_body，最后 gc_incr_finish 收尾释放 DEFER 保活对象。
                清扫的进一步分片（与 mutator 交错）留待阶段2/3 线程安全边界。 */
+            gc_wb_flush();  /* 0.702: 清扫前排空缓冲式写屏障，否则漏标 */
             gc_phase = GC_PHASE_SWEEP;
             gc_sweeping = 1;
             for (size_t i = 0; i < gc_set_len; ++i) {
@@ -3604,6 +3626,7 @@ static void gc_collect(int major) {
             // 之后每次分配都触发一次 major —— 实测 180_codepoint_perf 触发了
             // 28 万次 GC，GC 开销 72ms（占程序 46%）。
             gc_incr_major = 1;
+            gc_wb_flush();  /* 0.702: 清扫前排空缓冲式写屏障，否则漏标 */
             gc_phase = GC_PHASE_SWEEP;
             gc_sweeping = 1;
             for (size_t si = 0; si < gc_set_len; ++si) {
@@ -3627,6 +3650,7 @@ static void gc_collect(int major) {
         gc_incr_countdown = GC_INCR_STRIDE;
         gc_incr_remaining = GC_INCR_STRIDE;
         gc_need_check = 1;   /* 增量有待办 */
+        gc_wb_flush();  /* 0.702: 清扫前排空缓冲式写屏障，否则漏标 */
         gc_phase = GC_PHASE_SWEEP;
         gc_sweeping = 1;
         // **标记期间必须让 gc_phase 非 0**，否则 pa_rc_dec 会立即释放对象 ——
@@ -3696,6 +3720,7 @@ static void gc_collect(int major) {
     }
 
     // 5. 清扫：先让垃圾对象把「指向集合外的边」交出来，再统一释放。
+    gc_wb_flush();  /* 0.702: 清扫前排空缓冲式写屏障，否则漏标 */
     gc_phase = GC_PHASE_SWEEP;
     gc_sweeping = 1;
     for (size_t i = 0; i < gc_set_len; ++i) {
@@ -3837,6 +3862,7 @@ void pa_gc_shutdown(void) {
     // 处理），只是这里没有 trial/mark —— 退出时一切皆垃圾。
     gc_sweeping = 1;
     gc_mark_sweep = 1;
+    gc_wb_flush();  /* 0.702: 清扫前排空缓冲式写屏障，否则漏标 */
     gc_phase = GC_PHASE_SWEEP;
     for (PyAdamasRc* h = heap_head; h; h = h->next) {
         if (pa_rc_release_of(h)) pa_rc_release_of(h)((char*)h + PYADAMAS_RC_HDR);

@@ -6,6 +6,70 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.702] - 2026-11-27
+
+> perf(gc)：**缓冲式写屏障（照 Go `wbBuf` 思路）——增量标记开销从 +52% 降到 +24%**。
+>
+> ## 问题
+>
+> 增量标记（`PYADAMAS_GC_INCR_MARK=1`）的吞吐代价实测 +32%（churn）/ +52%（cycles）。
+>先 profile 定位开销来源，再动手：
+>
+> ```
+>            关闭              开启
+> pa_list_append  17.75%   10.32%   ← 占比下降是总时间变大，不是变快
+> gc_mark          3.63%    5.90%   ← 屏障直调
+> gc_collect       4.54%    5.22%
+> gc_scan_object   ——       2.57%   ← 增量扫描
+> ```
+>
+> 屏障的每次调用都走 `gc_mark`：读对象头（跨缓存行、冷）、查 IMMORTAL/YOUNG/MARK 三位、推标记栈。
+>**去重与入栈的成本压在每次写入上**，而它们本可以批量做。
+>
+> ## 改法
+>
+> ```c
+> #define GC_WB_CAP 4096
+> static int64_t gc_wb_buf[GC_WB_CAP];
+> static size_t gc_wb_len;
+>
+> static void gc_write_barrier(int64_t v) {
+>     if (gc_incr_state != 1) return;
+>     if (!v) return;
+>     gc_wb_buf[gc_wb_len++] = v;          // 一次 store
+>     if (gc_wb_len == GC_WB_CAP) gc_wb_flush();
+> }
+> ```
+>
+> 屏障本体从「读对象头 + 三位判定 + 入栈」缩成「门控 + store + 自增 + 比较」；
+>去重/入栈摊销到批量 flush，且批量遍历是顺序访问。
+>
+> **正确性前提**：缓冲里的值只是「待标灰」，只要**进入清扫之前**排空就不会漏标。
+>排空点：每个 `gc_phase = GC_PHASE_SWEEP` 之前（5 处，含 state1→2 转换、同步小集合分支、
+>legacy 分支）、`gc_incr_finish` 开头、以及满缓冲时。`flush` 幂等，空缓冲是空操作。
+>
+> ## 实测
+>
+> | | 关闭 | 开启（改前） | 开启（改后） |
+> |---|---|---|---|
+> | churn 1M | 69–72 ms | 74 ms | 71–75 ms |
+> | **cycles 200K** | **61–66 ms** | **97 ms** | **77–78 ms** |
+> | after-drop | 25 ms | 26 ms | 26 ms |
+>
+> cycles 的增量开销：**+52% → +24%**（97ms → 78ms，省 19ms）。
+>
+> ## 验收
+>
+> - `PYADAMAS_GC_BARRIER=1 PYADAMAS_GC_INCR_MARK=1` 全量套件 **602 / 0 失败**；
+> - 作者退守点 `13_gc` / `174_gc_construct_roots` 输出与常规模式一致；
+> - 默认模式闸门：套件 602、difftest 545-0、check_size（屏障代码在默认路径上不可达，指令数不变）。
+>
+> ## 还没做的
+>
+> C# 的卡片表（card table）是更彻底的一步：屏障只置一位（`cards[addr>>8] = 1`），
+>标记终止时扫脏卡。但它要求屏障拿到**槽地址**而不只是值，API 要改（`pa_gc_insert_barrier(v)` →
+>`..._slot(void* slot)`），codegen 的 5 个发射点都要跟。本步先拿掉「每次写入的固定开销」，
+>卡片表留到需要再往下压时做——**先把便宜的做了，再评估是否值得改 API**。
 ## [0.701] - 2026-11-27
 
 > docs(gc)：**确认「GC 没有并发」并量化缺口**（用户观察属实）；补阶段 2 的最小可行实现方案。
