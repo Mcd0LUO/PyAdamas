@@ -6,6 +6,63 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.682] - 2026-11-27
+
+> feat(exc)：**方案 A 第二步落地 —— 同帧 `raise` 直接跳到 landing pad，绕开 libgcc 展开**。
+>
+> excbench（10 万次真抛出，绑核 7 轮交错中位）：
+>
+> | 口径 | 中位 |
+> |---|---|
+> | 门控关（默认，表驱动） | **224 ms** |
+> | `PYADAMAS_EXC_DIRECT=1` | **38 ms（5.9×）** |
+> | `--no-zero-cost-exc`（setjmp） | 36 ms |
+>
+> 直接跳已基本追平 setjmp。我独立复测（本机带负载）：off 239–251 ms / on 53–64 ms（**4.5×**），
+>`ir -O2` 里 `pa_eh_raise_prep` 出现 1 次（excbench 就一处 raise）、两个二进制 md5 不同。
+>
+> ## 实现（约 214 行）
+>
+> - **runtime**：`pa_eh_raise` 拆成 `pa_eh_raise_prep(type,msg,slot)`（构造异常、设 pending_exc、
+>   捕获 traceback、写约定槽位，**不抛**）+ 原展开路径复用；新增 `RtFn::EhRaisePrep`
+>   （`rtfn.def`/`rtfn.h`/`rtfn_names.h`/`call_rt.cpp` 编组，`gen_rtfn.py --check` 一致）。
+> - **lower**：`EhRegion` 增 `direct_block`/`direct_slot`/`direct_ok`；`lower_try_zero_cost`
+>   对「单 handler、无 finally」的保护区建 `try.dispatch` + `try.land.direct`（跳过
+>   `EhLandingPad`/`pa_eh_land`，取约定槽位后汇入**同一条** handler 分发链）。
+> - **新 pass** `src/opt/exc_direct.cpp`（紧跟内联、LICM 之前）：判据**只用块布局区间**
+>   `[begin_idx, end_idx)`（codegen 的 `.LEHB/.LEHE` 即按布局发；内联器原地 splice）。
+>   嵌套 setjmp 用 `HandlerPush/HandlerLeave` 区间排除；嵌套零开销取最内层；
+>   不匹配 handler 完全复用既有 `pa_exc_matches` / `EhRethrow`（重抛重启 phase 1）。
+> - **门控** `PYADAMAS_EXC_DIRECT`，**默认关**（合并零风险；默认开只需去掉两处 env 判断）。
+>
+> ## 过程中抓到并修掉的 bug
+>
+> `land_direct` 初版把 `EhLeave + RcCleanup` 写在直接入口里，而它跳进的 `dispatch` 块开头
+>**也**做这两件事 → 直接跳路径 `EhLeave` 两次：单层 try 被 `pa_eh_leave` 的 `if (depth>0)` 掩盖，
+>但**嵌套 try 时把外层 depth 记账吃掉**，之后 C 运行时 `IndexError` 误走 setjmp 路径 → 未捕获退出。
+>已改为直接入口只做 slot load + jump。
+>
+> ## 验证
+>
+> 17 形态等价性（`tests/run/exc_direct_shapes.py`：裸 except / except Exception / 具体类匹配 /
+>不匹配重抛（同函数外层、调用方、无外层→进程终止）/ 子类匹配 / 元组 handler /
+>`KeyboardInterrupt` 不被 `except Exception` 接住 / finally / 嵌套 try / handler 里再 raise /
+>`raise ... from` / 生成器 / 递归），门控开/关/CPython 三者逐字节一致。
+>
+> 闸门：套件 **602**、difftest **545-0**、opt_levels **40/40**（默认与门控开各一遍）、
+>`VERIFY_IR=1` 全套件无违规、单例 ASan 0 报错、`checkall --full` **全部 PASS**
+>（含 perf-baseline 12 项 warn=0 fail=0）。非 eligible 函数门控开/关 asm 逐字节一致。
+>
+> ## 一个测量陷阱（值得记）
+>
+> 我第一次复测时「门控开/关运行时没差别」，原因是**两次 `build` 都没加 `--rebuild`**——
+>门控是编译期的，而 modcache 的 key 不含它，于是第二次直接复用了门控关的 IR，两个二进制逐字节相同。
+>**结论：凡是用 env 门控做 A/B，两边都必须 `--rebuild`**（或清 modcache）。
+>
+> ## 范围外（保持老路径）
+>
+> 值 raise（`raise ValueError("x")` 走 `pa_raise_value_from` / `pa_raise_instance`）、多 handler、
+>带 finally 的保护区、生成器/协程里的 try、`raise ... from`。
 ## [0.681] - 2026-11-27
 
 > feat(lower)：**方案 A 第一步**——「当前 try 区域」栈 + landing pad 第二条入口骨架（76 行）。
