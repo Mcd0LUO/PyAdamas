@@ -13,7 +13,7 @@ void pa_rc_release_indirect(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->release) h->release(p);
 }
-const PaRcOps pa_rc_ops[16] = {
+const PaRcOps pa_rc_ops[64] = {
     /* STR      */ {NULL, NULL},
     /* LIST     */ {list_destroy, list_gc_release},
     /* OBJ      */ {pa_rc_dtor_indirect, pa_rc_release_indirect},
@@ -27,8 +27,8 @@ const PaRcOps pa_rc_ops[16] = {
     /* JSONNULL */ {NULL, NULL},
     /* JSONBOOL */ {NULL, NULL},
     /* BUFFER   */ {buffer_destroy, NULL},
-    /* 13..15  */ {NULL, NULL}, {NULL, NULL}, {NULL, NULL},
-};
+    /* GEN      */ {gen_destroy, pa_gen_release_indirect},
+};  /* 其余下标默认 NULL（静态区零初始化） */
 
 /* ══════════════════════════════════════════════════════════════════
    分配器调试模式：尾部 canary / guard page（PYADAMAS_CANARY / PYADAMAS_GUARD）
@@ -1821,7 +1821,7 @@ void rc_link(PyAdamasRc* h) {
     if (heap_head) heap_head->prev = h;
     heap_head = h;
     gc_tracked_count++;
-    if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
+    if (pa_rc_kind_is_obj_payload(h->kind) || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count++;
     // **内联判断 rc_index_off，避免热路径上的函数调用。**
     //
@@ -1851,7 +1851,7 @@ void rc_unlink(PyAdamasRc* h) {
     else heap_head = h->next;
     if (h->next) h->next->prev = h->prev;
     gc_tracked_count--;
-    if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
+    if (pa_rc_kind_is_obj_payload(h->kind) || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count--;
     rc_index_del(h);
 }
@@ -2993,6 +2993,7 @@ void gc_scan_object(PyAdamasRc* h) {
             // range 的负载是四个整数，没有子对象要标记。
             break;
         case PYADAMAS_RC_CLOSURE:
+        case PYADAMAS_RC_OBJ_GEN:
         case PYADAMAS_RC_OBJ:
         case PYADAMAS_RC_INSTANCE: {
             // 闭包负载 = [code, n_caps, cell…]，cell 都是堆上的 list；
@@ -3349,7 +3350,7 @@ static double gc_now_ms(void) {
 
 static void gc_free_body(PyAdamasRc* h) {
     rc_unlink(h);
-    if (h->kind == PYADAMAS_RC_OBJ)
+    if (pa_rc_kind_is_obj_payload(h->kind))
         free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
     if (h->kind == PYADAMAS_RC_LIST) {
         PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
@@ -3825,6 +3826,7 @@ void pa_gc_shutdown(void) {
         }
         str_pool_count[i] = 0;
     }
+    pa_gen_release_report();
     while (list_pool) {
         PyAdamasRc* h = list_pool;
         list_pool = h->next;

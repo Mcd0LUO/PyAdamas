@@ -118,6 +118,7 @@ static const char* diag_kind_name(int32_t k) {
         case PYADAMAS_RC_LIST: return "list";
         case PYADAMAS_RC_DICT: return "dict";
         case PYADAMAS_RC_OBJ: return "obj";
+        case PYADAMAS_RC_OBJ_GEN: return "obj_gen";
         case PYADAMAS_RC_STRUCT: return "struct";
         case PYADAMAS_RC_JSONNULL: return "jsonnull";
         case PYADAMAS_RC_JSONBOOL: return "jsonbool";
@@ -131,6 +132,7 @@ static int diag_kind_from_env(const char* v) {
     if (!strcmp(v, "list")) return PYADAMAS_RC_LIST;
     if (!strcmp(v, "dict")) return PYADAMAS_RC_DICT;
     if (!strcmp(v, "obj")) return PYADAMAS_RC_OBJ;
+    if (!strcmp(v, "obj_gen")) return PYADAMAS_RC_OBJ_GEN;
     if (!strcmp(v, "struct")) return PYADAMAS_RC_STRUCT;
     return -1;
 }

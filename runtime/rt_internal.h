@@ -418,7 +418,13 @@ enum {
        elem_kind}；data 用 malloc/calloc 分配、RC 归零时 free。无堆出边
        （叶子），可进 GC 根、不参与环（本身不成环）。见 runtime/rt_buffer.c。 */
     PYADAMAS_RC_BUFFER = 12,
+    /* b1：从 OBJ 拆出的运行期类型。所有 OBJ 子 kind 从 OBJ_FIRST 起**连续**编号，
+       b2 每加一个就把 OBJ_LAST +1；区间判定见 pa_rc_kind_is_obj_payload。 */
+    PYADAMAS_RC_OBJ_GEN = 13,
 };
+
+#define PYADAMAS_RC_OBJ_FIRST ((int64_t)PYADAMAS_RC_OBJ_GEN)
+#define PYADAMAS_RC_OBJ_LAST  ((int64_t)PYADAMAS_RC_OBJ_GEN)
 
 typedef struct PyAdamasRc {
     struct PyAdamasRc* next;
@@ -438,17 +444,24 @@ typedef struct PaRcOps {
     void (*dtor)(void*);
     void (*release)(void*);
 } PaRcOps;
-extern const PaRcOps pa_rc_ops[16];  /* 13 kind + 3 个 NULL 兜底行 */
+extern const PaRcOps pa_rc_ops[64];  /* kind + NULL 兜底行（b2 会继续加） */
 /* OBJ/INSTANCE 的表项是这两个 thunk：转读 RC 头里的实例指针（本步不动）。 */
 void pa_rc_dtor_indirect(void* p);
+void pa_gen_release_indirect(void* p);   /* b1：OBJ_GEN 的 release 走 resume 侧表 */
+void pa_gen_release_report(void);        /* b1：PYADAMAS_GEN_TBL_STATS 下打印登记条数 */
+
+/* b1："是否 OBJ 负载" 的结构性判定（b2 拆完 catch-all 后只靠区间）。 */
+static inline int pa_rc_kind_is_obj_payload(int64_t k) {
+    return k == PYADAMAS_RC_OBJ || (k >= PYADAMAS_RC_OBJ_FIRST && k <= PYADAMAS_RC_OBJ_LAST);
+}
 void pa_rc_release_indirect(void* p);
 
 static inline void (*pa_rc_dtor_of(const PyAdamasRc* h))(void*) {
-    return pa_rc_ops[(uint64_t)h->kind & 15].dtor;
+    return pa_rc_ops[(uint64_t)h->kind & 63].dtor;
 }
 
 static inline void (*pa_rc_release_of(const PyAdamasRc* h))(void*) {
-    return pa_rc_ops[(uint64_t)h->kind & 15].release;
+    return pa_rc_ops[(uint64_t)h->kind & 63].release;
 }
 
 #define PYADAMAS_RC_IMMORTAL INT64_MIN
