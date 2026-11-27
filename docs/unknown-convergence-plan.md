@@ -62,3 +62,44 @@ def tokenize(src):          # src 没有注解 → 形参 unknown
 - 回填是**推断放宽**，误判会把 unknown 变成错类型 → 静默错值。必须有 difftest + 套件兜底；
 - 跨模块接口要遵守 `kModuleAbiVersion`：接口编码变化必须 bump，否则旧 modcache 不失效；
 - 判负要记录（项目规矩）：放宽后若 pass 数下降，回退并写清理由。
+
+## 6. 读了回填实现之后：它覆盖什么、缺什么
+
+现有机制在 src/typecheck/func.cpp:296：
+
+    for (auto& p : info->pos) {
+        if (p.inferred) continue;   // 没标注的本来就是 unknown，不用回填
+        ...
+        fill_holes_recursive(p.ty, it->second.ty, 0);
+    }
+
+它只处理「标注了裸 list/dict 但元素类型是洞」的情况（p.inferred == false）。
+对 def tokenize(src) 这种完全不标注的形参，它显式跳过（p.inferred 为真）。
+
+注释里说「不标注时反而能推出精确类型」，靠的是函数体用法（for x in xs 把元素并进 xs）。
+但 src[i] / src[i:j] 这类下标/切片用法不会反推 base 的类型，
+所以 src 停在 unknown，派生出的 c/word/sid 全部 unknown。这就是 interp2 那 21 处的来源。
+
+## 7. 真正的修法：调用点参数类型传播
+
+两条路：
+
+A 函数体内反推：从 src[i]、src[i:j]、len(src)、元素与 str 常量比较等用法反推 base 类型。
+  规则多、易误判；单文件内可做。
+
+B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数类型已知时回填形参
+  （必要时迭代到不动点）。需要跨函数甚至跨模块的一轮；这是 mypy/pyright 的做法。
+
+选 B 的理由：
+1. 不依赖猜规则，用的是真实的调用事实；
+2. 跨模块也能用 —— 接口里已经带着函数签名，调用方的实参类型能反推形参；
+3. 只在形参类型是 unknown 时才回填，不改变已有语义。
+
+实施切片（最小闭环）：
+1. 建「待回填形参表」：函数 F 的第 k 个形参类型 unknown 且未被用法收窄；
+2. 在调用点（call_forms.cpp 已知签名的调用）把实参类型并进该形参；
+3. 一轮结束后若有变化，重查这些函数体（不动点，最多 N 轮）；
+4. 验收：PYADAMAS_TYPE_STATS=1 看 interp2 的 local_unknown 从 21 降到多少。
+
+风险：这是推断放宽，错判会把 unknown 变错类型，导致静默错值。
+防线：套件 602 + difftest 545-0 必须全绿，任何 pass 数下降立即回退并记录。

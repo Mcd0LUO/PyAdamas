@@ -6,6 +6,21 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.714] - 2026-11-27
+
+> plan：读完回填实现，定位 interp2 那 21 处 unknown 的确切成因，选定修法。
+>
+> 现有机制（src/typecheck/func.cpp:296）只回填**已标注裸容器**（p.inferred == false）的元素洞；
+>对完全无标注的形参（tokenize(src) 里的 src）显式跳过。
+>注释依赖的「函数体用法收窄」只覆盖 for x in xs 这类迭代，**下标/切片不会反推 base 类型** ——
+>于是 src 停在 unknown，c/word/sid 全部 unknown。
+>
+> 修法选定 **B 调用点参数类型传播**（mypy/pyright 同款）：
+>记录形参 unknown 的函数与其调用点，用实参已知类型回填，迭代到不动点；
+>只在形参是 unknown 时才写，不改已有语义；跨模块接口已带签名，天然可用。
+>
+> 已写进 docs/unknown-convergence-plan.md §6–§7（含最小闭环与验收口径）。
+
 ## [0.713] - 2026-11-27
 
 > plan：unknown 收敛的第一批实测基线 + 目标，写进 docs/unknown-convergence-plan.md。
