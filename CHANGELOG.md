@@ -6,6 +6,21 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.715] - 2026-11-27
+
+> plan：参数类型传播的接线点全部定位（不动点机制本来就存在，不需要新造）。
+>
+> 关键发现：TypeChecker::check 已经是收敛循环：
+> infer.cpp:42 先 check_once，然后 while (collect_result_hints()) 重建 TypeChecker 再查一轮。
+> 返回类型传播走的就是这套。参数传播只需挂到同一循环，共三个接线点：
+>
+> 1. 形参进作用域 func.cpp:215/217（无标注形参在此拿到 t_unknown）
+> 2. 调用点观察 call.cpp:415（observe_call_result 处同时记录实参类型）
+> 3. 收敛循环 infer.cpp:45（改成 collect_result_hints() | collect_param_hints()）
+>
+> 最小实现规格与验收口径写进 docs/unknown-convergence-plan.md 第 8-10 节。
+> 基线：interp2 local_unknown = 21（tokenize 6、parser 7、ev 6）。
+>
 ## [0.714] - 2026-11-27
 
 > plan：读完回填实现，定位 interp2 那 21 处 unknown 的确切成因，选定修法。

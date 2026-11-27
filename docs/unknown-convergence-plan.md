@@ -103,3 +103,41 @@ B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数
 
 风险：这是推断放宽，错判会把 unknown 变错类型，导致静默错值。
 防线：套件 602 + difftest 545-0 必须全绿，任何 pass 数下降立即回退并记录。
+
+## 8. 实现接线点（已定位到行号）
+
+不动点机制已经存在：TypeChecker::check(Module&)（src/typecheck/infer.cpp:42）
+先 check_once，然后 while (collect_result_hints()) 重建 TypeChecker 再查一轮。
+这正是调用结果类型传播的收敛循环；参数传播只需挂到同一循环。
+
+三个接线点：
+
+1. 形参进作用域：src/typecheck/func.cpp:215/217
+   cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, !p.inferred, false};
+   无标注形参在这里拿到 t_unknown()；回填时把 p.ty 换成 hint，下一轮生效。
+
+2. 调用点观察：src/typecheck/call.cpp:415
+   return observe_call_result(c, fn, ...);
+   这里已有 Call c 和 FuncInfoPtr fn，把实参类型记进 observed_params_ 即可。
+
+3. 收敛循环：src/typecheck/infer.cpp:45
+   while (collect_result_hints())
+   改成 while (collect_result_hints() | collect_param_hints())（用 | 不要短路），
+   并把 param_hints_ 随 result_hints_ 一起 move 到 next。
+
+## 9. 最小实现规格
+
+- TypeChecker 新增 param_hints_ / observed_params_，
+  键为 (const FuncInfo*, size_t)，值为 TypePtr。
+- observe_call_result 里追加：遍历 c.args，若 fn->pos[i].inferred 且 is_unknown(fn->pos[i].ty)，
+  记录实参类型（用现成的表达式类型查询，与 ty_of 同源）；只记 replayable 类型。
+- collect_param_hints 取 observed_params_，与旧值比较，变化即 changed；
+  写入前用 replayable() 过滤（类/结构体跨轮不安全，与 result hint 同款限制）。
+- func.cpp 声明形参前查 param_hints_，命中则用它代替 t_unknown()。
+- 守卫：只在 p.inferred（无标注）且当前为 unknown 时写；有标注的绝不动。
+
+## 10. 验收
+
+基线：local_unknown 21（tokenize 6、parser 7、ev 6）。
+目标：先降到 15 以下；同时确认 container_elem 不上升（上升说明类型变宽，是反向效果）。
+回归：套件 602、difftest 545-0 全绿；任何 pass 数下降立即回退。
