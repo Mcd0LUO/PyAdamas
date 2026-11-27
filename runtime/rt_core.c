@@ -1,6 +1,8 @@
 // rt_core.c —— 引用计数、临时值栈、闭包、字符串分配、循环收集器
 #define PA_RC_NO_INLINE   /* 本文件提供 pa_rc_inc/dec 的外部符号 */
 #include "rt_internal.h"
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* 阶段①（A1-a）：11 个 uniform kind 的 (dtor, release) 常量表（下标 = kind）。
    OBJ / INSTANCE 两项是 thunk：转读头里的实例指针，语义与本步之前逐项一致。
@@ -376,6 +378,24 @@ static double gc_incr_ms;
 static int64_t gc_incr_calls, gc_incr_objs;
 static double gc_now_ms(void);
 static void gc_incr_finish(void);
+/* **0.705: defer frees of secondary buffers during marking (B plan, no lock).** */
+#define GC_DEFER_CAP 4096
+static void* gc_defer_buf[GC_DEFER_CAP];
+static size_t gc_defer_len;
+
+int pa_gc_mark_active(void) { return gc_incr_state == 1; }
+
+void pa_gc_defer_free(void* q) {
+    if (!q) return;
+    if (gc_defer_len < GC_DEFER_CAP) { gc_defer_buf[gc_defer_len++] = q; return; }
+    free(q);
+}
+
+static void gc_defer_flush(void) {
+    for (size_t i = 0; i < gc_defer_len; ++i) free(gc_defer_buf[i]);
+    gc_defer_len = 0;
+}
+
 static void gc_incr_step(void);
 static void gc_free_body(PyAdamasRc* h);
 static void gc_alloc_black(PyAdamasRc* h);
@@ -2800,6 +2820,27 @@ size_t gc_work_len;
 /* 工作栈、本轮集合、集合地址表、清扫后待释放的老对象，全部跨回合复用。 */
 static PyAdamasRc** gc_work_buf;
 static size_t gc_work_buf_cap;
+
+/* **0.703：后台标记线程（B 路线阶段 2 最小切片）。**
+   标记从「mutator 分配点分片推进」改成「独立线程持续 drain」：mutator 只负责
+   一次性拍好根快照（STW），之后线程在另一个核上扫描，mutator 继续跑；
+   队列排空后线程置 gc_bg_done 退出，mutator 在下一个分配点看到标志就做
+   mark-termination（flush 屏障缓冲 + 清扫 + 收尾，仍是 STW）。
+   前提是 0.700 验证过的「标记期不释放任何对象」不变量 —— 线程读对象安全。
+   工作栈 push/pop 用自旋锁：push 只发生在屏障 flush 与扫描内部（批量），
+   不是每次写入；扫描时不持锁（gc_scan_object 内部的 push 自己加锁）。 */
+static int gc_bg_on;
+static atomic_flag gc_wq_flag = ATOMIC_FLAG_INIT;
+static atomic_int gc_bg_done;
+static atomic_int gc_bg_stop;
+
+static inline void gc_wq_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&gc_wq_flag, memory_order_acquire)) {
+    }
+}
+static inline void gc_wq_release(void) {
+    atomic_flag_clear_explicit(&gc_wq_flag, memory_order_release);
+}
 static PyAdamasRc** gc_set;
 static size_t gc_set_len;
 static PyAdamasRc** gc_set_buf;
@@ -2884,7 +2925,13 @@ void gc_mark(uintptr_t v) {
     if (!h || (h->marked & PYADAMAS_RC_MARK)) return;
     h->marked |= PYADAMAS_RC_MARK;
     if (gc_cons_phase) gc_cons_note(h);
-    gc_work[gc_work_len++] = h;
+    if (gc_bg_on) {
+        gc_wq_acquire();
+        gc_work[gc_work_len++] = h;
+        gc_wq_release();
+    } else {
+        gc_work[gc_work_len++] = h;
+    }
 }
 
 /* 静态类型已知的堆指针：直接读头部，不查表。字面量（永生）和不在本轮
@@ -2897,7 +2944,13 @@ static void gc_mark_direct(uintptr_t v) {
     if (h->marked & PYADAMAS_RC_MARK) return;
     h->marked |= PYADAMAS_RC_MARK;
     if (gc_cons_phase) gc_cons_note(h);
-    gc_work[gc_work_len++] = h;
+    if (gc_bg_on) {
+        gc_wq_acquire();
+        gc_work[gc_work_len++] = h;
+        gc_wq_release();
+    } else {
+        gc_work[gc_work_len++] = h;
+    }
 }
 
 PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
@@ -3114,6 +3167,7 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     /* 增量标记总开关（0.330）：=1 启用分片标记 + 删除/插入屏障；默认 0
        同步标记（现状）。只读 "1"，"0"/未设都关，flag-off 零变化。 */
     { const char* im = getenv("PYADAMAS_GC_INCR_MARK"); if (im && im[0] == '1') gc_incr_mark_on = 1; }
+    { const char* th = getenv("PYADAMAS_GC_THREAD"); if (th && th[0] == '1' && gc_incr_mark_on) gc_bg_on = 1; }
     pa_gc_incr_mark_fast = gc_incr_mark_on;
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;
@@ -3223,6 +3277,13 @@ void gc_drain(void) {
 
 /* 增量收集收尾：晋升存活对象、释放清扫期攒下的引用、复位状态。 */
 static void gc_incr_finish(void) {
+    gc_defer_flush();   /* 0.705: deferred secondary buffers */
+    /* 0.703：确保后台标记线程已退出，再释放工作栈。 */
+    if (gc_bg_on) {
+        atomic_store_explicit(&gc_bg_stop, 1, memory_order_release);
+        while (!atomic_load_explicit(&gc_bg_done, memory_order_acquire)) { }
+        atomic_store_explicit(&gc_bg_stop, 0, memory_order_release);
+    }
     // **重算 old_bytes，不要在旧值上累加。**
     //
     // gc_set 里的对象是本轮**全部**存活对象（major 时就是整堆），它们的
@@ -3355,6 +3416,30 @@ static void gc_write_barrier(int64_t v) {
 
 void pa_gc_write_barrier(int64_t v) { gc_write_barrier(v); }
 
+/* 0.703: background marker thread body. */
+static void* gc_bg_marker(void* arg) {
+    (void)arg;
+    for (;;) {
+        if (atomic_load_explicit(&gc_bg_stop, memory_order_acquire)) break;
+        PyAdamasRc* h = NULL;
+        gc_wq_acquire();
+        if (gc_work_len) h = gc_work[--gc_work_len];
+        gc_wq_release();
+        if (!h) break;
+        gc_scan_object(h);
+        if (gc_stats_on) ++gc_incr_objs;
+    }
+    atomic_store_explicit(&gc_bg_done, 1, memory_order_release);
+    return NULL;
+}
+
+static void gc_bg_spawn(void) {
+    pthread_t t;
+    atomic_store_explicit(&gc_bg_done, 0, memory_order_release);
+    if (pthread_create(&t, NULL, gc_bg_marker, NULL) != 0) { gc_bg_on = 0; return; }
+    pthread_detach(t);
+}
+
 static void gc_incr_step(void) {
     if (!gc_incr_state) return;
     double _t0 = gc_stats_on ? gc_now_ms() : 0.0;
@@ -3364,7 +3449,32 @@ static void gc_incr_step(void) {
     gc_need_check = 1;   /* 增量有待办 */
     int budget = GC_MARK_BUDGET;
     if (gc_incr_state == 1) {
-        while (gc_work_len && budget-- > 0) { gc_scan_object(gc_work[--gc_work_len]); if (gc_stats_on) ++gc_incr_objs; }
+        if (gc_bg_on) {
+            /* 标记在后台线程跑；线程排空后由 mutator 做 mark-termination。
+               线程退出后屏障可能又推进新对象 —— 这里同步排掉残余，
+               **不重新起线程**（每次 pthread_create ~50us，实测让 thread 模式
+               比纯增量还慢 10%）。残余量很小（屏障缓冲 4K 一批）。 */
+            if (!atomic_load_explicit(&gc_bg_done, memory_order_acquire)) return;
+            gc_wb_flush();
+            gc_wq_acquire();
+            budget = (int)gc_work_len;
+            gc_wq_release();
+            while (budget-- > 0) {
+                PyAdamasRc* wh = NULL;
+                gc_wq_acquire();
+                if (gc_work_len) wh = gc_work[--gc_work_len];
+                gc_wq_release();
+                if (!wh) break;
+                gc_scan_object(wh);
+                if (gc_stats_on) ++gc_incr_objs;
+            }
+            gc_wq_acquire();
+            budget = (int)gc_work_len;
+            gc_wq_release();
+            if (budget > 0) return;   /* 还有残余，下一轮继续 */
+        } else {
+            while (gc_work_len && budget-- > 0) { gc_scan_object(gc_work[--gc_work_len]); if (gc_stats_on) ++gc_incr_objs; }
+        }
         if (gc_work_len == 0) {
             /* **标记排空 → 同步清扫**（GC 阶段1）。M=1 单线程：本次 gc_incr_step
                调用内 mutator 不运行，清扫是原子的。阶段1 只把昂贵的标记分片
@@ -3590,6 +3700,7 @@ static void gc_collect(int major) {
             gc_incr_remaining = GC_INCR_STRIDE;
             gc_need_check = 1;
             gc_phase = GC_PHASE_INCR_MARK;
+            if (gc_bg_on) gc_bg_spawn();  /* 0.703 */
             if (t0)
                 fprintf(stderr, "[gc] major incr-mark roots=%.2f ms set=%zu\n",
                         t2 - t1, gc_set_len);

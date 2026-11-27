@@ -972,7 +972,11 @@ void pa_rc_dec_slow(void* p);
 extern int pa_rc_stats_on_fast;   /* rc_stats_on 的别名，供内联使用 */
 extern int pa_gc_phase_fast;      /* gc_phase 的别名 */
 extern int pa_gc_incr_mark_fast;  /* 增量标记总开关别名（写屏障门控，0.330） */
-void pa_gc_write_barrier(int64_t v);  /* Dijkstra 插入屏障：标灰新值（标记期生效） */
+void pa_gc_write_barrier(int64_t v);
+/* 0.705：标记期二级缓冲延后释放（后台标记线程读 list->data / dict->entries 时，
+   mutator 不能把它们 free/还池）。非标记期这些函数不被调用。 */
+int pa_gc_mark_active(void);
+void pa_gc_defer_free(void* p);  /* Dijkstra 插入屏障：标灰新值（标记期生效） */
 /* 门控插入屏障：flag-off 一次可预测分支跳过（零调用）；flag-on 标灰新值。
    非堆值（标量）进 pa_gc_write_barrier 后查集合表落空，安全 no-op。 */
 static inline void pa_gc_insert_barrier(int64_t v) {

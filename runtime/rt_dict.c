@@ -348,7 +348,7 @@ static int64_t dict_place_slot(PyAdamasDict* d, int64_t hash) {
 static void dict_reindex(PyAdamasDict* d, int64_t nicap) {
     if (nicap < 8) nicap = 8;
     if (nicap != d->icap) {
-        free(d->index);
+        if (pa_gc_mark_active()) pa_gc_defer_free(d->index); else free(d->index);
         d->index = (int32_t*)calloc((size_t)nicap, sizeof(int32_t));
         if (!d->index) panic_c("out of memory");
         d->icap = nicap;
@@ -583,10 +583,22 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
         if (d->nent == d->cap) {
             int64_t ncap = d->cap ? d->cap * 2 : 8;
             if (ncap > (int64_t)DICT_IDX_MASK - 1) panic_c("dict too large");
-            PyAdamasDictEntry* ne =
-                (PyAdamasDictEntry*)realloc(d->entries, sizeof(PyAdamasDictEntry) * (size_t)ncap);
-            int32_t* no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
-            if (!ne || !no) panic_c("out of memory");
+            PyAdamasDictEntry* ne;
+            int32_t* no;
+            if (pa_gc_mark_active()) {
+                /* 0.705：标记期不能用 realloc —— 后台标记线程可能正读 entries。 */
+                ne = (PyAdamasDictEntry*)malloc(sizeof(PyAdamasDictEntry) * (size_t)ncap);
+                no = (int32_t*)malloc(sizeof(int32_t) * (size_t)ncap);
+                if (!ne || !no) panic_c("out of memory");
+                memcpy(ne, d->entries, sizeof(PyAdamasDictEntry) * (size_t)d->cap);
+                memcpy(no, d->order, sizeof(int32_t) * (size_t)d->cap);
+                pa_gc_defer_free(d->entries);
+                pa_gc_defer_free(d->order);
+            } else {
+                ne = (PyAdamasDictEntry*)realloc(d->entries, sizeof(PyAdamasDictEntry) * (size_t)ncap);
+                no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
+                if (!ne || !no) panic_c("out of memory");
+            }
             d->entries = ne;
             d->order = no;
             d->cap = ncap;

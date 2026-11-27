@@ -110,12 +110,23 @@ int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap) {
         int64_t gcap = ncap;
         nd = list_buf_get(&gcap);
         memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
-        if (l->data != list_inline_at(l)) list_buf_put(l->data, l->cap);
+        if (l->data != list_inline_at(l)) {
+            /* 0.705：标记期不能把旧块还池/释放 —— 后台标记线程可能正读它。 */
+            if (pa_gc_mark_active()) pa_gc_defer_free(l->data);
+            else list_buf_put(l->data, l->cap);
+        }
         l->cap = gcap;
     } else if (l->data == list_inline_at(l)) {
         nd = (int64_t*)malloc(sizeof(int64_t) * (size_t)ncap);
         if (!nd) panic_c("out of memory");
         memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
+        l->cap = ncap;
+    } else if (pa_gc_mark_active()) {
+        /* 0.705：标记期不能用 realloc（它会释放旧块）。 */
+        nd = (int64_t*)malloc(sizeof(int64_t) * (size_t)ncap);
+        if (!nd) panic_c("out of memory");
+        memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
+        pa_gc_defer_free(l->data);
         l->cap = ncap;
     } else {
         nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
