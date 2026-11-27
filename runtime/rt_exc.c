@@ -1028,7 +1028,10 @@ PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
     return e;
 }
 
-void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
+/* 0.683（方案 A 第二步扩到值 raise）：只做「构造异常对象 + 设全局 + 捕获
+   traceback」，不抛。pa_raise_value_from（longjmp 路径）与零开销直接跳路径
+   （rt_eh.c 的 pa_eh_raise_prep_value）共用同一份构造语义。 */
+PyAdamasException* pa_raise_value_from_prep(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
     /* 与 pa_eh_raise_value_from 逐句对齐：except 体里 raise 值跳过 ExcDone，
        先还 save 节点再释放被接管的 current_exc，否则捕获异常泄漏。 */
     pa_exc_drop_save();
@@ -1041,19 +1044,36 @@ void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
         pending_exc->cause = pa_exc_from_value(cause);
     }
     pa_trace_capture(pending_exc, PA_CAP_VALUE);
+    return pending_exc;
+}
+
+void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
+    (void)pa_raise_value_from_prep(v, cause);
     exc_longjmp();
 }
 
 void pa_raise_value(PyAdamasExcValue* v) { pa_raise_value_from(v, NULL); }
 
 /* 抛富异常实例：控制流仍用扁平异常做类型匹配，实例单独存起来。
-   只记录类名做 except 匹配；实例在 except as e 时取回。 */
-void pa_raise_instance(void* inst, PyAdamasStr* type) {
+   只记录类名做 except 匹配；实例在 except as e 时取回。
+   0.683：拆成 prep + 抛；prep 同时服务零开销直接跳路径（rt_eh.c）。 */
+PyAdamasException* pa_raise_instance_prep(void* inst, PyAdamasStr* type) {
     exc_gc_roots_ensure();
-    if (!inst) pa_raise_c("TypeError", "exception instance is null");
+    if (!inst) {
+        /* 与 pa_raise_c 的构造逐项一致（正常 lowering 不会给 null，防御而已）。 */
+        exc_free(pending_exc);
+        pending_exc = exc_new("TypeError", "exception instance is null");
+        pa_trace_capture(pending_exc, PA_CAP_NEW);
+        return pending_exc;
+    }
     char tn[128];
     int64_t n = type ? type->len : 0;
-    if (n < 0 || n >= (int64_t)sizeof(tn)) pa_raise_c("ValueError", "exception type too long");
+    if (n < 0 || n >= (int64_t)sizeof(tn)) {
+        exc_free(pending_exc);
+        pending_exc = exc_new("ValueError", "exception type too long");
+        pa_trace_capture(pending_exc, PA_CAP_NEW);
+        return pending_exc;
+    }
     if (n > 0) memcpy(tn, type->data, (size_t)n);
     tn[n] = 0;
     exc_free(pending_exc);
@@ -1062,6 +1082,11 @@ void pa_raise_instance(void* inst, PyAdamasStr* type) {
     current_exc_inst = inst;
     pending_exc = exc_new(tn, "");
     pa_trace_capture(pending_exc, PA_CAP_NEW);
+    return pending_exc;
+}
+
+void pa_raise_instance(void* inst, PyAdamasStr* type) {
+    (void)pa_raise_instance_prep(inst, type);
     exc_longjmp();
 }
 

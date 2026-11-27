@@ -22,6 +22,7 @@
 // 里的 EhLeave 配对退出 pa_eh_depth（EhBegin 记过一次），RcCleanup 复刻
 // 老路径的临时值水位清理。
 #include <cstdlib>
+#include <unordered_map>
 #include <vector>
 
 #include "ir/ir.h"
@@ -88,6 +89,19 @@ bool exc_direct_function(IRFunction& fn) {
                 }
             }
     }
+    // cause 是否常量 0（无 from / from None）：只接受「没有真实 cause 链」的
+    // 值 raise —— raise ... from e 的 prep 语义未做逐项对拍，先留老路。
+    // 1 = 目前只见过 const.int 0 定义；2 = 还有别的定义；0 = 未定义。
+    std::unordered_map<VReg, char> zero_def;
+    for (const auto& b : fn.blocks)
+        for (const auto& in : b.insts) {
+            if (in.dst == kNoReg) continue;
+            if (in.op == IrOp::ConstInt && in.imm == 0) {
+                if (zero_def[in.dst] != 2) zero_def[in.dst] = 1;
+            } else {
+                zero_def[in.dst] = 2;
+            }
+        }
     bool changed = false;
     for (const ZcRange& r : regions) {
         if (r.direct < 0) continue;
@@ -101,11 +115,22 @@ bool exc_direct_function(IRFunction& fn) {
             std::vector<Inst>& insts = fn.blocks[static_cast<size_t>(bi)].insts;
             if (insts.empty()) continue;
             Inst& call = insts.back();
-            // 只认 pa_raise / pa_eh_raise 的 (type,msg) 形态；别的抛出一律老路。
+            // 三类可直跳的抛出形态（其余一律老路）：
+            //   pa_raise(type,msg)                        ← raise Exc(...) / raise Exc
+            //   pa_raise_value_from(v, 0)                ← raise ValueError("x") 等值 raise
+            //   pa_raise_instance(inst, type)            ← raise <富异常实例>
             if (call.op != IrOp::CallRt) continue;
-            const RtFn f = static_cast<RtFn>(call.imm);
-            if (f != RtFn::Raise && f != RtFn::EhRaise) continue;
             if (call.args.size() != 2 || call.dst != kNoReg) continue;
+            const RtFn f = static_cast<RtFn>(call.imm);
+            RtFn prep_fn = RtFn::EhRaisePrep;
+            if (f == RtFn::RaiseValueFrom || f == RtFn::EhRaiseValueFrom) {
+                if (zero_def[call.args[1]] != 1) continue;  // 有真实 cause 链：老路
+                prep_fn = RtFn::EhRaisePrepValue;
+            } else if (f == RtFn::RaiseInstance) {
+                prep_fn = RtFn::EhRaisePrepInstance;
+            } else if (f != RtFn::Raise && f != RtFn::EhRaise) {
+                continue;
+            }
             // slot.addr + prep + jump：prep 不是终止指令，块以 jump 收尾。
             const VReg sv = static_cast<VReg>(fn.vreg_ty.size());
             fn.vreg_ty.push_back(t_unknown());
@@ -117,7 +142,7 @@ bool exc_direct_function(IRFunction& fn) {
             fn.ensure_inst_id(sa);
             insts.insert(insts.end() - 1, std::move(sa));
             Inst& prep = insts.back();
-            prep.imm = static_cast<int64_t>(RtFn::EhRaisePrep);
+            prep.imm = static_cast<int64_t>(prep_fn);
             prep.args.push_back(sv);
             Inst jump;
             jump.op = IrOp::Jump;

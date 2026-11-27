@@ -405,29 +405,29 @@ _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
 
 /* raise <异常值> / raise ... from ...：与 rt_exc.c 的 pa_raise_value_from 对应。
    pa_exc_from_value 自己会登记异常载荷的 GC 根，这里只搬控制流。 */
+/* 0.683（方案 A 第二步扩到值 raise）：只做构造/设全局/捕获 traceback，不抛。
+ * 构造语义与 rt_exc.c 的 pa_raise_value_from_prep **同一份实现**（直接调用），
+ * 保证「值 raise」与「raise ... from」的 cause 链、traceback 口径逐项一致。 */
+PyAdamasException* pa_eh_raise_prep_value(PyAdamasExcValue* v, PyAdamasExcValue* cause,
+                                         PyAdamasException** out_slot) {
+    PyAdamasException* e = pa_raise_value_from_prep(v, cause);
+    *out_slot = e;
+    return e;
+}
+
 _Noreturn void pa_eh_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
-    /* 这个函数是 _Noreturn，terminated() 认它，于是 lower_try 不会在 except
-     * 体后面补 ExcDone —— 收尾责任全在这里。要做两件事：
-     *
-     *   1. 还掉 except 块入口压的 PyAdamasExcSave（pa_exc_drop_save）；
-     *   2. **释放 current_exc** —— pa_exc_accept_value 把捕获到的异常
-     *      接管成了 current_exc，ExcDone 本来负责 free 它。跳过 ExcDone
-     *      就等于每执行一次 `except ...: raise X from e` 泄漏一整个
-     *      PyAdamasException（结构 32 + type + message，实测 45/47 字节）。
-     *
-     * 注意顺序：先 drop_save（它只还 save 节点、不动 current_exc），
-     * 再 free current_exc。 */
-    pa_exc_drop_save();
-    exc_free(current_exc);
-    current_exc = NULL;
-    exc_free(pending_exc);
-    pending_exc = pa_exc_from_value(v);
-    if (cause) {
-        exc_free(pending_exc->cause);
-        pending_exc->cause = pa_exc_from_value(cause);
-    }
-    pa_trace_capture(pending_exc, PA_CAP_VALUE);
-    pa_eh_throw_or_exit(pending_exc);
+    PyAdamasException* slot = NULL;
+    pa_eh_throw_or_exit(pa_eh_raise_prep_value(v, cause, &slot));
+}
+
+/* 富异常实例（raise <实例>）的零开销 prep：构造语义与 rt_exc.c 的
+ * pa_raise_instance_prep 同一份实现；实例仍挂在 current_exc_inst 上，
+ * 直接跳路径不经过展开包装往返，所以这里保留全局不动。 */
+PyAdamasException* pa_eh_raise_prep_instance(void* inst, PyAdamasStr* type,
+                                            PyAdamasException** out_slot) {
+    PyAdamasException* e = pa_raise_instance_prep(inst, type);
+    *out_slot = e;
+    return e;
 }
 
 /* 裸 raise：与 rt_exc.c 的 pa_reraise 逐句对应。 */

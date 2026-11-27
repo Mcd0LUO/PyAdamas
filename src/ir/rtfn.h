@@ -258,6 +258,8 @@ enum class RtFn : uint16_t {
     // 只有「函数内没有 setjmp 兜底」的零开销 try 体里才会用到它们。
     EhRaise,          // (str* type, str* msg) -> void noreturn
     EhRaisePrep,      // (str* type, str* msg, exc** slot) -> void 不抛，只装异常
+    EhRaisePrepValue, // (excval* v, excval* cause|0, exc** slot) -> void 不抛
+    EhRaisePrepInstance, // (void* inst, str* type, exc** slot) -> void 不抛
     EhRaiseValueFrom, // (excval*, excval*|0) -> void noreturn
     EhReraise,        // () -> void noreturn  裸 raise 的表驱动版
     EhRethrow,        // () -> void noreturn  landing 分发不匹配时重抛同一个异常

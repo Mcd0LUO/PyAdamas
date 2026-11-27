@@ -310,6 +310,103 @@ def p17(n: int) -> int:
     return c
 print("p17", p17(6))
 
+# 18) 值 raise（内置异常）：e.args / str(e) / type(e).__name__ 与老路逐字节一致
+def p18(n: int) -> int:
+    c = 0
+    i = 0
+    while i < n:
+        try:
+            raise ValueError("vx")
+        except ValueError as e:
+            c += 100
+            c += len(e.args)
+            c += len(str(e))
+            if type(e).__name__ == "ValueError":
+                c += 1000
+        i += 1
+    return c
+print("p18", p18(3))
+
+# 19) 跨函数值 raise（内联后直接跳 prep_value）
+def value_throw(x: int) -> int:
+    if x % 2 == 0:
+        raise ValueError("vx")
+    return x
+
+def p19(n: int) -> int:
+    c = 0
+    i = 0
+    while i < n:
+        try:
+            c += value_throw(i)
+        except ValueError as e:
+            c += 10
+            c += len(e.args)
+        i += 1
+    return c
+print("p19", p19(6))
+
+# 20) 富异常实例跨函数 raise（内联后直接跳 prep_instance）
+class Rich(Exception):
+    def __init__(self, m: str) -> None:
+        self.m = m
+
+    def text(self) -> str:
+        return self.m
+
+def rich_throw(x: int) -> int:
+    if x % 2 == 0:
+        raise Rich("rich")
+    return x
+
+def p20(n: int) -> int:
+    c = 0
+    i = 0
+    while i < n:
+        try:
+            c += rich_throw(i)
+        except Rich as e:
+            c += len(e.text())
+        i += 1
+    return c
+print("p20", p20(6))
+
+# 21) raise ... from None（无 cause 链：走 prep_value，语义与老路一致）
+def p21(n: int) -> int:
+    c = 0
+    i = 0
+    while i < n:
+        try:
+            try:
+                raise ValueError("x")
+            except ValueError:
+                raise KeyError("y") from None
+        except KeyError as e:
+            c += 1
+            if e.__cause__ is None:
+                c += 10
+        i += 1
+    return c
+print("p21", p21(3))
+
+# 22) raise ... from e（真实 cause 链：必须走老路，__cause__ 保留）
+def p22(n: int) -> int:
+    c = 0
+    i = 0
+    while i < n:
+        try:
+            try:
+                raise ValueError("src")
+            except ValueError as e:
+                raise KeyError("wrap") from e
+        except KeyError as e2:
+            c += 1
+            if e2.__cause__ is not None:
+                c += 10
+        i += 1
+    return c
+print("p22", p22(3))
+
 # --- expect ---
 # p1 5
 # p2 525
@@ -328,3 +425,8 @@ print("p17", p17(6))
 # p15 4
 # p16 40
 # p17 12
+# p18 3309
+# p19 42
+# p20 21
+# p21 33
+# p22 33
