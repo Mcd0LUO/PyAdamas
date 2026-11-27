@@ -6,6 +6,60 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.723] - 2026-11-27
+
+> **按 1+2+3 逐项验证，结果三项都受同一类架构事实阻塞。**（本轮只做验证，未改代码）
+>
+> ## 1. `Symbol::ty` / `read_ty` 分离 —— 前提被数据否定，不做
+>
+> 用反汇编数未知元素的实际影响：
+>
+>| 程序 | unknown 元素 append | 总 append | 比例 |
+>|---|---|---|---|
+>| interp2 | 1 | 49 | 2% |
+>| container | **14** | 18 | **78%** |
+>| gcbench | 1 | 11 | 9% |
+>| oopbench | 0 | 6 | 0% |
+>
+> interp2 那 21 处 local_unknown 只带来 **1/49** 的未知元素 append —— 
+>它们大多是「在 if 分支内定义并在同一分支内使用」，本来就不影响生成代码。
+>**所以 read_ty 分离修的是非问题**（0.719-0.722 的投入应该到此为止）。
+>
+> ## 2. unknown 收敛的真正目标：container 的 14/18
+>
+> 追到源头：container 基准本身不含这些名字，它们来自 **stdlib/heapq.py**：
+>
+>```python
+>def nlargest(n: int, iterable: list, key: object = None) -> list:
+>    ks: list = []
+>    for x in iterable:          # iterable 是裸 list -> x unknown
+>        ks.append(key(x))       # -> ks 元素 unknown（container_elem）
+>```
+>
+>`nlargest`/`nsmallest`/`merge` 都是**泛型函数**（元素类型由调用方决定），
+>而我们现在没有类型变量（grep TypeVar：零），`ret_specialized` 只服务硬编码的 choice。
+>
+>**关键阻塞是分别编译**：heapq.py 单独编译时 `iterable` 的元素类型未知；
+>调用点（main.py）填的是接口副本的洞，**改不到 heapq 自己已编译的函数体**。
+>所以这不是注解问题、也不是标记问题，是「泛型 + 分别编译」的组合缺口。
+>
+>## 3. pacer —— 与并发 GC 的 24% 开销无因果
+>
+>pacer 控制的是「何时开始 GC / 标记多快推进」，而我们测到的 24% 来自保守扫描与
+>两核冷访问（0.709/0.710 已归因）。调 pacer 不改变这些 cache miss，收益预期为零。
+>而且并发模式本身是 opt-in、默认关闭，优先级最低。
+>
+>## 结论：下一轮该做的不是这三项
+>
+>真正能落地且收益明确的只有一条：**让泛型函数在分别编译下拿到实参类型**。
+>最小可行形态：
+>1. 对「形参是带洞容器」的函数，在**本模块内**的调用点把洞填上后触发 sig_dirty 重查
+>   （机制已存在，:src/typecheck/call.cpp:229 的 fill_holes_recursive + worklist）；
+>2. 跨模块沿用同一套：接口里携带「形参洞是否已被调用点填充」的标记，
+>   编译顺序上双方都能收敛；
+>3. 验收：container 的 unknown 元素 append 从 14 降到个位数。
+>
+>这条链路需要动 kModuleAbiVersion（接口编码变化），属于一个独立版本的工作量。
 ## [0.722] - 2026-11-27
 
 > **定值分析的 if 接线：三次尝试、三次不同的结果，全部回退。**（结论已明确）
