@@ -6,6 +6,54 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.700] - 2026-11-27
+
+> feat(gc)：**B 路线阶段 1 通过验收** —— Go 式混合写屏障下的增量标记，全量套件 + 全量 ASan 全绿。
+>
+> `docs/concurrent-cycle-gc-design.md` 记录过作者的一次退守：把标记也分片（像 Go `gcDrain`）后告失败，
+>理由是「RC 的释放时机不受 GC 控制」——13_gc 撞已释放内存（UAF）、174 漏 21KB。设计稿把这件事拆成
+>「先补 Yuasa 删除屏障 + M=1 增量标记，不开后台线程」的阶段 1。
+>
+> **今天实测：阶段 1 的闸门全部通过。**
+>
+> ```
+> PYADAMAS_GC_BARRIER=1 PYADAMAS_GC_INCR_MARK=1 bash tests/run_tests.sh
+>   → 602 ran ok / 0 失败
+> + PYADAMAS_TEST_ASAN=1 ASAN_OPTIONS=detect_leaks=1
+>   → 602 ran ok / 0 AddressSanitizer / 0 LeakSanitizer
+>
+> 关键的两个退守点用例单独验证：`13_gc.py`、`174_gc_construct_roots.py` 在增量标记下输出与常规模式逐字节一致。
+>```
+>
+> ## 这次为什么能过（和之前不同的地方）
+>
+> 1. **Yuasa 删除屏障**（`gc_phase_dec` 的 `GC_PHASE_INCR_MARK` 分支）：标记期 RC 归零对象不再立即 free，
+>    而是标灰入队 + 置 DEFER + 保活到收尾 —— 即「所有释放经过 GC 灰对象协议」。这是作者点名缺的那一半。
+> 2. **插入屏障的覆盖缺口补上了**（0.698/0.699）：`list.append` 内联路径、`list.insert`、
+>    `deque.append/appendleft` 此前都没有 `pa_gc_insert_barrier`。这些缺口在开关关闭时完全无害，
+>    **一旦开增量标记就是静默 UAF** —— 正好会命中本轮要开的路径。
+>
+> ## 诚实的代价（这是它继续默认关闭的原因）
+>
+> | gcbench 子项 | 关闭 | 开启 | 变化 |
+> |---|---|---|---|
+> | churn 1M | 56 ms | 74 ms | **+32%** |
+> | cycles 200K | 64 ms | 97 ms | **+52%** |
+> | after-drop 500K | 25 ms | 26 ms | +4% |
+>
+> 与设计稿 §4 的预判一致：**标记期 mutator 变慢，净收益取决于「停顿减少」值不值这个吞吐代价**。
+>纯吞吐负载不划算 → 保持 opt-in，默认仍是同步标记。
+>
+> ## 下一步（对照 C#/Go/LLVM 三条不同路线）
+>
+> | 来源 | 机制 | 用在 pyadamas 的哪一步 |
+> |---|---|---|
+> | **Go** | 混合写屏障 + 标记 assist + pacer | 已就位，阶段 1 验证通过；阶段 2 是后台标记线程（设计稿 §3.2） |
+> | **C#** | 卡片表（card table）：写屏障只置一位，而不是逐对象标灰 | **降低这 +32%/+52% 的关键**——屏障从「查对象 + 标灰入队」降到「一次 byte store」，标记器改扫脏卡 |
+> | **LLVM/Swift ARC** | retain/release 消除（`objc_retainAutoreleasedReturnValue`、guaranteed 参数） | 不减少屏障次数，而是**减少 RC 操作本身**：`tag = self.tag` 这类「字段读进只读局部」的 +1/-1 配对仍未被借出消除（interp2 上约 25%） |
+>
+> 结论：**继续推进 B 路线的顺序应该是「C# 卡片表」优先于「Go 后台线程」**——
+>先把屏障成本压下来，后台线程的收益才有意义；否则并发化了也是拿吞吐换停顿。
 ## [0.699] - 2026-11-27
 
 > fix(runtime)：**补齐容器写入的插入屏障**（增量标记期的静默 UAF 类缺口）。
