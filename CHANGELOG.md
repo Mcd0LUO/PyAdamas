@@ -6,6 +6,39 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.687] - 2026-11-27
+
+> refactor(runtime)：**OBJ_GEN 拆出 + 生成器 release 侧表**（RC 头压缩阶段① b1）。
+>
+> ## 关键结构：连续区间约定（b2 防漏项的基础）
+>
+> `PYADAMAS_RC_OBJ_GEN = 13`（末尾追加）+ `PYADAMAS_RC_OBJ_FIRST/LAST` + helper
+>`pa_rc_kind_is_obj_payload(k)`（`k==OBJ || FIRST<=k<=LAST`）。**b2 每拆一类只 +1 `LAST`**——
+>两处集合式探针（`gc_conservative_count`、`gc_free_body` 的 `free_attached_exception`）从此走 helper，
+>不再靠「记得写全」，漏项不会改变 GC 记账。
+>
+> ## GEN 侧表
+>
+> 静态 `gen_rel_tbl[4096]`，键 = 生成器函数的 `resume` 地址（**函数个数，不是实例个数**），
+>开放寻址线性探测，`pa_gen_new` 幂等登记，满则 `panic_c`，**无 malloc**。
+>`PYADAMAS_GEN_TBL_STATS=1` 打印登记条数。
+>
+> 实测登记数：coroutine 基准 **entries=2 / cap 4096**；tests/run 生成器用例 1–17 条——4096 有 200× 余量。
+>
+> ## 两个 b2 前置问题的结论
+>
+> 1. `gc_conservative_count`（`rt_core.c:1824/1854`）→ 已改走区间 helper ✓
+> 2. `free_attached_exception`（`rt_async.c:81`）**不是普通 no-op**，是 magic-guarded 三分支
+>    （EXCVAL / AWAIT / **GEN 帧**的 `p[8]` 挂起异常）。b1 起 GEN 仍经区间 helper 被调用 → **集合等价**；
+>    b2 继续用 helper 即可，**不需要逐类精确枚举**（反过来改精确枚举才要逐类核 magic，风险更高）。
+>
+> ## 验收
+>
+> coroutine instructions **−0.88%**（844.4M → 836.9M）、RSS 不变、输出逐字节一致；
+>套件 **602** + 2 strict、difftest **545-0**、opt_levels **40/40**、**全量 ASan 602 rc=0 无报错**、
+>`checkall --full` 全 PASS。
+>
+> 剩余 b2：**24 个 OBJ 子类型 / 46 处**机械替换（`class_destroy`/`chan_destroy` 需去掉 `static` 导出）。
 ## [0.686] - 2026-11-27
 
 > refactor(runtime)：**释放路径的 dtor/release 表化，第一步**（RC 头 64→32 的准备，纯运行期、零 codegen 改动）。
