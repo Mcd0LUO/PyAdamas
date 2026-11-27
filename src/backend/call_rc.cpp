@@ -24,20 +24,20 @@ void AsmGen::gen_rc_dec(const Inst& in, const std::string& src,
     emit_jmp(MOp::kJe, slow);            // p == NULL
     line("cmpl $0, pa_gc_phase_fast(%rip)");
     emit_jmp(MOp::kJne, slow);           // 收集期只登记边，不能重入释放
-    emit2(MOp::kMovq, op_mem(p, -48), kRax);
+    emit2(MOp::kMovl, op_mem(p, -16), kEax);
     TypePtr t = ty_of(in.args[0]);
     const bool check_first = t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
     if (check_first) {
-        emit_imm(MOp::kMovabsq, INT64_MIN, target_abi().scratch_len);
-        emit2(MOp::kCmpq, target_abi().scratch_len, kRax);
+        /* 0.695：rc 是 u32，永生哨兵是 0x80000000（32 位比较）。 */
+        line("cmpl $0x80000000, %eax");
         emit_jmp(MOp::kJe, fast);
-        emit_imm(MOp::kCmpq, 1, kRax);
+        line("cmpl $1, %eax");
         emit_jmp(MOp::kJle, slow);
     }
     // sub 同时计算新值和旧 rc 与 1 的有符号比较。仅 rc > 1 时写回。
-    emit_imm(MOp::kSubq, 1, kRax);
+    line("subl $1, %eax");
     if (!check_first) emit_jmp(MOp::kJle, at_most_one);
-    emit2(MOp::kMovq, kRax, op_mem(p, -48));
+    emit2(MOp::kMovl, kEax, op_mem(p, -16));
     emit_jmp(MOp::kJmp, fast);
     if (!check_first) {
         label(at_most_one);
@@ -116,9 +116,7 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
     };
     const auto skip_immortal = [&](const std::string& done) {
-        const char* scratch = target_abi().scratch_len;
-        emit_imm_hex(MOp::kMovabsq, 0x8000000000000000ULL, scratch);
-        emit2(MOp::kCmpq, scratch, kRax);
+        line("cmpl $0x80000000, %eax");  /* 0.695: rc 是 u32 */
         emit_jmp(MOp::kJe, done);
     };
     if (fn == RtFn::RcInc && in.args.size() == 1) {
@@ -129,19 +127,21 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         const std::string done = fresh_label("incdone");
         emit2(MOp::kTestq, p, p);
         emit_jmp(MOp::kJe, slow);            // p == NULL
-        emit2(MOp::kMovq, op_mem(p, -48), kRax); // h->rc：h = p - 64，rc 在 +16
+        emit2(MOp::kMovl, op_mem(p, -16), kEax); // h->rc：h = p - 32，rc 在 +16
         const bool check_first = immortal_first();
+        /* 0.695：rc 是 u32，0x80000000 是永生哨兵（不再是 64 位负数），
+           所以两条路径都必须显式比较它，不能靠符号位。 */
         if (check_first) skip_immortal(done);
-        emit2(MOp::kTestq, kRax, kRax);
+        else { line("cmpl $0x80000000, %eax"); emit_jmp(MOp::kJe, done); }
+        line("testl %eax, %eax");
         emit_jmp(MOp::kJle, check_first ? slow : nonpos);
-        emit_imm(MOp::kAddq, 1, kRax);
-        emit2(MOp::kMovq, kRax, op_mem(p, -48));
+        line("addl $1, %eax");
+        emit2(MOp::kMovl, kEax, op_mem(p, -16));
         emit_jmp(MOp::kJmp, done);
         if (!check_first) {
             label(nonpos);
-            // 只有 INT64_MIN（永生哨兵）取负会溢出；其余非法计数由慢路径报错。
-            emit1(MOp::kNegq, kRax);
-            emit_jmp("jo", done);  // 同上：列 0 Raw 兜底
+            /* 0.695：u32 的 rc 只有非法值（>2^31 或 0）能到这里，一律走慢路径报错。 */
+            emit_jmp(MOp::kJmp, slow);
         }
         label(slow);
         spill_fp_slots();
@@ -165,9 +165,8 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         const std::string done = fresh_label("tmpdone");
         line("testq %rdi, %rdi");
         emit_jmp("je", done);
-        line("movq -48(%rdi), %rax");
-        line("movabsq $0x8000000000000000, %rcx");
-        line("cmpq %rcx, %rax");
+        line("movl -16(%rdi), %eax");
+        line("cmpl $0x80000000, %eax");
         emit_jmp("je", done);            // 永生：不入栈
         line("cmpl $0, pa_rc_stats_on_fast(%rip)");
         emit_jmp("jne", slow);
@@ -196,9 +195,8 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         const std::string done = fresh_label("tkdone");
         line("testq %rdi, %rdi");
         emit_jmp("je", done);
-        line("movq -48(%rdi), %rax");
-        line("movabsq $0x8000000000000000, %rcx");
-        line("cmpq %rcx, %rax");
+        line("movl -16(%rdi), %eax");
+        line("cmpl $0x80000000, %eax");
         emit_jmp("je", done);            // 永生：从不入栈，无可取（运行时同判）
         line("cmpl $0, pa_rc_stats_on_fast(%rip)");
         emit_jmp("jne", slow);

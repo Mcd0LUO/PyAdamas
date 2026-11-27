@@ -157,9 +157,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 // 隐藏 RC 头（64 字节）：next/prev/rc/dtor/release/size/kind/marked。
                 // 字面量 rc = INT64_MIN 永生；启动时只登记进 RC 索引供
                 // unknown 类型检查使用，不进 GC 堆链。
-                emit_.out += "\t.quad 0\n\t.quad 0\n";
-                emit_.out += "\t.quad 0x8000000000000000\n";
-                emit_.out += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
+                emit_.out += "\t.quad 0\n\t.quad 0\n";        // next/prev
+                emit_.out += "\t.long 0x80000000\n\t.long 0\n";  // rc=永生, size=0
+                emit_.out += "\t.long 0\n\t.long 0\n";        // kind=STR, young=0
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lstr", static_cast<int64_t>(i)));
                 // +0 pub：str 是码点数、bytes 是字节数；编译期就算好（RELRO 只读，
                 // 运行期不能懒缓存）。+8 字节数，+16 hash（SSO 字符区），
@@ -196,11 +196,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 int64_t nd = big_literal_limbs(m.bigs[i], limbs);
                 emit_.out += "\t.align 8\n";
                 emit_.out += "\t.quad 0\n\t.quad 0\n";               // next/prev
-                emit_.out += "\t.quad 0x8000000000000000\n";           // rc 永生
-                emit_.out += "\t.quad 0\n\t.quad 0\n";               // dtor/release
-                quad_dec(emit_.out, emit_.line_buf, 8 + static_cast<int64_t>(limbs.size()) * 4);
-                quad_dec(emit_.out, emit_.line_buf, 9);                       // kind BIGINT
-                emit_.out += "\t.quad 0\n";                            // marked
+                emit_.out += "\t.long 0x80000000\n";                   // rc 永生
+                emit_.out += std::format("\t.long {}\n", 32 + static_cast<int64_t>(limbs.size()) * 4);  // size
+                emit_.out += "\t.long 9\n\t.long 0\n";               // kind BIGINT, young=0
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lbig", static_cast<int64_t>(i)));
                 quad_dec(emit_.out, emit_.line_buf, nd);
                 for (uint32_t l : limbs)
@@ -403,9 +401,9 @@ std::string AsmGen::gen(const IRModule& m) {
             section_relro();
             for (size_t i = 0; i < m.funcs.size(); ++i) {
                 emit_.out += "\t.align 8\n";
-                emit_.out += "\t.quad 0\n\t.quad 0\n";
-                emit_.out += "\t.quad 0x8000000000000000\n";
-                emit_.out += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
+                emit_.out += "\t.quad 0\n\t.quad 0\n";        // next/prev
+                emit_.out += "\t.long 0x80000000\n\t.long 0\n";  // rc=永生, size=0
+                emit_.out += "\t.long 0\n\t.long 0\n";        // kind, young=0
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lclos", static_cast<int64_t>(i)));
                 // 间接调用一律走统一约定：+0 指向 shim（签名含浮点的函数），
                 // 否则就是函数本体（统一约定与它的 ABI 恰好一致）。

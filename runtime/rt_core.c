@@ -7,7 +7,7 @@
    thunk 让查表变成无分支的「mask + 表基址 + load」，释放路径少几条比较。 */
 void pa_rc_dtor_indirect(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
-    if (h->dtor) h->dtor(p);
+    (void)h;  /* 0.695: dtor 已在 kind 表 / 类元数据里 */
 }
 /* 0.694：实例的 dtor/gcrel 存在类元数据（payload[0] -> vt -> meta[8]/[9]），
    RC 头里不再存这两个指针（为 32 字节头做准备）。 */
@@ -25,7 +25,7 @@ void pa_rc_release_instance(void* p) {
 }
 void pa_rc_release_indirect(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
-    if (h->release) h->release(p);
+    (void)h;  /* 0.695: release 已在 kind 表 / 类元数据里 */
 }
 const PaRcOps pa_rc_ops[64] = {
     /* STR      */ {NULL, NULL},
@@ -220,8 +220,9 @@ static void pa_dbg_free(PyAdamasRc* h) {
         int64_t exp_size = 0, exp_kind = 0;
         memcpy(&exp_size, c + PA_DBG_CANARY, sizeof exp_size);
         memcpy(&exp_kind, c + PA_DBG_CANARY + sizeof exp_size, sizeof exp_kind);
-        if (exp_size != h->size || exp_kind != h->kind || h->rc < 0 ||
-            h->rc > (int64_t)1 << 40) {
+        /* 0.695：rc 现在是 u32，不再有负值；上界检查改成 u32 的哨兵值。 */
+        if (exp_size != (int64_t)h->size || exp_kind != (int64_t)h->kind ||
+            h->rc == PYADAMAS_RC_IMMORTAL) {
             char msg[320];
             snprintf(msg, sizeof msg,
                      "canary: 头字被踩：kind=%lld/%lld size=%lld/%lld rc=%lld",
@@ -392,18 +393,20 @@ static void young_add(PyAdamasRc* h) {
         young_buf = ns;
         young_cap = ncap;
     }
-    h->marked = ((int64_t)young_len << 8) | PYADAMAS_RC_YOUNG;
+    /* 0.695：young 代下标独立成 u32 字段（原先挤在 marked 高位）。 */
+    h->young_idx = (uint32_t)young_len;
+    h->marked = (uint8_t)PYADAMAS_RC_YOUNG;
     young_buf[young_len++] = h;
 }
 
 static void young_del(PyAdamasRc* h) {
-    size_t i = (size_t)(h->marked >> 8);
+    size_t i = (size_t)h->young_idx;
     if (i >= young_len || young_buf[i] != h) return;
     size_t last = --young_len;
     if (i != last) {
         PyAdamasRc* m = young_buf[last];
         young_buf[i] = m;
-        m->marked = ((int64_t)i << 8) | (m->marked & 0xFF);
+        m->young_idx = (uint32_t)i;
     }
     h->marked = 0;
 }
@@ -1991,10 +1994,9 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     if (!h) {
         h = (PyAdamasRc*)PA_DBG_MALLOC(alloc_size);
         if (!h) panic_c("out of memory");
-        h->size = alloc_size;
-        h->dtor = dtor;
-        h->release = release;
-        h->kind = kind;
+        h->size = (uint32_t)alloc_size;
+        (void)dtor; (void)release;   /* 0.695：dtor/release 已移出 RC 头 */
+        h->kind = (uint8_t)kind;
         /* 调试版：mode 2 在 canary 区尾部记录 size/kind 期望值。
            默认 rt.o 里这个宏展开成空操作。 */
         PA_DBG_HEAD_INIT(h);
@@ -2682,11 +2684,9 @@ static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n, int6
     e->h.next = NULL;
     e->h.prev = NULL;
     e->h.rc = PYADAMAS_RC_IMMORTAL;
-    e->h.dtor = NULL;
-    e->h.release = NULL;
-    e->h.size = (int64_t)sizeof(PyAdamasStr);
-    e->h.kind = PYADAMAS_RC_STR;
-    e->h.marked = PYADAMAS_RC_UNTRACKED;
+    e->h.size = (uint32_t)sizeof(PyAdamasStr);
+    e->h.kind = (uint8_t)PYADAMAS_RC_STR;
+    e->h.marked = (uint8_t)PYADAMAS_RC_UNTRACKED;
     e->s.len = n;
     e->s.pub = pub;
     e->s.hash = 0;

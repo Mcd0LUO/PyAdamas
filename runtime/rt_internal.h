@@ -451,15 +451,18 @@ enum {
 #define PYADAMAS_RC_OBJ_FIRST ((int64_t)PYADAMAS_RC_OBJ_GEN)
 #define PYADAMAS_RC_OBJ_LAST  ((int64_t)PYADAMAS_RC_OBJ_SEM)
 
+/* 0.695：RC 头压到 **32 字节**。dtor/release 移到类元数据（实例）或
+   kind 表（universal kind），size/rc 压成 u32，marked 拆成 flags 字节 +
+   独立的 young 代下标（u32，4.29G 上限，远超任何代长度）。 */
 typedef struct PyAdamasRc {
-    struct PyAdamasRc* next;
-    struct PyAdamasRc* prev;
-    int64_t rc;
-    void (*dtor)(void*);
-    void (*release)(void*);
-    int64_t size;
-    int64_t kind;
-    int64_t marked;
+    struct PyAdamasRc* next;   /* +0  堆链 */
+    struct PyAdamasRc* prev;   /* +8 */
+    uint32_t rc;               /* +16 引用计数（0x80000000 = 永生） */
+    uint32_t size;             /* +20 分配字节数（>4GiB 显式 panic） */
+    uint8_t kind;              /* +24 */
+    uint8_t marked;            /* +25 GC 标志位 */
+    uint16_t pad;              /* +26 */
+    uint32_t young_idx;        /* +28 young 代下标 */
 } PyAdamasRc;
 
 /* 阶段①（A1-a）：11 个 uniform kind 的 (dtor, release) 常量表。
@@ -489,12 +492,12 @@ static inline void (*pa_rc_release_of(const PyAdamasRc* h))(void*) {
     return pa_rc_ops[(uint64_t)h->kind & 63].release;
 }
 
-#define PYADAMAS_RC_IMMORTAL INT64_MIN
+#define PYADAMAS_RC_IMMORTAL ((uint32_t)0x80000000u)
 #define PYADAMAS_RC_HDR ((int64_t)sizeof(PyAdamasRc))
 /* 内联池头/计数：导出给生成代码的元组分配快路径（0.280）。 */
 extern PyAdamasRc* pa_list_inline_pool;
 extern int pa_list_inline_pool_count;
-_Static_assert(sizeof(PyAdamasRc) == 64, "codegen literal headers must match PyAdamasRc size");
+_Static_assert(sizeof(PyAdamasRc) == 32, "codegen literal headers must match PyAdamasRc size");
 
 #define PYADAMAS_GC_THRESHOLD (2 * 1024 * 1024)
 

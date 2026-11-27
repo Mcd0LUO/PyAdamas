@@ -6,6 +6,55 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.695] - 2026-11-27
+
+> feat(runtime)：**RC 头压到 32 字节** —— gcbench RSS **41.7 MB → 34.8 MB（−16.6%）**，性能零退化。
+>
+> 这是从 64 字节（`next/prev/rc/dtor/release/size/kind/marked` 各 8 字节）压缩的最后一步。
+>
+> ## 新布局（32 字节）
+>
+> | 偏移 | 字段 | 说明 |
+> |---|---|---|
+> | +0 / +8 | `next` / `prev` | 堆链，`rc_unlink` 的 O(1) 摘除靠它 |
+> | +16 | `rc:u32` | 永生哨兵 `0x80000000`（原 `INT64_MIN`） |
+> | +20 | `size:u32` | 分配字节数（>4GiB 显式 panic） |
+> | +24 | `kind:u8` | 13 + 25 个精确 kind |
+> | +25 | `marked:u8` | 6 个 GC 标志位 |
+> | +26 | `pad:u16` | |
+> | +28 | `young_idx:u32` | young 代下标（原挤在 `marked` 高位，压 u16 会静默 UAF） |
+>
+> ## 关键改动
+>
+> 1. **实例 dtor/gcrel 移入类元数据**（0.694 已完成）：`meta[8]/[9]`，`gen_obj_new` 不再传指针；
+> 2. **3 处字面量预置头 8 quad → 4 quad**（`rc/size` 用 `.long`）；
+> 3. **`gen_tuple_inline` 的硬编码偏移**：payload 64→32、data 112→80、elem_kind 88→56、
+>    heap_bits 96→64、bits_cap 104→72、inline data 112→80；
+> 4. **`call_rc.cpp` 的内联 inc/dec/temp 快路径**：`-48`→`-16`、`movq`→`movl`、
+>    永生哨兵从 `movabsq $0x8000…` 的 64 位比较改成 `cmpl $0x80000000`——
+>    **u32 下 0x80000000 是正数，原来靠「负号 + neg/jo」的判据全部失效**，两条路径都改成显式比较；
+> 5. `young_add/young_del` 改用独立 `young_idx`；`static_str_init` / canary 检查跟随。
+>
+> ## 实测
+>
+> | 指标 | 修前 | 修后 |
+> |---|---|---|
+> | gcbench RSS（3 次） | 41,736 / 41,692 / 41,752 KB | **34,780 / 34,768 / 35,092 KB** |
+> | churn 1M | 71–72 ms | 59–75 ms（同量级） |
+> | 12 基准 instructions | — | **warn=0 fail=0**（wordfreq −1.37%，matmul +1.85%，其余 ±0.03%） |
+>
+> **RSS −16.6%**，超过设计的 −13.4% 预期（32 字节头还顺带减少了 glibc chunk 的对齐浪费）。
+>
+> ## 验收
+>
+> 套件 **602**、全量 difftest **545-0**、**全量 ASan 602 rc=0（0 处 sanitizer/leak 报错）**、
+>perf-baseline **12 项 warn=0 fail=0**、check_size。
+>
+> ## 记忆点（这次为什么能找到）
+>
+> 前七轮失败是因为**只 grep 一种写法**：`vt - 8`。真正的漏网之鱼写成 `vt[-3]`（反向下标），
+>以及 `-48` / `56(%%rax)` 这类**直接写进汇编的硬编码偏移**——它们不在任何「元数据偏移」的 grep 模式里。
+>教训：**改布局时不能靠 grep 模式，要读文件里每一处「输出 raw offset」的代码**。
 ## [0.694] - 2026-11-27
 
 > docs：**32 字节 RC 头的实施进度与遗留**（未完成，改动以补丁形式保存）。

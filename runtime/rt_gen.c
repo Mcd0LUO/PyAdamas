@@ -99,8 +99,8 @@ void* pa_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind)
    幂等。异常从 resume 逃出时用它，避免槽引用一直挂到对象销毁。 */
 void pa_gen_release_slots(void* g) {
     if (!g) return;
-    PyAdamasRc* h = (PyAdamasRc*)g - 1;
-    if (h->release) h->release(g);
+    /* 0.695：release 已由 resume 侧表提供（b1），RC 头不再存指针。 */
+    pa_gen_release_indirect(g);
 }
 
 int64_t gen_run(void* g, int64_t sent, int* done) {

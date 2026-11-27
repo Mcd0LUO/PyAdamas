@@ -26,34 +26,37 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         line("movq %r10, pa_list_inline_pool(%rip)");
         line("decl pa_list_inline_pool_count(%rip)");
         // RC 头：next(+0)/prev(+8)/rc(+16)/marked(+56)=UNTRACKED(2)
+        // 0.695：RC 头压到 32 字节 —— marked 在 +25，payload 从 +32 起。
         line("movq $0, (%rax)");
         line("movq $0, 8(%rax)");
-        line("movq $1, 16(%rax)");
-        line("movq $2, 56(%rax)");
+        line("movl $1, 16(%rax)");          // rc = 1
+        line("movl $176, 20(%rax)");        // size（8 槽内联块）
+        line("movb $1, 24(%rax)");          // kind = LIST
+        line("movb $2, 25(%rax)");          // marked = UNTRACKED
         // payload(+64..)：len/cap=8/data=h+112/elem_kind=0/
         // heap_bits=0/bits_cap=0
-        emit_imm(MOp::kMovq, static_cast<int64_t>(n), op_mem(kRax, 64));
-        line("movq $8, 72(%rax)");
-        line("leaq 112(%rax), %r10");
-        line("movq %r10, 80(%rax)");
-        line("movq $0, 88(%rax)");
-        line("movq $0, 96(%rax)");
-        line("movq $0, 104(%rax)");
+        emit_imm(MOp::kMovq, static_cast<int64_t>(n), op_mem(kRax, 32));
+        line("movq $8, 40(%rax)");
+        line("leaq 80(%rax), %r10");
+        line("movq %r10, 48(%rax)");   // data = payload+16
+        line("movq $0, 56(%rax)");     // elem_kind
+        line("movq $0, 64(%rax)");     // heap_bits
+        line("movq $0, 72(%rax)");     // bits_cap
         for (size_t ai = 0; ai < n; ++ai) {
             const MReg areg = mreg_from_name(arg_reg_i(2 + ai));
             if (areg != kMRegNone) {
-                emit2(MOp::kMovq, areg, op_mem(kRax, 112 + 8 * ai));
+                emit2(MOp::kMovq, areg, op_mem(kRax, 80 + 8 * ai));
             } else {
                 std::string aop = arg_reg_i(2 + ai);
                 emit2("movq", aop, "%r10");
-                emit2(MOp::kMovq, kR10, op_mem(kRax, 112 + 8 * ai));
+                emit2(MOp::kMovq, kR10, op_mem(kRax, 80 + 8 * ai));
             }
         }
         // 返回值是 payload（h+64），不是 RC 头 —— 运行时
         // rc_alloc_core 返回 h+1，内联路径必须一致。漏了这
         // 步会把头指针当对象值存进槽，dec 时 p-1 落到前一个
         // 对象内部，池链被Interior指针污染（0.280 调试实录）。
-        line("leaq 64(%rax), %rax");
+        line("leaq 32(%rax), %rax");
         emit_jmp("jmp", done);
         label(slow);
         emit_imm(MOp::kMovq, static_cast<int64_t>(n), arg_reg_i(0));
