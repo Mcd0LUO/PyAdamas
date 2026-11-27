@@ -141,3 +141,90 @@ B 调用点传播：记录「形参 unknown 的函数」及其调用点；参数
 基线：local_unknown 21（tokenize 6、parser 7、ev 6）。
 目标：先降到 15 以下；同时确认 container_elem 不上升（上升说明类型变宽，是反向效果）。
 回归：套件 602、difftest 545-0 全绿；任何 pass 数下降立即回退。
+
+## 11. 更正：interp2 的 unknown 不是「形参无注解」
+
+读源码发现 §3 的根因假设是错的：
+
+    def tokenize(src: str, sym: Sym) -> list[Tok]:   # src 有注解！
+        out: list[Tok] = []
+        i = 0            # int
+        n = len(src)
+        while i < n:
+            if at_start:
+                spaces = 0      # int，却报 unknown
+                j = i           # int，却报 unknown
+                kw = False      # bool，却报 unknown
+
+也就是说：**21 处里至少 lexer 这 6 处是简单标量局部变量**（int/bool），
+既不是形参无注解，也不是 str 下标派生。§3 的假设不成立，§6-§10 的方案不针对这个现象。
+
+## 12. 下一步的排查方向（按可能性）
+
+1. **while 循环体里的变量 join**：`spaces`/`j`/`kw` 都在 `while i < n:` 的循环体内赋值，
+   若循环回边的 join 把 int 与 unknown 合并 → unknown。可先写一个最小复现：
+
+       def f(n: int) -> int:
+           i = 0
+           while i < n:
+               j = i
+               j = j + 1
+               i = i + 1
+           return i
+
+   用 PYADAMAS_TYPE_STATS 看 j 是否报 local_unknown。
+
+2. **重查轮（sig_dirty / result-hint）后作用域被重建**：stats 在 funcdef_impl 末尾统计，
+   若某一轮重查时 `cur_->vars` 是新的、类型还没填回，统计就会看到 unknown。
+   验证：在 funcdef_impl 统计处打印 `f.name` 与实际轮次。
+
+3. **`src[j]`/`len(src)` 的返回类型**：如果 str 下标返回 unknown，会污染 `c`/`word`，
+   但不会解释 `spaces = 0`。优先级低于 1、2。
+
+排查顺序：先 1（最小复现 5 分钟），能复现就修循环 join；不能复现再查 2。
+
+## 13. 最小复现结果：两条假设都被排除
+
+用 PYADAMAS_TYPE_STATS 跑两个最小复现（build 路径）：
+
+复现 A（while 循环体内赋值 int/bool）：
+
+    def f(n: int) -> int:
+        i = 0
+        while i < n:
+            j = i; j = j + 1; k = True; k = False; i = i + 1
+        return i
+
+结果：**零 type-stats 输出**（没有 local_unknown）→ 循环回边的 join 是正常的。
+
+复现 B（str 下标/切片/与 str 比较）：
+
+    def g(src: str) -> int:
+        while i < n:
+            c = src[i]; j = i + 1; w = src[i:j]
+            if c == "x": total += 1
+
+结果：**零 type-stats**，且程序输出正确（1）→ str 下标/切片类型推断是正常的。
+
+## 14. 于是 interp2 那 21 处的可能解释（待定）
+
+1. **`KW` 这类模块级全局未知**：lexer.py 里 `for k in KW` 的 `KW` 若推不出来，
+   `k` 就 unknown；相邻变量可能被连带（word/sid 依赖 src 的反而不该 unknown）。
+2. **统计是「重查轮」的中间态**：`funcdef_impl` 会被 sig_dirty 工作列多次调用，
+   若 stats 每轮都打印，第一轮的 unknown 会被计入，而最终类型其实已经收敛。
+   → 这会**让「21 处 unknown」这个数字本身失真**。
+
+**必须先分辨这两者再动手**：如果是 2，那当前没有可优化的未知；
+如果是 1，则修法是给模块级全局补类型（不是形参传播）。
+
+分辨办法（下一轮第一件事）：
+- 在 func.cpp 的统计处加上「第几轮」和「是否最后一轮」的标记（临时打印）；
+- 或直接对比：把 interp2 编出的 asm 里 lexer 的 append 调用检查一下 heap 参数，
+  heap=2（unknown 元素）才说明真的退化了。
+
+## 15. 方法教训
+
+§3 的「形参无注解」和 §6-§10 的参数传播方案，都是**没看源码就下的结论**；
+看了 lexer.py 第一行（src: str）就推翻了。
+**这条路今晚重复了三次（0.706 原子操作、0.709 false sharing、0.711 pad 下标）。**
+规矩应该是：先看目标源码 → 用最小复现证明成因 → 再设计改动。
