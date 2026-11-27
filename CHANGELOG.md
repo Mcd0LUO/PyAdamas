@@ -6,6 +6,47 @@
 
 <!-- 0.559–0.632 的条目在 2026-11-26 的一次文件回退中丢失，未恢复；逐条记录见 `git log --oneline 0.559..0.632` 与 `docs/refactor-plan.md`。以下从 0.633 起重续。 -->
 
+## [0.685] - 2026-11-27
+
+> fix(driver)：**磁盘缓存加上界淘汰**（此前只有「加」没有「减」，失效条目永久堆积）。
+>
+> 现状证据：`build/dev/modcache` 28 MB / 223 条；`grep -rn 'remove_all|prune|evict' src/driver/` **零命中**，
+>代码里只有一句「旧目录留给后续 GC/手动清理」的注释——GC 从未实现。
+>
+> ## 实现
+>
+> - 两个持久化入口都覆盖：模块缓存（`build_cache.cpp`，条目目录 = mod.s/mod.o/mod.pya/manifest）与
+>   整程序缓存（`progcache.cpp`）；
+> - 默认上限 **512 条 / 512 MiB**，`PYADAMAS_CACHE_MAX_ENTRIES` / `PYADAMAS_CACHE_MAX_MB` 覆盖，0 = 该项不限；
+> - 按 **mtime 从旧到新**删到低水位（上限 7/8），记账文件 `<root>/.cache_gc`，**只在超限时扫描**；
+> - 淘汰开销实测 **+0.42 ms/编译**（冷写）、**+0.1 ms/编译**（稳态），命中缓存无可测开销。
+>
+> ## 并发安全：一次真实的 fork 级竞态（合并后套件间歇失败，已定位）
+>
+> 第一版淘汰**合并后套件间歇失败**（600 ok / 2 失败，单跑却过）。放大复现：
+>`PYADAMAS_CACHE_MAX_ENTRIES=8` + `JOBS=16` → **3/3 失败**（ok=510/517/512、OUTPUT DIFF 34–41、
+>link error 55–62），日志是 `ld.bfd: cannot find .../modcache/<key>/mod.o`。
+>
+> 根因：进程 A 在 `set_cache_paths` 拿到 `mod.o` 路径（编译已返回），进程 B 的 GC 在 A **链接之前**
+>把该条目删了。单进程内登记保护无效——这是**跨进程**竞态。
+>
+> 修法：**flock**（宽限期不够——真正危险的是「缓存命中」的旧条目，它 mtime 可能是几小时前）。
+> - 编译进程在 `set_cache_paths` 对 `<root>/.cache_lock` 取 `LOCK_SH`，持有到退出；
+> - 淘汰**推迟到进程退出**：先放共享锁，再 `LOCK_EX|LOCK_NB`；拿不到就跳过，交给下一次退出；
+> - 独占锁在手才扫描+删除，删除前再 `stat` 确认 mtime 未变。
+>
+> **上界是最终一致**：并发高峰可短暂超限（GC 拿不到独占锁就跳过），静默期后的下一次退出收回到低水位。
+>正确性始终安全：**没有任何进程持共享锁时才会删**。
+>
+> ## 验收（我独立复跑）
+>
+> ```
+> PYADAMAS_CACHE_MAX_ENTRIES=8 JOBS=16 套件 ×3：ok=602 diff=0 linkfail=0  （修复前 3/3 失败）
+> ```
+>
+> 另有：600 个互不相同小文件 → 470 条 / 52.8 MB（≤512）；200 次源码变更曲线有界（50/64/60/56）；
+>多单元程序 + cap8 构建正确、退出后 7 条；chmod 500 最老条目后编译 rc=0；
+>ctest 9/9、套件 602 + 2 strict、difftest 545-0、opt_levels 40/40、`checkall --full` 全 PASS。
 ## [0.684] - 2026-11-27
 
 > feat(exc)：**值 raise 也走方案 A 的直接跳**（`raise ValueError("x")` 这类最常见的写法）。
